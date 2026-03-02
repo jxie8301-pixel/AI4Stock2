@@ -19,3 +19,12 @@ results/
 *.csv
 dump_bin.py
 get_data.py
+
+# Sensitive and conversation logs
+*-qlibai4.txt
+cookies.json
+.env
+.claude/
+AI4Stock.txt
+fetch_fails_v2.log
+check_dataset.py

@@ -1,0 +1,42 @@
+"""Qlib initialization and data download."""
+
+import qlib
+from qlib.utils import init_instance_by_config
+from pathlib import Path
+
+
+def init_qlib(provider_uri: str = "./data/qlib_data_cn", region: str = "cn"):
+    """Initialize Qlib with the given data directory and region."""
+    provider_path = Path(provider_uri)
+    qlib.init(provider_uri=str(provider_path.resolve()), region=region)
+    print(f"Qlib initialized: provider_uri={provider_path.resolve()}, region={region}")
+
+
+def download_data(target_dir: str = "./data/qlib_data_cn", region: str = "cn"):
+    """Download stock data using Qlib's built-in script.
+
+    This calls `python -m qlib.run.get_data qlib_data --target_dir <path> --region cn`.
+    Only needs to be run once.
+    """
+    import subprocess
+    import sys
+
+    target_path = Path(target_dir)
+    if target_path.exists() and any(target_path.iterdir()):
+        print(f"Data already exists at {target_path.resolve()}, skipping download.")
+        return
+
+    target_path.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable, "-m", "qlib.run.get_data",
+        "qlib_data",
+        "--target_dir", str(target_path.resolve()),
+        "--region", region,
+    ]
+    print(f"Downloading data: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True)
+    print("Data download complete.")
+
+
+if __name__ == "__main__":
+    download_data()

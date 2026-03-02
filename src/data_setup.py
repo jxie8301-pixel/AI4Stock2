@@ -13,13 +13,14 @@ def init_qlib(provider_uri: str = "./data/qlib_data_cn", region: str = "cn"):
 
 
 def download_data(target_dir: str = "./data/qlib_data_cn", region: str = "cn"):
-    """Download stock data using Qlib's built-in script.
+    """Download stock data using Qlib's official get_data.py script.
 
-    This calls `python -m qlib.run.get_data qlib_data --target_dir <path> --region cn`.
     Only needs to be run once.
     """
     import subprocess
     import sys
+    import urllib.request
+    import os
 
     target_path = Path(target_dir)
     if target_path.exists() and any(target_path.iterdir()):
@@ -27,15 +28,26 @@ def download_data(target_dir: str = "./data/qlib_data_cn", region: str = "cn"):
         return
 
     target_path.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable, "-m", "qlib.run.get_data",
-        "qlib_data",
-        "--target_dir", str(target_path.resolve()),
-        "--region", region,
-    ]
-    print(f"Downloading data: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    print("Data download complete.")
+    
+    script_url = "https://raw.githubusercontent.com/microsoft/qlib/main/scripts/get_data.py"
+    script_path = "get_data.py"
+    
+    try:
+        print(f"Downloading get_data.py from {script_url}...")
+        urllib.request.urlretrieve(script_url, script_path)
+        
+        cmd = [
+            sys.executable, script_path,
+            "qlib_data",
+            "--target_dir", str(target_path.resolve()),
+            "--region", region,
+        ]
+        print(f"Running download script: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+        print("Data download complete.")
+    finally:
+        if os.path.exists(script_path):
+            os.remove(script_path)
 
 
 if __name__ == "__main__":

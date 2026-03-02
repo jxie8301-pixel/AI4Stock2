@@ -14,3 +14,8 @@ data/
 
 # Results
 results/
+*.log
+*.parquet
+*.csv
+dump_bin.py
+get_data.py

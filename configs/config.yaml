@@ -2,16 +2,16 @@ qlib:
   provider_uri: ./data/qlib_data_cn
   region: cn
 
-universe: csi300
+universe: csi300_latest
 
 time:
-  train: ["2008-01-01", "2017-12-31"]
-  valid: ["2018-01-01", "2019-12-31"]
-  test:  ["2020-01-01", "2020-09-25"]
+  train: ["2008-01-01", "2022-12-31"]
+  valid: ["2023-01-01", "2023-12-31"]
+  test:  ["2024-01-01", "2025-12-31"]
 
 features:
   handler: Alpha158
-  lookback: 60
+  lookback: 20
 
 model:
   name: lstm
@@ -22,6 +22,7 @@ model:
   epochs: 200
   early_stop: 20
   batch_size: 2048
+  loss: pearson
 
 strategy:
   topk: 30

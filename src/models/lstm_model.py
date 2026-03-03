@@ -1,12 +1,32 @@
-"""LSTM model for stock prediction (Phase 1).
+"""LSTM model with AMP (Automatic Mixed Precision) and AdamW for maximum performance."""
 
-Uses Qlib's built-in LSTM implementation designed for TSDatasetH.
-The model reads (batch, step_len, d_feat) tensors and predicts a score per stock.
-"""
-
+import torch
 import torch.nn as nn
+import torch.optim as optim
 from qlib.contrib.model.pytorch_lstm_ts import LSTM
 from .utils.losses import PearsonLoss, CCCLoss
+
+class AMPLSTM(LSTM):
+    """Extended LSTM that supports AMP for faster training."""
+    
+    def train_epoch(self, data_loader):
+        self.LSTM_model.train()
+        scaler = torch.cuda.amp.GradScaler()
+
+        for data, weight in data_loader:
+            feature = data[:, :, 0:-1].to(self.device)
+            label = data[:, -1, -1].to(self.device)
+
+            self.train_optimizer.zero_grad()
+            
+            # Use Mixed Precision
+            with torch.cuda.amp.autocast():
+                pred = self.LSTM_model(feature.float())
+                loss = self.loss_fn(pred, label, weight.to(self.device))
+
+            scaler.scale(loss).backward()
+            scaler.step(self.train_optimizer)
+            scaler.update()
 
 def build_lstm_model(
     d_feat: int = 158,
@@ -23,40 +43,10 @@ def build_lstm_model(
     seed: int = 42,
     n_jobs: int = 10,
 ) -> LSTM:
-    """Build an LSTM model for time-series stock prediction.
-
-    Parameters
-    ----------
-    d_feat : int
-        Number of input features (158 for Alpha158).
-    hidden_size : int
-        LSTM hidden state dimension.
-    num_layers : int
-        Number of stacked LSTM layers.
-    dropout : float
-        Dropout rate between LSTM layers.
-    n_epochs : int
-        Maximum training epochs.
-    lr : float
-        Learning rate.
-    early_stop : int
-        Stop training if validation metric doesn't improve for this many epochs.
-    batch_size : int
-        Training batch size.
-    loss : str
-        Loss function. Can be 'mse', 'pearson', or 'ccc'.
-    GPU : int
-        GPU device id. Set to -1 for CPU.
-    n_jobs : int
-        Number of workers for data loading.
-    """
+    """Build an AMP-enabled LSTM model."""
     
-    # Map custom losses
-    # Note: Qlib's base PyTorch model expects loss to be a string like "mse"
-    # or a custom callable. However, Qlib's internal metric_fn might struggle 
-    # if it doesn't recognize the string. We will override it cleanly.
-    
-    model = LSTM(
+    # We use our custom AMPLSTM instead of standard LSTM
+    model = AMPLSTM(
         d_feat=d_feat,
         hidden_size=hidden_size,
         num_layers=num_layers,
@@ -65,19 +55,18 @@ def build_lstm_model(
         lr=lr,
         early_stop=early_stop,
         batch_size=batch_size,
-        loss="mse", # Base Qlib expects a recognized string during init
-        optimizer="adam", # We will override this
+        loss="mse",
+        optimizer="adam",
         GPU=GPU,
         seed=seed,
         n_jobs=n_jobs,
     )
     
-    # Inject AdamW with weight decay for better regularization
-    import torch.optim as optim
+    # Upgrade to AdamW + Weight Decay
     weight_decay = 1e-4
     model.train_optimizer = optim.AdamW(model.LSTM_model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    # Inject our custom loss function dynamically
+    # Inject Custom Loss
     if loss.lower() == "pearson":
         model.loss_fn = PearsonLoss()
         model.loss = "pearson" 
@@ -85,6 +74,6 @@ def build_lstm_model(
         model.loss_fn = CCCLoss()
         model.loss = "ccc"
     
-    print(f"LSTM model built (Optimized): d_feat={d_feat}, hidden={hidden_size}, "
-          f"loss={loss}, n_jobs={n_jobs}, optimizer=AdamW, weight_decay={weight_decay}")
+    print(f"LSTM model built (AMP+AdamW): d_feat={d_feat}, hidden={hidden_size}, "
+          f"loss={loss}, n_jobs={n_jobs}, early_stop=10")
     return model

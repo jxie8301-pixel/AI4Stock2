@@ -21,7 +21,7 @@ model:
   dropout: 0.2
   lr: 0.0005
   epochs: 200
-  early_stop: 20
+  early_stop: 10
   batch_size: 4096
   n_jobs: 8
   loss: pearson

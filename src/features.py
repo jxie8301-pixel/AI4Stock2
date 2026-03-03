@@ -29,6 +29,11 @@ class Alpha158WithValuation(Alpha158):
                 
         return feature_config
 
+    def get_label_config(self):
+        # Realistic Label: Predict return from Next Day Open (T+1) to the Day After Next Open (T+2)
+        # This matches our backtest strategy where we trade at Next Day Open.
+        return ["Ref($open, -2)/Ref($open, -1) - 1"], ["LABEL0"]
+
 
 def build_alpha158_handler(
     instruments: str = "csi300",

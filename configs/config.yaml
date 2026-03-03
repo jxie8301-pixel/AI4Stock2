@@ -2,7 +2,7 @@ qlib:
   provider_uri: ./data/qlib_data_cn
   region: cn
 
-universe: csi300_latest
+universe: csi300_real
 
 time:
   train: ["2016-01-01", "2022-12-31"]

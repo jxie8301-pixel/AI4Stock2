@@ -23,12 +23,20 @@ def run_rolling_pipeline():
     parser.add_argument("--model", default="lstm", help="Model name")
     parser.add_argument("--horizon", type=int, default=120, help="Rolling horizon in trading days (default: ~6 months)")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id")
+    parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
+    parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step (skip training)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     cfg["model"]["name"] = args.model
     
     init_qlib(provider_uri=cfg["qlib"]["provider_uri"], region=cfg["qlib"]["region"])
+    
+    results_dir = Path("results") / f"rolling_{args.model}"
+    models_dir = results_dir / "models"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    if args.save_models or args.load_models:
+        models_dir.mkdir(parents=True, exist_ok=True)
     
     # 1. Setup Rolling Windows
     # We want to test from 2022 to 2025
@@ -41,8 +49,7 @@ def run_rolling_pipeline():
     
     all_predictions = []
     
-    print(f"
-[Rolling Start] Testing from {test_start} to {test_end} with {args.horizon}-day steps.")
+    print(f"\n[Rolling Start] Testing from {test_start} to {test_end} with {args.horizon}-day steps.")
 
     for i, start_idx in enumerate(rolling_steps):
         current_test_start = calendar[start_idx]
@@ -56,8 +63,7 @@ def run_rolling_pipeline():
         valid_start = (current_test_start - pd.Timedelta(days=259)).strftime("%Y-%m-%d")
         valid_end = (current_test_start - pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         
-        print(f"
->>> [Step {i+1}] Window: {current_test_start.date()} to {current_test_end.date()}")
+        print(f"\n>>> [Step {i+1}] Window: {current_test_start.date()} to {current_test_end.date()}")
         print(f"    Train: {train_start} ~ {train_end} | Valid: {valid_start} ~ {valid_end}")
 
         # 2. Build Handler & Dataset for this window
@@ -82,13 +88,26 @@ def run_rolling_pipeline():
             step_len=cfg["features"]["lookback"],
         )
 
-        # 3. Train Model
+        # 3. Train or Load Model
+        model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
         from main import _build_model
-        model = _build_model(cfg, args.gpu)
-        model.fit(dataset)
+        
+        if args.load_models and model_path.exists():
+            print(f"    Loading pre-trained model from {model_path}...")
+            import pickle
+            with open(model_path, "rb") as f:
+                model = pickle.load(f)
+        else:
+            model = _build_model(cfg, args.gpu)
+            model.fit(dataset)
+            if args.save_models:
+                print(f"    Saving model to {model_path}...")
+                model.to_pickle(model_path)
         
         # 4. Predict
         preds = model.predict(dataset)
+        # Ensure MultiIndex is sorted to prevent UnsortedIndexError during slicing
+        preds = preds.sort_index()
         # Only keep predictions for the current test segment
         test_preds = preds.loc[current_test_start:current_test_end]
         all_predictions.append(test_preds)
@@ -97,15 +116,11 @@ def run_rolling_pipeline():
     final_predictions = pd.concat(all_predictions).sort_index()
     
     # 6. Global Evaluation
-    print("
-" + "="*50)
+    print("\n" + "="*50)
     print("GLOBAL ROLLING EVALUATION")
     print("="*50)
     
     # Fetch global labels for the whole test period
-    # To avoid re-calculating features for the whole period, we can reuse the last handler
-    # but technically we need to be careful with normalization fit. 
-    # For IC calculation, we just need the raw labels.
     handler_global = build_alpha158_handler(
         instruments=cfg["universe"],
         start_time=test_start,
@@ -123,8 +138,7 @@ def run_rolling_pipeline():
     print_metrics(signal_metrics)
     
     # 7. Global Backtest
-    print("
-[Global Backtest]")
+    print("\n[Global Backtest]")
     portfolio_metric = run_backtest(
         predictions=final_predictions,
         topk=cfg["strategy"]["topk"],
@@ -145,8 +159,7 @@ def run_rolling_pipeline():
     save_monthly_report(report, save_path=str(results_dir / "monthly_report.csv"))
     
     print_metrics(signal_metrics, portfolio_results)
-    print(f"
-Rolling results saved to {results_dir}")
+    print(f"\nRolling results saved to {results_dir}")
 
 if __name__ == "__main__":
     run_rolling_pipeline()

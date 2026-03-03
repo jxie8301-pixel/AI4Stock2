@@ -138,10 +138,11 @@ def run_rolling_pipeline():
     results_dir = Path("results") / f"rolling_{args.model}"
     results_dir.mkdir(parents=True, exist_ok=True)
     
-    from src.evaluate import plot_cumulative_return, plot_drawdown, plot_monthly_heatmap
+    from src.evaluate import plot_cumulative_return, plot_drawdown, plot_monthly_heatmap, save_monthly_report
     plot_cumulative_return(report, save_path=str(results_dir / "cumulative_return.png"))
     plot_drawdown(report, save_path=str(results_dir / "drawdown.png"))
     plot_monthly_heatmap(report, save_path=str(results_dir / "monthly_heatmap.png"))
+    save_monthly_report(report, save_path=str(results_dir / "monthly_report.csv"))
     
     print_metrics(signal_metrics, portfolio_results)
     print(f"

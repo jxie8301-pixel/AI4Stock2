@@ -150,6 +150,19 @@ def plot_drawdown(report: pd.DataFrame, save_path: str = None):
     plt.close(fig)
 
 
+def save_monthly_report(report: pd.DataFrame, save_path: str = None):
+    """Save monthly returns to a CSV file."""
+    monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
+    df_monthly = monthly_ret.to_frame(name="monthly_return")
+    df_monthly.index.name = "date"
+    
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        df_monthly.to_csv(save_path)
+        print(f"Monthly report saved: {save_path}")
+    return df_monthly
+
+
 def print_metrics(signal_metrics: dict, portfolio_metrics: dict = None):
     """Pretty-print all evaluation metrics."""
     print("\n" + "=" * 50)
@@ -164,7 +177,7 @@ def print_metrics(signal_metrics: dict, portfolio_metrics: dict = None):
         print("=" * 50)
         for category, values in portfolio_metrics.items():
             if category == "monthly_return":
-                continue # Print summary separately
+                continue # Print table separately
             print(f"\n  [{category}]")
             for k, v in values.items():
                 if isinstance(v, float):
@@ -173,10 +186,21 @@ def print_metrics(signal_metrics: dict, portfolio_metrics: dict = None):
                     print(f"    {k:20s}: {v}")
         
         if "monthly_return" in portfolio_metrics:
-            print("\n  [Monthly Returns Summary]")
-            m_rets = list(portfolio_metrics["monthly_return"].values())
-            print(f"    Max Monthly Return   : {max(m_rets):+.2%}")
-            print(f"    Min Monthly Return   : {min(m_rets):+.2%}")
-            print(f"    Positive Months      : {sum(1 for r in m_rets if r > 0)} / {len(m_rets)}")
+            print("\n  [Monthly Returns Table]")
+            m_ret_dict = portfolio_metrics["monthly_return"]
+            # Convert dict back to series for better formatting
+            m_rets = pd.Series(m_ret_dict)
+            m_rets.index = pd.to_datetime(m_rets.index)
+            
+            print(f"    {'Month':<15} | {'Return':>10}")
+            print(f"    {'-'*15}-|-{'-'*10}")
+            for date, ret in m_rets.items():
+                print(f"    {date.strftime('%Y-%m'):<15} | {ret:>+10.2%}")
+            
+            print(f"\n  [Monthly Returns Summary]")
+            m_values = list(m_ret_dict.values())
+            print(f"    Max Monthly Return   : {max(m_values):+.2%}")
+            print(f"    Min Monthly Return   : {min(m_values):+.2%}")
+            print(f"    Positive Months      : {sum(1 for r in m_values if r > 0)} / {len(m_values)}")
             
     print("=" * 50)

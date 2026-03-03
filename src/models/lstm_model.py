@@ -66,20 +66,25 @@ def build_lstm_model(
         early_stop=early_stop,
         batch_size=batch_size,
         loss="mse", # Base Qlib expects a recognized string during init
-        optimizer=optimizer,
+        optimizer="adam", # We will override this
         GPU=GPU,
         seed=seed,
         n_jobs=n_jobs,
     )
     
+    # Inject AdamW with weight decay for better regularization
+    import torch.optim as optim
+    weight_decay = 1e-4
+    model.train_optimizer = optim.AdamW(model.LSTM_model.parameters(), lr=lr, weight_decay=weight_decay)
+    
     # Inject our custom loss function dynamically
     if loss.lower() == "pearson":
         model.loss_fn = PearsonLoss()
-        model.loss = "pearson" # For logging
+        model.loss = "pearson" 
     elif loss.lower() == "ccc":
         model.loss_fn = CCCLoss()
         model.loss = "ccc"
     
-    print(f"LSTM model built: d_feat={d_feat}, hidden={hidden_size}, "
-          f"layers={num_layers}, dropout={dropout}, loss={loss}, n_jobs={n_jobs}")
+    print(f"LSTM model built (Optimized): d_feat={d_feat}, hidden={hidden_size}, "
+          f"loss={loss}, n_jobs={n_jobs}, optimizer=AdamW, weight_decay={weight_decay}")
     return model

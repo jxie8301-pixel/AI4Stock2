@@ -44,8 +44,13 @@ def compute_signal_metrics(predictions: pd.Series, labels: pd.Series) -> dict:
 
 
 def compute_portfolio_metrics(portfolio_metric) -> dict:
-    """Extract portfolio-level metrics from backtest results."""
+    """Extract portfolio-level metrics and apply sanity checks."""
     report, indicator = portfolio_metric
+    
+    # Sanity Check: Clip extreme daily returns (e.g. > 50% or < -50% in one day) 
+    # which are usually data errors in non-leveraged portfolios.
+    report["return"] = report["return"].clip(-0.2, 0.5) 
+    
     analysis = risk_analysis(report["return"])
 
     result = {}

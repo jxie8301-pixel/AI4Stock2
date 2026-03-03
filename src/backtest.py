@@ -54,10 +54,10 @@ def run_backtest(
         "benchmark": benchmark,
         "exchange_kwargs": {
             "freq": "day",
-            "limit_threshold": 0.095,
-            "deal_price": "close",
-            "open_cost": cost_buy,
-            "close_cost": cost_sell,
+            "limit_threshold": 0.095, # 10% Limit Rules
+            "deal_price": "open",      # MORE REALISTIC: Trade at Next Day Open
+            "open_cost": cost_buy + 0.0005,  # Adding 5bps slippage
+            "close_cost": cost_sell + 0.0005, # Adding 5bps slippage
             "min_cost": 5,
         },
     }

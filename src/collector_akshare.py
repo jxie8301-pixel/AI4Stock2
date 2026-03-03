@@ -9,6 +9,7 @@ import sys
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+import pyarrow.parquet as pq
 
 # ======================
 # Cookie 注入与 Requests 劫持 (由 AI4Stock 移植)
@@ -73,12 +74,26 @@ class RequestPatcher:
 # 数据采集逻辑
 # ======================
 
-# Configuration
-CACHE_DIR = Path("data/akshare_cache")
-CSV_DIR = Path("data/akshare_csv")
+# Configuration matching AI4Stock exactly
+RAW_DAILY_DIR = Path("data/raw/daily")
+RAW_VAL_DIR = Path("data/raw/valuation")
+PROCESSED_DIR = Path("data/processed/combined")
+QLIB_CSV_DIR = Path("data/qlib_csv_temp") # Temp dir just for dump_bin
 QLIB_DIR = Path("data/qlib_data_cn")
 
-for d in [CACHE_DIR, CSV_DIR, QLIB_DIR]:
+DAILY_COLS = ['date', 'symbol', 'open', 'high', 'low', 'close', 'volume', 'amount', 'turnover']
+VAL_RENAME_MAP = {
+    '数据日期': 'date', '当日收盘价': 'v_close', '总市值': 'total_mv', '流通市值': 'circ_mv',
+    '总股本': 'total_share', '流通股本': 'circ_share', 'PE(TTM)': 'pe_ttm', 'PE(静)': 'pe_static',
+    '市净率': 'pb', 'PEG值': 'peg', '市现率': 'pcf', '市销率': 'ps'
+}
+
+# ALL fields that will be dumped into Qlib (including factor which we set to 1.0)
+QLIB_FIELDS = ['open', 'high', 'low', 'close', 'volume', 'amount', 'turnover', 
+               'total_mv', 'circ_mv', 'total_share', 'circ_share', 
+               'pe_ttm', 'pe_static', 'pb', 'peg', 'pcf', 'ps', 'factor']
+
+for d in [RAW_DAILY_DIR, RAW_VAL_DIR, PROCESSED_DIR, QLIB_CSV_DIR, QLIB_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 def fetch_stock_list():
@@ -92,80 +107,114 @@ def fetch_stock_list():
         print(f"[!] Error fetching stock list: {e}")
         return []
 
-def fetch_and_save_symbol(symbol, start_date="20080101"):
-    """Fetch daily data (HFQ - 后复权) and save to CSV."""
-    cache_file = CACHE_DIR / f"{symbol}.parquet"
-    existing_df = None
+def save_optimized_parquet(df, path):
+    """Save with zstd compression to match old pipeline."""
+    for col in df.select_dtypes(include=['float64']).columns:
+        df[col] = df[col].astype('float32')
+    for col in df.select_dtypes(include=['int64']).columns:
+        df[col] = df[col].astype('int32')
+    df.to_parquet(path, index=False, engine='pyarrow', compression='zstd')
+
+def fetch_and_fuse(symbol):
+    """Fetch daily and valuation data, fuse them, and save."""
+    target_end_date = pd.Timestamp("2025-12-31")
     
-    if cache_file.exists():
+    # 1. Fetch Daily (HFQ)
+    file_path_d = RAW_DAILY_DIR / f"{symbol}.parquet"
+    current_start_d = "19900101"
+    existing_df_d = None
+    
+    if file_path_d.exists():
         try:
-            existing_df = pd.read_parquet(cache_file)
-            if not existing_df.empty:
-                last_date = pd.to_datetime(existing_df['date']).max()
-                if last_date >= pd.Timestamp.now().normalize() - pd.Timedelta(days=1):
-                    # Data is up to date, just sync CSV
-                    _sync_to_csv(symbol, existing_df)
-                    return True
-                start_date = (last_date + pd.Timedelta(days=1)).strftime("%Y%m%d")
+            existing_df_d = pd.read_parquet(file_path_d)
+            if not existing_df_d.empty:
+                last_d = pd.to_datetime(existing_df_d['date']).max()
+                if last_d < target_end_date:
+                    current_start_d = (last_d + pd.Timedelta(days=1)).strftime("%Y%m%d")
+                else:
+                    current_start_d = None
         except: pass
 
+    if current_start_d:
+        try:
+            df_new = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date=current_start_d, end_date="20251231", adjust="hfq")
+            if df_new is not None and not df_new.empty:
+                df_new = df_new.rename(columns={"日期": "date", "开盘": "open", "收盘": "close", "最高": "high", "最低": "low", "成交量": "volume", "成交额": "amount", "换手率": "turnover"})
+                df_new["date"] = pd.to_datetime(df_new["date"])
+                df_new["symbol"] = symbol
+                if existing_df_d is not None:
+                    df_d = pd.concat([existing_df_d, df_new], ignore_index=True).drop_duplicates(subset=['date']).sort_values('date')
+                else:
+                    df_d = df_new.sort_values('date')
+                save_optimized_parquet(df_d[DAILY_COLS], file_path_d)
+        except Exception:
+            return False
+
+    # 2. Fetch Valuation
+    file_path_v = RAW_VAL_DIR / f"{symbol}.parquet"
+    v_need_update = True
+    if file_path_v.exists():
+        try:
+            meta_v = pq.read_metadata(str(file_path_v))
+            rg_v = meta_v.row_group(meta_v.num_row_groups - 1)
+            max_date_v = pd.Timestamp(rg_v.column(meta_v.schema.names.index('数据日期')).statistics.max)
+            if max_date_v >= target_end_date:
+                v_need_update = False
+        except: pass
+
+    if v_need_update:
+        try:
+            df_v = ak.stock_value_em(symbol=symbol)
+            if df_v is not None and not df_v.empty:
+                save_optimized_parquet(df_v, file_path_v)
+        except Exception:
+            return False
+
+    # 3. Fuse
     try:
-        # 使用 HFQ (后复权)，并将结束日期限制在 2025 年底
-        df_new = ak.stock_zh_a_hist(
-            symbol=symbol, 
-            period="daily", 
-            start_date=start_date, 
-            end_date="20251231", 
-            adjust="hfq"
-        )
+        df_d = pd.read_parquet(file_path_d)
+        df_v = pd.read_parquet(file_path_v).rename(columns=VAL_RENAME_MAP)
+        df_d['date'] = pd.to_datetime(df_d['date'])
+        df_v['date'] = pd.to_datetime(df_v['date'])
         
-        if df_new is not None and not df_new.empty:
-            df_new = df_new.rename(columns={
-                "日期": "date", "开盘": "open", "收盘": "close", 
-                "最高": "high", "最低": "low", "成交量": "volume", 
-                "成交额": "amount", "换手率": "turnover"
-            })
-            df_new["date"] = pd.to_datetime(df_new["date"])
+        df = pd.merge(df_d, df_v, on='date', how='outer').sort_values('date')
+        if 'v_close' in df.columns:
+            df['close'] = df['close'].fillna(df['v_close'])
+            df = df.drop(columns=['v_close'])
             
-            if existing_df is not None:
-                df = pd.concat([existing_df, df_new], ignore_index=True).drop_duplicates(subset=['date']).sort_values('date')
-            else:
-                df = df_new.sort_values('date')
+        for c in ['open', 'high', 'low']: 
+            if c in df.columns: df[c] = df[c].fillna(df['close'])
+        for c in ['volume', 'amount', 'turnover']:
+            if c in df.columns: df[c] = df[c].fillna(0.0)
             
-            df.to_parquet(cache_file, index=False)
-            _sync_to_csv(symbol, df)
-            return True
-        return False
+        df['symbol'] = symbol
+        processed_path = PROCESSED_DIR / f"{symbol}.parquet"
+        save_optimized_parquet(df, processed_path)
+        return True
     except Exception:
         return False
 
-def _sync_to_csv(symbol, df):
-    """Format for Qlib (HFQ prices means factor=1.0)."""
-    qlib_df = df[['date', 'open', 'high', 'low', 'close', 'volume']].copy()
-    qlib_df['factor'] = 1.0
-    qlib_df.to_csv(CSV_DIR / f"{symbol}.csv", index=False)
-
-def import_from_old_project(old_processed_dir):
-    """Import existing HFQ data from AI4Stock project."""
-    old_dir = Path(old_processed_dir)
-    if not old_dir.exists():
-        print(f"[!] Old directory {old_dir} does not exist.")
-        return
-
-    print(f"[*] Importing from {old_dir}...")
-    files = list(old_dir.glob("*.parquet"))
-    for f in tqdm(files, desc="Importing"):
-        target = CACHE_DIR / f.name
-        if not target.exists():
-            import shutil
-            shutil.copy(f, target)
-            try:
-                df = pd.read_parquet(target)
-                _sync_to_csv(f.stem, df)
-            except Exception: pass
-
 def convert_to_qlib():
-    """Run dump_bin.py to convert CSVs to Qlib format."""
+    """Convert combined parquets to CSV temporarily, then run dump_bin.py."""
+    print("[*] Generating temporary CSVs with all features for Qlib...")
+    files = list(PROCESSED_DIR.glob("*.parquet"))
+    
+    for f in tqdm(files, desc="Exporting CSV"):
+        try:
+            df = pd.read_parquet(f)
+            # Ensure factor exists
+            df['factor'] = 1.0
+            
+            # Keep date and all required QLIB_FIELDS. Fill missing cols with NaN.
+            out_cols = ['date'] + QLIB_FIELDS
+            for col in out_cols:
+                if col not in df.columns:
+                    df[col] = float('nan')
+                    
+            df[out_cols].to_csv(QLIB_CSV_DIR / f"{f.stem}.csv", index=False)
+        except Exception as e:
+            pass
+            
     script_path = Path("dump_bin.py")
     if not script_path.exists():
         url = "https://raw.githubusercontent.com/microsoft/qlib/main/scripts/dump_bin.py"
@@ -173,13 +222,17 @@ def convert_to_qlib():
     
     cmd = [
         sys.executable, str(script_path), "dump_all",
-        "--data_path", str(CSV_DIR.resolve()),
+        "--data_path", str(QLIB_CSV_DIR.resolve()),
         "--qlib_dir", str(QLIB_DIR.resolve()),
-        "--include_fields", "open,high,low,close,volume,factor",
+        "--include_fields", ",".join(QLIB_FIELDS),
         "--date_field_name", "date"
     ]
     print(f"[*] Running Qlib conversion: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
+    
+    # Clean up temp CSVs
+    import shutil
+    shutil.rmtree(QLIB_CSV_DIR)
 
 def collect_data(symbols=None, max_workers=4):
     if symbols is None:
@@ -188,7 +241,7 @@ def collect_data(symbols=None, max_workers=4):
     print(f"[*] Processing {len(symbols)} symbols with {max_workers} workers...")
     success_count = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_and_save_symbol, s): s for s in symbols}
+        futures = {executor.submit(fetch_and_fuse, s): s for s in symbols}
         pbar = tqdm(as_completed(futures), total=len(symbols))
         for future in pbar:
             if future.result(): success_count += 1
@@ -201,17 +254,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--all", action="store_true", help="Fetch/update all A-share stocks")
     parser.add_argument("--symbols", help="Comma separated symbols to fetch")
-    parser.add_argument("--import-old", help="Path to AI4Stock combined data dir to import from")
     parser.add_argument("--update", action="store_true", help="Fetch missing data for existing symbols in cache via network")
-    parser.add_argument("--convert", action="store_true", help="Convert CSVs to Qlib binary format")
+    parser.add_argument("--convert", action="store_true", help="Convert processed Parquets to Qlib binary format")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     
-    if args.import_old:
-        import_from_old_project(args.import_old)
-
     if args.all or args.symbols or args.update:
-        # 启动劫持
         patcher = RequestPatcher()
         patcher.load_cookies()
         patcher.patch()
@@ -222,14 +270,13 @@ if __name__ == "__main__":
         elif args.all:
             symbols_to_fetch = fetch_stock_list()
         elif args.update:
-            # 自动寻找本地已有的缓存文件进行增量更新
-            if CACHE_DIR.exists():
-                symbols_to_fetch = [f.stem for f in CACHE_DIR.glob("*.parquet")]
+            if PROCESSED_DIR.exists():
+                symbols_to_fetch = [f.stem for f in PROCESSED_DIR.glob("*.parquet")]
                 
         if symbols_to_fetch:
             collect_data(symbols=symbols_to_fetch, max_workers=args.workers)
         else:
-            print("[!] No symbols to update. Please specify --all, --symbols, or ensure cache directory has files.")
+            print("[!] No symbols to update.")
             
     if args.convert:
         convert_to_qlib()

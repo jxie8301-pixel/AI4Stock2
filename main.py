@@ -20,9 +20,11 @@ def load_config(config_path: str = "configs/config.yaml") -> dict:
 def main():
     parser = argparse.ArgumentParser(description="AI4Stock2 Quantitative Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
-    parser.add_argument("--model", default=None, help="Model name: lstm / transformer")
+    parser.add_argument("--model", default=None, help="Model name: lstm / transformer / lgbm")
     parser.add_argument("--download-only", action="store_true", help="Only download data")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
+    parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
+    parser.add_argument("--save-model", help="Path to save the trained model (e.g. results/lstm/model.pkl)")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id (-1 for CPU)")
     args = parser.parse_args()
 
@@ -87,11 +89,22 @@ def main():
         )
 
     # ── Step 4: Model training ────────────────────────────────────────
-    print(f"\n[Step 4/6] Model Training ({model_name})")
-    model = _build_model(cfg, args.gpu)
-
-    model.fit(dataset)
-    print("Training complete.")
+    if args.load_model:
+        print(f"\n[Step 4/6] Loading Pre-trained Model from {args.load_model}")
+        import pickle
+        with open(args.load_model, "rb") as f:
+            model = pickle.load(f)
+        print("Model loaded successfully. Skipping training.")
+    else:
+        print(f"\n[Step 4/6] Model Training ({model_name})")
+        model = _build_model(cfg, args.gpu)
+        model.fit(dataset)
+        print("Training complete.")
+        
+        if args.save_model:
+            print(f"Saving model to {args.save_model}...")
+            model.to_pickle(args.save_model)
+            print("Model saved.")
 
     # ── Step 5: Prediction & signal evaluation ────────────────────────
     print("\n[Step 5/6] Prediction & Signal Evaluation")

@@ -5,7 +5,7 @@ qlib:
 universe: csi300_latest
 
 time:
-  train: ["2008-01-01", "2022-12-31"]
+  train: ["2016-01-01", "2022-12-31"]
   valid: ["2023-01-01", "2023-12-31"]
   test:  ["2024-01-01", "2025-12-31"]
 
@@ -18,11 +18,12 @@ model:
   name: lstm
   hidden_size: 64
   num_layers: 2
-  dropout: 0.1
-  lr: 0.001
+  dropout: 0.2
+  lr: 0.0005
   epochs: 200
   early_stop: 20
-  batch_size: 2048
+  batch_size: 4096
+  n_jobs: 8
   loss: pearson
 
 strategy:

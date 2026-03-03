@@ -110,12 +110,12 @@ def fetch_and_save_symbol(symbol, start_date="20080101"):
         except: pass
 
     try:
-        # 使用 HFQ (后复权)
+        # 使用 HFQ (后复权)，并将结束日期限制在 2025 年底
         df_new = ak.stock_zh_a_hist(
             symbol=symbol, 
             period="daily", 
             start_date=start_date, 
-            end_date=datetime.datetime.now().strftime("%Y%m%d"), 
+            end_date="20251231", 
             adjust="hfq"
         )
         
@@ -173,12 +173,12 @@ def convert_to_qlib():
     
     cmd = [
         sys.executable, str(script_path), "dump_all",
-        "--csv_path", str(CSV_DIR.resolve()),
+        "--data_path", str(CSV_DIR.resolve()),
         "--qlib_dir", str(QLIB_DIR.resolve()),
         "--include_fields", "open,high,low,close,volume,factor",
         "--date_field_name", "date"
     ]
-    print(f"[*] Running Qlib conversion...")
+    print(f"[*] Running Qlib conversion: {' '.join(cmd)}")
     subprocess.run(cmd, check=True)
 
 def collect_data(symbols=None, max_workers=4):
@@ -202,19 +202,29 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--all", action="store_true")
     parser.add_argument("--import-old", help="Path to AI4Stock combined data dir")
+    parser.add_argument("--import-only", action="store_true", help="Only import from old project and convert, do not fetch from network")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     
-    # 启动劫持
-    patcher = RequestPatcher()
-    patcher.load_cookies()
-    patcher.patch()
-
     if args.import_old:
         import_from_old_project(args.import_old)
-        # 导入后自动同步最新
-        collect_data(max_workers=args.workers)
-    elif args.all:
-        collect_data(max_workers=args.workers)
+        if args.import_only:
+            print("[*] Import only mode active. Skipping network fetch.")
+            convert_to_qlib()
+        else:
+            # 启动劫持
+            patcher = RequestPatcher()
+            patcher.load_cookies()
+            patcher.patch()
+            # 导入后自动同步最新
+            collect_data(max_workers=args.workers)
     else:
-        collect_data(symbols=["000001", "600000"], max_workers=args.workers)
+        # 启动劫持
+        patcher = RequestPatcher()
+        patcher.load_cookies()
+        patcher.patch()
+        
+        if args.all:
+            collect_data(max_workers=args.workers)
+        else:
+            collect_data(symbols=["000001", "600000"], max_workers=args.workers)

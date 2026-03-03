@@ -4,8 +4,9 @@ Uses Qlib's built-in Transformer implementation designed for TSDatasetH.
 Self-attention captures long-range temporal dependencies without sequential processing.
 """
 
+import torch.nn as nn
 from qlib.contrib.model.pytorch_transformer_ts import Transformer
-
+from .utils.losses import PearsonLoss, CCCLoss
 
 def build_transformer_model(
     d_feat: int = 158,
@@ -49,11 +50,20 @@ def build_transformer_model(
         lr=lr,
         early_stop=early_stop,
         batch_size=batch_size,
-        loss=loss,
+        loss="mse", # Init with base string to satisfy base class
         optimizer=optimizer,
         GPU=GPU,
         seed=seed,
     )
+    
+    # Inject custom loss function dynamically
+    if loss.lower() == "pearson":
+        model.loss_fn = PearsonLoss()
+        model.loss = "pearson"
+    elif loss.lower() == "ccc":
+        model.loss_fn = CCCLoss()
+        model.loss = "ccc"
+        
     print(f"Transformer model built: d_feat={d_feat}, d_model={hidden_size}, "
-          f"heads={n_head}, layers={num_layers}")
+          f"heads={n_head}, layers={num_layers}, loss={loss}")
     return model

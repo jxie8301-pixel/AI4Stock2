@@ -4,8 +4,9 @@ Uses Qlib's built-in LSTM implementation designed for TSDatasetH.
 The model reads (batch, step_len, d_feat) tensors and predicts a score per stock.
 """
 
+import torch.nn as nn
 from qlib.contrib.model.pytorch_lstm_ts import LSTM
-
+from .utils.losses import PearsonLoss, CCCLoss
 
 def build_lstm_model(
     d_feat: int = 158,
@@ -41,9 +42,17 @@ def build_lstm_model(
         Stop training if validation metric doesn't improve for this many epochs.
     batch_size : int
         Training batch size.
+    loss : str
+        Loss function. Can be 'mse', 'pearson', or 'ccc'.
     GPU : int
         GPU device id. Set to -1 for CPU.
     """
+    
+    # Map custom losses
+    # Note: Qlib's base PyTorch model expects loss to be a string like "mse"
+    # or a custom callable. However, Qlib's internal metric_fn might struggle 
+    # if it doesn't recognize the string. We will override it cleanly.
+    
     model = LSTM(
         d_feat=d_feat,
         hidden_size=hidden_size,
@@ -53,11 +62,20 @@ def build_lstm_model(
         lr=lr,
         early_stop=early_stop,
         batch_size=batch_size,
-        loss=loss,
+        loss="mse", # Base Qlib expects a recognized string during init
         optimizer=optimizer,
         GPU=GPU,
         seed=seed,
     )
+    
+    # Inject our custom loss function dynamically
+    if loss.lower() == "pearson":
+        model.loss_fn = PearsonLoss()
+        model.loss = "pearson" # For logging
+    elif loss.lower() == "ccc":
+        model.loss_fn = CCCLoss()
+        model.loss = "ccc"
+    
     print(f"LSTM model built: d_feat={d_feat}, hidden={hidden_size}, "
-          f"layers={num_layers}, dropout={dropout}")
+          f"layers={num_layers}, dropout={dropout}, loss={loss}")
     return model

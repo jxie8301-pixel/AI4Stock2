@@ -181,6 +181,7 @@ def _build_model(cfg: dict, gpu: int):
             lr=model_cfg["lr"],
             early_stop=model_cfg["early_stop"],
             batch_size=model_cfg["batch_size"],
+            loss=model_cfg.get("loss", "mse"),
             GPU=gpu,
         )
     elif model_name == "transformer":
@@ -194,6 +195,7 @@ def _build_model(cfg: dict, gpu: int):
             lr=model_cfg["lr"],
             early_stop=model_cfg["early_stop"],
             batch_size=model_cfg["batch_size"],
+            loss=model_cfg.get("loss", "mse"),
             GPU=gpu,
         )
     elif model_name == "lgbm":

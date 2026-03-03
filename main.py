@@ -153,6 +153,7 @@ def main():
             compute_portfolio_metrics,
             plot_cumulative_return,
             plot_drawdown,
+            plot_monthly_heatmap,
         )
 
         portfolio_metric = run_backtest(

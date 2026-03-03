@@ -11,7 +11,7 @@ def run_backtest(
     n_drop: int = 5,
     cost_buy: float = 0.0003,
     cost_sell: float = 0.0013,
-    benchmark: str = "SH000300",
+    benchmark: str = "000001",
 ) -> tuple[pd.DataFrame, dict]:
     """Run daily backtest on model predictions.
 

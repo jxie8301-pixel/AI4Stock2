@@ -21,6 +21,7 @@ def build_lstm_model(
     optimizer: str = "adam",
     GPU: int = 0,
     seed: int = 42,
+    n_jobs: int = 10,
 ) -> LSTM:
     """Build an LSTM model for time-series stock prediction.
 
@@ -46,6 +47,8 @@ def build_lstm_model(
         Loss function. Can be 'mse', 'pearson', or 'ccc'.
     GPU : int
         GPU device id. Set to -1 for CPU.
+    n_jobs : int
+        Number of workers for data loading.
     """
     
     # Map custom losses
@@ -66,6 +69,7 @@ def build_lstm_model(
         optimizer=optimizer,
         GPU=GPU,
         seed=seed,
+        n_jobs=n_jobs,
     )
     
     # Inject our custom loss function dynamically
@@ -77,5 +81,5 @@ def build_lstm_model(
         model.loss = "ccc"
     
     print(f"LSTM model built: d_feat={d_feat}, hidden={hidden_size}, "
-          f"layers={num_layers}, dropout={dropout}, loss={loss}")
+          f"layers={num_layers}, dropout={dropout}, loss={loss}, n_jobs={n_jobs}")
     return model

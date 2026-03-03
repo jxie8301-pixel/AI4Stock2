@@ -205,6 +205,7 @@ def _build_model(cfg: dict, gpu: int):
             batch_size=model_cfg["batch_size"],
             loss=model_cfg.get("loss", "mse"),
             GPU=gpu,
+            n_jobs=model_cfg.get("n_jobs", 12), # Allow configuring workers
         )
     elif model_name == "transformer":
         from src.models.transformer_model import build_transformer_model

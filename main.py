@@ -167,6 +167,7 @@ def main():
 
         plot_cumulative_return(report, save_path=str(results_dir / "cumulative_return.png"))
         plot_drawdown(report, save_path=str(results_dir / "drawdown.png"))
+        plot_monthly_heatmap(report, save_path=str(results_dir / "monthly_heatmap.png"))
 
         print_metrics(signal_metrics, portfolio_results)
 

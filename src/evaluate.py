@@ -44,14 +44,43 @@ def compute_signal_metrics(predictions: pd.Series, labels: pd.Series) -> dict:
 
 
 def compute_portfolio_metrics(portfolio_metric) -> dict:
-    """Extract portfolio-level metrics from backtest results using Qlib's risk_analysis."""
+    """Extract portfolio-level metrics from backtest results."""
     report, indicator = portfolio_metric
     analysis = risk_analysis(report["return"])
 
     result = {}
     for key in analysis.index:
         result[key] = analysis.loc[key].to_dict()
+    
+    # Add monthly returns calculation
+    report.index = pd.to_datetime(report.index)
+    monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
+    result["monthly_return"] = monthly_ret.to_dict()
+    
     return result, report
+
+
+def plot_monthly_heatmap(report: pd.DataFrame, save_path: str = None):
+    """Plot a heatmap of monthly returns (Year vs Month)."""
+    import seaborn as sns
+    
+    monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
+    df_monthly = monthly_ret.to_frame(name="ret")
+    df_monthly["year"] = df_monthly.index.year
+    df_monthly["month"] = df_monthly.index.month
+    
+    pivot_table = df_monthly.pivot(index="year", columns="month", values="ret")
+    
+    fig, ax = plt.subplots(figsize=(12, min(len(pivot_table) * 0.8 + 2, 8)))
+    sns.heatmap(pivot_table, annot=True, fmt=".2%", cmap="RdYlGn", center=0, ax=ax)
+    ax.set_title("Monthly Returns Heatmap")
+    
+    plt.tight_layout()
+    if save_path:
+        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        print(f"Saved: {save_path}")
+    plt.close(fig)
 
 
 def plot_cumulative_return(report: pd.DataFrame, save_path: str = None):
@@ -134,10 +163,20 @@ def print_metrics(signal_metrics: dict, portfolio_metrics: dict = None):
         print("Portfolio Metrics")
         print("=" * 50)
         for category, values in portfolio_metrics.items():
+            if category == "monthly_return":
+                continue # Print summary separately
             print(f"\n  [{category}]")
             for k, v in values.items():
                 if isinstance(v, float):
                     print(f"    {k:20s}: {v:+.4f}")
                 else:
                     print(f"    {k:20s}: {v}")
+        
+        if "monthly_return" in portfolio_metrics:
+            print("\n  [Monthly Returns Summary]")
+            m_rets = list(portfolio_metrics["monthly_return"].values())
+            print(f"    Max Monthly Return   : {max(m_rets):+.2%}")
+            print(f"    Min Monthly Return   : {min(m_rets):+.2%}")
+            print(f"    Positive Months      : {sum(1 for r in m_rets if r > 0)} / {len(m_rets)}")
+            
     print("=" * 50)

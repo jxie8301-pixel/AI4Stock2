@@ -194,37 +194,42 @@ def collect_data(symbols=None, max_workers=4):
             if future.result(): success_count += 1
             pbar.set_postfix({"Success": success_count})
             
-    if success_count > 0:
-        convert_to_qlib()
+    print(f"[+] Data collection finished. {success_count} symbols processed.")
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--all", action="store_true")
-    parser.add_argument("--import-old", help="Path to AI4Stock combined data dir")
-    parser.add_argument("--import-only", action="store_true", help="Only import from old project and convert, do not fetch from network")
+    parser.add_argument("--all", action="store_true", help="Fetch/update all A-share stocks")
+    parser.add_argument("--symbols", help="Comma separated symbols to fetch")
+    parser.add_argument("--import-old", help="Path to AI4Stock combined data dir to import from")
+    parser.add_argument("--update", action="store_true", help="Fetch missing data for existing symbols in cache via network")
+    parser.add_argument("--convert", action="store_true", help="Convert CSVs to Qlib binary format")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     
     if args.import_old:
         import_from_old_project(args.import_old)
-        if args.import_only:
-            print("[*] Import only mode active. Skipping network fetch.")
-            convert_to_qlib()
-        else:
-            # 启动劫持
-            patcher = RequestPatcher()
-            patcher.load_cookies()
-            patcher.patch()
-            # 导入后自动同步最新
-            collect_data(max_workers=args.workers)
-    else:
+
+    if args.all or args.symbols or args.update:
         # 启动劫持
         patcher = RequestPatcher()
         patcher.load_cookies()
         patcher.patch()
         
-        if args.all:
-            collect_data(max_workers=args.workers)
+        symbols_to_fetch = []
+        if args.symbols:
+            symbols_to_fetch = args.symbols.split(",")
+        elif args.all:
+            symbols_to_fetch = fetch_stock_list()
+        elif args.update:
+            # 自动寻找本地已有的缓存文件进行增量更新
+            if CACHE_DIR.exists():
+                symbols_to_fetch = [f.stem for f in CACHE_DIR.glob("*.parquet")]
+                
+        if symbols_to_fetch:
+            collect_data(symbols=symbols_to_fetch, max_workers=args.workers)
         else:
-            collect_data(symbols=["000001", "600000"], max_workers=args.workers)
+            print("[!] No symbols to update. Please specify --all, --symbols, or ensure cache directory has files.")
+            
+    if args.convert:
+        convert_to_qlib()

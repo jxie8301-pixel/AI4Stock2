@@ -66,18 +66,25 @@ def main():
 
     # ── Step 3: Dataset construction ──────────────────────────────────
     print("\n[Step 3/6] Dataset Construction")
-    from src.dataset import build_ts_dataset
+    from src.dataset import build_ts_dataset, build_tabular_dataset
 
     segments = {
         "train": tuple(cfg["time"]["train"]),
         "valid": tuple(cfg["time"]["valid"]),
         "test": tuple(cfg["time"]["test"]),
     }
-    dataset = build_ts_dataset(
-        handler=handler,
-        segments=segments,
-        step_len=cfg["features"]["lookback"],
-    )
+    
+    if model_name == "lgbm":
+        dataset = build_tabular_dataset(
+            handler=handler,
+            segments=segments,
+        )
+    else:
+        dataset = build_ts_dataset(
+            handler=handler,
+            segments=segments,
+            step_len=cfg["features"]["lookback"],
+        )
 
     # ── Step 4: Model training ────────────────────────────────────────
     print(f"\n[Step 4/6] Model Training ({model_name})")
@@ -97,12 +104,16 @@ def main():
     predictions = model.predict(dataset)
 
     # Get test labels for IC calculation
-    test_label = dataset.prepare("test", col_set="label", data_key="learn")
+    test_label = dataset.handler.fetch(col_set="label")
+    # Filter label to test period only
+    test_start = cfg["time"]["test"][0]
+    test_end = cfg["time"]["test"][1]
+    test_label = test_label.loc[(slice(test_start, test_end), slice(None)), :]
+    
     if hasattr(test_label, "iloc"):
         test_label = test_label.iloc[:, 0]
 
     # Filter predictions to test period only
-    test_start = cfg["time"]["test"][0]
     test_preds = predictions.loc[predictions.index.get_level_values(0) >= test_start]
 
     # Align predictions and labels
@@ -185,8 +196,11 @@ def _build_model(cfg: dict, gpu: int):
             batch_size=model_cfg["batch_size"],
             GPU=gpu,
         )
+    elif model_name == "lgbm":
+        from src.models.lgbm_model import build_lgbm_model
+        return build_lgbm_model()
     else:
-        raise ValueError(f"Unknown model: {model_name}. Choose from: lstm, transformer")
+        raise ValueError(f"Unknown model: {model_name}. Choose from: lstm, transformer, lgbm")
 
 
 if __name__ == "__main__":

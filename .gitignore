@@ -28,3 +28,4 @@ cookies.json
 AI4Stock.txt
 fetch_fails_v2.log
 check_dataset.py
+mlruns/

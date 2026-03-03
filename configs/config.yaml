@@ -12,6 +12,7 @@ time:
 features:
   handler: Alpha158
   lookback: 20
+  use_valuation: True
 
 model:
   name: lstm

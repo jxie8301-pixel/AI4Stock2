@@ -64,6 +64,7 @@ def main():
         end_time=cfg["time"]["test"][1],
         fit_start_time=cfg["time"]["train"][0],
         fit_end_time=cfg["time"]["train"][1],
+        use_valuation=cfg["features"].get("use_valuation", True),
     )
 
     # ── Step 3: Dataset construction ──────────────────────────────────
@@ -182,11 +183,18 @@ def _build_model(cfg: dict, gpu: int):
     """Build model based on config."""
     model_name = cfg["model"]["name"]
     model_cfg = cfg["model"]
+    
+    # Dynamically calculate d_feat
+    # Alpha158 base features = 158
+    # Valuation factors added = 8 (pe_ttm, pb, ps, pcf, peg, total_mv, circ_mv, turnover)
+    d_feat = 158
+    if cfg["features"].get("use_valuation", True):
+        d_feat += 8
 
     if model_name == "lstm":
         from src.models.lstm_model import build_lstm_model
         return build_lstm_model(
-            d_feat=158,
+            d_feat=d_feat,
             hidden_size=model_cfg["hidden_size"],
             num_layers=model_cfg["num_layers"],
             dropout=model_cfg["dropout"],
@@ -200,7 +208,7 @@ def _build_model(cfg: dict, gpu: int):
     elif model_name == "transformer":
         from src.models.transformer_model import build_transformer_model
         return build_transformer_model(
-            d_feat=158,
+            d_feat=d_feat,
             hidden_size=model_cfg["hidden_size"],
             num_layers=model_cfg["num_layers"],
             dropout=model_cfg["dropout"],

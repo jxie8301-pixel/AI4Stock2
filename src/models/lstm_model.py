@@ -1,32 +1,10 @@
-"""LSTM model with AMP (Automatic Mixed Precision) and AdamW for maximum performance."""
+"""Stable LSTM model for AI4Stock2. Reverted extreme optimizations for stability."""
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from qlib.contrib.model.pytorch_lstm_ts import LSTM
 from .utils.losses import PearsonLoss, CCCLoss
-
-class AMPLSTM(LSTM):
-    """Extended LSTM that supports AMP for faster training."""
-    
-    def train_epoch(self, data_loader):
-        self.LSTM_model.train()
-        scaler = torch.cuda.amp.GradScaler()
-
-        for data, weight in data_loader:
-            feature = data[:, :, 0:-1].to(self.device)
-            label = data[:, -1, -1].to(self.device)
-
-            self.train_optimizer.zero_grad()
-            
-            # Use Mixed Precision
-            with torch.cuda.amp.autocast():
-                pred = self.LSTM_model(feature.float())
-                loss = self.loss_fn(pred, label, weight.to(self.device))
-
-            scaler.scale(loss).backward()
-            scaler.step(self.train_optimizer)
-            scaler.update()
 
 def build_lstm_model(
     d_feat: int = 158,
@@ -43,10 +21,9 @@ def build_lstm_model(
     seed: int = 42,
     n_jobs: int = 10,
 ) -> LSTM:
-    """Build an AMP-enabled LSTM model."""
+    """Build a stable LSTM model with AdamW and custom loss support."""
     
-    # We use our custom AMPLSTM instead of standard LSTM
-    model = AMPLSTM(
+    model = LSTM(
         d_feat=d_feat,
         hidden_size=hidden_size,
         num_layers=num_layers,
@@ -55,14 +32,14 @@ def build_lstm_model(
         lr=lr,
         early_stop=early_stop,
         batch_size=batch_size,
-        loss="mse",
+        loss="mse", # Satisfy base class init
         optimizer="adam",
         GPU=GPU,
         seed=seed,
         n_jobs=n_jobs,
     )
     
-    # Upgrade to AdamW + Weight Decay
+    # Use AdamW + Weight Decay for better generalization (This part was stable)
     weight_decay = 1e-4
     model.train_optimizer = optim.AdamW(model.LSTM_model.parameters(), lr=lr, weight_decay=weight_decay)
     
@@ -74,6 +51,5 @@ def build_lstm_model(
         model.loss_fn = CCCLoss()
         model.loss = "ccc"
     
-    print(f"LSTM model built (AMP+AdamW): d_feat={d_feat}, hidden={hidden_size}, "
-          f"loss={loss}, n_jobs={n_jobs}, early_stop=10")
+    print(f"LSTM model built (Stable): d_feat={d_feat}, batch={batch_size}, loss={loss}, n_jobs={n_jobs}")
     return model

@@ -4,61 +4,49 @@
 
 本项目使用 `akshare` 并结合 Cookie 劫持来稳定获取全市场 A 股（量价+估值）数据。你需要手动执行数据同步。
 
-### 首次导入（若有旧项目数据）
-如果你从旧的 AI4Stock 项目迁移，请先将旧的 `data/raw` 和 `data/processed` 文件夹复制到本项目的 `data/` 目录下。
+### 同步旧项目数据
+建议直接将旧 `AI4Stock` 项目的 `data/raw` 和 `data/processed` 文件夹复制到本项目的 `data/` 目录下，实现无缝衔接。
 
 ### 增量更新与转换
-运行以下命令，它会自动下载缺失的最新数据，并将其转换为 Qlib 高效的二进制格式（存入 `data/qlib_data_cn`）：
+运行以下命令，自动补全缺失数据并生成 Qlib 二进制格式：
 ```bash
+# 更新数据并转换
 python src/collector_akshare.py --update --convert --workers 8
 ```
 
-## 2. 运行模型与策略 (Training & Evaluation)
+## 2. 核心运行模式 (Core Workflow)
 
-默认配置下，系统将执行：因子计算 -> 数据集切分 -> 模型训练 -> 信号评价 -> 回测。
-
-### 基础运行 (默认 LSTM)
+### 滚动训练与回测 (推荐实战模式)
+这是目前最强大的模式，每 6 个月重训一次模型以应对风格漂移：
 ```bash
-python main.py
+python run_rolling.py --model lstm --horizon 120 --save-models --gpu 0
 ```
 
-### 切换模型 (支持 lgbm / lstm / transformer)
+### 单次实验 (研究模式)
+用于快速验证想法：
 ```bash
-python main.py --model lgbm
+python main.py --model lstm --save-model results/lstm/model.pkl
 ```
 
-### 仅测试信号 (跳过耗时的回测引擎)
-如果你只想查看 IC/ICIR 等模型预测指标：
+## 3. 模型复用 (Save & Load)
+
+利用之前保存的滚动专家模型，实现秒级快速回测：
 ```bash
-python main.py --skip-backtest
+# 加载滚动模型库
+python run_rolling.py --model lstm --horizon 120 --load-models
 ```
 
-## 3. 模型保存与快速复用 (Save & Load)
+## 4. 关键参数微调 (`configs/config.yaml`)
 
-深度学习模型训练耗时较长。你可以将训练好的模型保存下来，后续修改策略参数（如换手率、手续费）时直接加载，实现秒级回测。
+- **股票池** (`universe`): 强烈建议使用 `csi300_real`（纯净版沪深300）。
+- **回看天数** (`lookback`): 建议设为 `20`（抓取短期时序特征）。
+- **训练历史**: 建议从 `2016-01-01` 开始，以适应当前的机构化行情。
+- **交易约束**: 在 `src/backtest.py` 中已默认开启“涨跌停禁止交易”和“开盘价成交”。
 
-**保存模型：**
-```bash
-python main.py --model lstm --save-model results/lstm/best_model.pkl
-```
+## 5. 结果分析 (Analysis)
 
-**加载模型并极速回测（跳过训练）：**
-```bash
-python main.py --model lstm --load-model results/lstm/best_model.pkl
-```
-
-## 4. 结果分析 (Analysis)
-
-所有运行结果将按模型分类存储在 `results/` 目录下：
-- `results/<model>/ic_series.png`: 信号质量（IC）随时间的变化图。
-- `results/<model>/cumulative_return.png`: 策略累计收益率曲线（对比基准）。
-- `results/<model>/drawdown.png`: 策略回撤曲线。
-- `results/<model>/signal_metrics.json`: IC, ICIR, Rank IC 等核心指标。
-
-## 5. 参数微调
-
-你可以直接修改 `configs/config.yaml` 来调整：
-- **损失函数** (`loss`): 可选 `mse` / `pearson` / `ccc`。强烈建议使用 `pearson` 以优化排名。
-- **回看天数** (`lookback`): 影响模型输入的历史序列长度（建议 20 天）。
-- **训练/验证/测试集比例** (`time`): 控制模型的训练范围与回测区间。
-- **策略参数** (`topk` 和 `n_drop`): 控制选股数量和换手率。
+所有运行结果保存在 `results/rolling_lstm/` 目录下：
+- `monthly_heatmap.png`: 月度收益红绿矩阵图。
+- `monthly_report.csv`: **数字化月度报表**，方便 AI 进一步分析。
+- `cumulative_return.png`: 包含真实滑点与限制的收益曲线。
+- `models/`: 存放各时间段的专家模型权重。

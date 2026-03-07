@@ -181,17 +181,51 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     
     id_to_symbol = {v: k for k, v in meta["symbol_to_id"].items()}
     
-    print("\n[Step 2/6] Vectorized Time Splitting")
+    print("\n[Step 2/6] Vectorized Time Splitting & Universe Filtering")
     dt_index = pd.to_datetime(dates)
     
-    train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1]))
-    valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1]))
-    test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1]))
+    # --- Universe Filtering ---
+    universe_name = cfg.get("universe", "all")
+    valid_symbol_ids = set()
+    if universe_name != "all":
+        try:
+            # Attempt to read the universe file
+            # Format: '600000\t2005-01-01\t2099-12-31'
+            uni_path = Path(cfg["qlib"]["provider_uri"]) / "instruments" / f"{universe_name}.txt"
+            if uni_path.exists():
+                with open(uni_path, "r") as f:
+                    # Extract raw symbols, e.g., '600000'
+                    uni_symbols = set([line.split('\t')[0].strip() for line in f])
+                
+                # Match against the keys in meta["symbol_to_id"]
+                # gen_feature keys usually look like 'SH600000' or '600000.SH'
+                for sym_key, sym_id in meta["symbol_to_id"].items():
+                    # We strip non-digit characters to match with universe
+                    raw_digit = ''.join(filter(str.isdigit, sym_key))
+                    if raw_digit in uni_symbols:
+                        valid_symbol_ids.add(sym_id)
+                print(f"[*] Universe '{universe_name}' loaded. Mapped to {len(valid_symbol_ids)} symbols.")
+            else:
+                print(f"[!] Universe file not found at {uni_path}. Defaulting to full market.")
+        except Exception as e:
+            print(f"[!] Error parsing universe {universe_name}: {e}. Defaulting to full market.")
+            
+    # Create universe mask
+    if valid_symbol_ids:
+        # np.isin is fast and works perfectly on memmap/ndarrays
+        uni_mask = np.isin(symbols, list(valid_symbol_ids))
+    else:
+        uni_mask = np.ones(num_rows, dtype=bool)
+
+    # --- Time Splitting (Intersection with Universe) ---
+    train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1])) & uni_mask
+    valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1])) & uni_mask
+    test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1])) & uni_mask
     
     print("\n[Step 3/6] Initializing Native Datasets")
-    train_dataset = NativeStockDataset(np.array(X[train_mask]), np.array(y[train_mask]), np.array(symbols[train_mask]), lookback=lookback)
-    valid_dataset = NativeStockDataset(np.array(X[valid_mask]), np.array(y[valid_mask]), np.array(symbols[valid_mask]), lookback=lookback)
-    test_dataset = NativeStockDataset(np.array(X[test_mask]), np.array(y[test_mask]), np.array(symbols[test_mask]), lookback=lookback)
+    train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback)
+    valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback)
+    test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback)
     
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
     valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)

@@ -41,11 +41,12 @@ class PearsonLoss(nn.Module):
         p_var = torch.sum(p_centered ** 2)
         t_var = torch.sum(t_centered ** 2)
 
-        # Add a small epsilon to avoid division by zero
+        # Add a small epsilon inside the sqrt to avoid division by zero and INFINITE gradients
         epsilon = 1e-8
         
         # Pearson correlation coefficient
-        corr = cov / (torch.sqrt(p_var * t_var) + epsilon)
+        # Note: epsilon must be inside sqrt to prevent grad of sqrt(0) -> inf
+        corr = cov / torch.sqrt(p_var * t_var + epsilon)
 
         # We want to MAXIMIZE correlation, so we MINIMIZE negative correlation
         return -corr

@@ -2,6 +2,9 @@ qlib:
   provider_uri: ./data/qlib_data_cn
   region: cn
 
+backend: native
+alpha_version: 158
+
 universe: csi300_real
 
 time:

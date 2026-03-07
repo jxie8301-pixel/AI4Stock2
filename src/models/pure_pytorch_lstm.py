@@ -35,13 +35,10 @@ class NativeStockDataset(Dataset):
         self.lookback = lookback
         
         # 1. Find all rows where the stock symbol has been continuous for 'lookback' days
-        # A valid window ending at 'i' must have the same symbol at 'i' and 'i - lookback + 1'
-        # Since the data is sorted by symbol -> date, this ensures the whole window is the same stock.
         continuous_mask = np.zeros_like(mask, dtype=bool)
         continuous_mask[lookback - 1:] = (full_symbols[lookback - 1:] == full_symbols[:-lookback + 1])
         
         # 2. Intersect with the user-provided mask (e.g. train/valid split mask)
-        # We only want to yield windows whose TARGET (end of window) falls within the split mask.
         final_valid_mask = continuous_mask & mask
         
         # 3. Store the actual global integer indices of the END of each valid window
@@ -52,27 +49,31 @@ class NativeStockDataset(Dataset):
 
     def __getitem__(self, idx):
         end_idx = self.valid_end_indices[idx]
-        # The window slice in the global array is [end_idx - lookback + 1 : end_idx + 1]
         start_idx = end_idx - self.lookback + 1
         
         # X: (lookback, F)
         x = self.features[start_idx : end_idx + 1]
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         
-        # Clamp extreme values to prevent AMP (float16) overflow (max is 65504)
-        # Financial features should generally be small after standardization.
-        # Extreme unscaled values like 10^15 will destroy the network.
+        # Clamp extreme features (Winsorization) to stabilize training
         x = torch.clamp(x, min=-10.0, max=10.0)
         
         # Y: scalar (the label at the END of the window)
         y = self.labels[end_idx]
         
+        # Clamp labels to handle extreme outliers (matches CSRankNorm spirit)
+        if not torch.isnan(y) and not torch.isinf(y):
+            y = torch.clamp(y, min=-0.1, max=0.1)
+        
         return x, y
 
 
 class PureLSTM(nn.Module):
-    def __init__(self, d_feat: int, hidden_size: int = 64, num_layers: int = 2, dropout: float = 0.2):
+    def __init__(self, d_feat: int, hidden_size: int = 64, num_layers: int = 2, dropout: float = 0.0):
         super().__init__()
+        # LayerNorm is crucial for raw, un-normalized technical features
+        self.norm = nn.LayerNorm(d_feat)
+        
         self.rnn = nn.LSTM(
             input_size=d_feat,
             hidden_size=hidden_size,
@@ -84,6 +85,7 @@ class PureLSTM(nn.Module):
         
     def forward(self, x):
         # x: (Batch, Time, Features)
+        x = self.norm(x)
         out, _ = self.rnn(x)
         # Take the output of the last time step
         last_step_out = out[:, -1, :]
@@ -91,15 +93,15 @@ class PureLSTM(nn.Module):
 
 
 class NativeLSTMTrainer:
-    """Trainer class decoupled from Qlib."""
+    """Trainer class decoupled from Qlib, optimized for stability."""
     def __init__(self, d_feat: int, hidden_size: int = 64, num_layers: int = 2, 
-                 dropout: float = 0.2, lr: float = 0.0005, loss_type: str = "pearson",
+                 dropout: float = 0.0, lr: float = 0.001, loss_type: str = "pearson",
                  device: str = "cuda" if torch.cuda.is_available() else "cpu"):
         self.device = device
         self.model = PureLSTM(d_feat, hidden_size, num_layers, dropout).to(self.device)
         
-        # Optimizer
-        self.optimizer = optim.AdamW(self.model.parameters(), lr=lr, weight_decay=1e-4)
+        # Optimizer - matching Qlib baseline (Adam, not AdamW)
+        self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
         
         # Loss function
         if loss_type == "pearson":
@@ -116,7 +118,7 @@ class NativeLSTMTrainer:
             x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
             
-            # Mask out NaN labels
+            # Mask out NaN and Inf labels
             mask = ~torch.isnan(y) & ~torch.isinf(y)
             if not mask.any():
                 continue
@@ -127,7 +129,9 @@ class NativeLSTMTrainer:
             pred = self.model(x_masked)
             loss = self.loss_fn(pred, y_masked)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+
+            # Match Qlib's gradient value clipping (3.0 is a safe threshold)
+            torch.nn.utils.clip_grad_value_(self.model.parameters(), 3.0)
             self.optimizer.step()
                 
             total_loss += loss.item()

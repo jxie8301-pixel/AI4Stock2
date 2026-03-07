@@ -1,0 +1,36 @@
+qlib:
+  provider_uri: ./data/qlib_data_cn
+  region: cn
+
+universe: csi300_real
+
+time:
+  train: ["2016-01-01", "2022-12-31"]
+  valid: ["2023-01-01", "2023-12-31"]
+  test:  ["2024-01-01", "2025-12-31"]
+
+features:
+  handler: Alpha158
+  lookback: 20
+  use_valuation: True
+
+model:
+  name: lstm
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.2
+  lr: 0.0005
+  epochs: 200
+  early_stop: 10
+  batch_size: 4096
+  n_jobs: 8
+  loss: pearson
+
+strategy:
+  topk: 30
+  n_drop: 5
+
+backtest:
+  cost:
+    buy: 0.0003
+    sell: 0.0013

@@ -249,26 +249,18 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     trainer.model.eval()
     all_preds = []
     
-    test_dates = dt_index[test_mask]
-    test_symbols = symbols[test_mask]
-    
     with torch.no_grad():
         for x, _ in test_loader:
             x = x.to(device)
-            if trainer.scaler:
-                with torch.amp.autocast('cuda'):
-                    p = trainer.model(x)
-            else:
-                p = trainer.model(x)
+            p = trainer.model(x)
             all_preds.append(p.cpu().numpy())
             
     preds_arr = np.concatenate(all_preds)
     
-    valid_starts = test_dataset.valid_starts
-    end_indices = valid_starts + lookback - 1
+    end_indices = test_dataset.valid_end_indices
     
-    aligned_dates = test_dates[end_indices]
-    aligned_symbols = [id_to_symbol[sym] for sym in test_symbols[end_indices]]
+    aligned_dates = dt_index[end_indices]
+    aligned_symbols = [id_to_symbol[sym] for sym in symbols[end_indices]]
     
     pred_series = pd.Series(
         preds_arr, 
@@ -276,7 +268,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     ).sort_index()
     
     label_series = pd.Series(
-        np.array(y[test_mask])[end_indices],
+        y[end_indices],
         index=pred_series.index
     )
     
@@ -288,10 +280,43 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         print(f"\n[Step 6/6] Backtest skipped.\n\nAll native results saved to: {results_dir}/")
         return
         
-    print("\n[Step 6/6] Native Backtest (Pending Phase 3)")
-    print_metrics(signal_metrics)
-    print("Warning: Qlib backtest disabled in native mode. Custom Pandas backtester needed.")
-    print("Run Qlib mode for full backtesting for now.")
+    # --- Step 6: Native Backtest ---
+    print("\n[Step 6/6] Native Vectorized Backtest")
+    from src.native_backtest import run_native_backtest
+    from src.evaluate import (
+        compute_portfolio_metrics,
+        plot_cumulative_return,
+        plot_drawdown,
+        plot_monthly_heatmap,
+        save_monthly_report,
+    )
+    
+    backtest_report = run_native_backtest(
+        preds=pred_series,
+        labels=label_series,
+        topk=cfg["strategy"]["topk"],
+        cost_buy=cfg["backtest"]["cost"]["buy"],
+        cost_sell=cfg["backtest"]["cost"]["sell"]
+    )
+    
+    # Rename for compatibility with plot functions
+    plot_report = backtest_report.rename(columns={'net_return': 'return'})
+    
+    # Pass a tuple (report, indicator) to match Qlib's expected format in evaluate.py
+    portfolio_results, _ = compute_portfolio_metrics((plot_report, None))
+    
+    # Generate native-specific plots/reports
+    plot_cumulative_return(plot_report, save_path=str(results_dir / "native_cumulative_return.png"))
+    plot_drawdown(plot_report, save_path=str(results_dir / "native_drawdown.png"))
+    plot_monthly_heatmap(plot_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
+    save_monthly_report(plot_report, save_path=str(results_dir / "native_monthly_report.csv"))
+    
+    print_metrics(signal_metrics, portfolio_results)
+    with open(results_dir / "native_portfolio_metrics.json", "w") as f:
+        json.dump(portfolio_results, f, indent=2, default=str)
+        
+    print(f"\nAll native results saved to: {results_dir}/")
+    print("Done!")
 
 def _build_model(cfg: dict, gpu: int):
     """Build model based on config."""

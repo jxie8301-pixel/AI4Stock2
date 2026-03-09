@@ -37,6 +37,12 @@ def run_native_backtest(
     """
     print(f"[*] Starting Native Vectorized Backtest (Top-{topk}, Rebalance: {rebalance_freq} days)...")
     
+    # Sanity Check / Limit-Up Illusion Prevention:
+    # A-shares have a 10% daily limit (20% for STAR/ChiNext). 
+    # Any single-day return > 25% or < -25% is almost certainly a data error (unadjusted split) or extreme outlier.
+    # We clip labels to realistic daily boundaries to prevent a single bad data point from inflating the portfolio by 100%.
+    labels = labels.clip(lower=-0.15, upper=0.25)
+    
     # Ensure indices are aligned
     common_idx = preds.index.intersection(labels.index)
     preds = preds.loc[common_idx]
@@ -47,14 +53,17 @@ def run_native_backtest(
     preds_matrix = preds.unstack(level='instrument')
     
     # Apply rebalance frequency: Only keep predictions on rebalance days
-    # We take every Nth row. Other days get NaN predictions.
+    # We take every Nth row.
     rebalance_dates = preds_matrix.index[::rebalance_freq]
     
     # Create a mask for rebalance days
     is_rebalance_day = preds_matrix.index.isin(rebalance_dates)
     
-    # Rank only on rebalance days, then forward fill the ranks to keep the same portfolio
-    ranks_matrix = preds_matrix.where(is_rebalance_day).rank(axis=1, ascending=False, method='first').ffill()
+    # Rank only on rebalance days
+    rebalance_ranks = preds_matrix.loc[is_rebalance_day].rank(axis=1, ascending=False, method='first')
+    
+    # Reindex back to the full date range and forward fill the ranks to keep the same portfolio
+    ranks_matrix = rebalance_ranks.reindex(preds_matrix.index).ffill()
     
     # Re-stack to Series
     ranks = ranks_matrix.stack()

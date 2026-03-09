@@ -312,8 +312,17 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     save_monthly_report(plot_report, save_path=str(results_dir / "native_monthly_report.csv"))
     
     print_metrics(signal_metrics, portfolio_results)
+    
+    # JSON keys must be strings, convert any Timestamp keys (e.g. from monthly returns) to strings
+    def sanitize_dict_keys(d):
+        if not isinstance(d, dict):
+            return d
+        return {str(k): sanitize_dict_keys(v) for k, v in d.items()}
+        
+    safe_portfolio_results = sanitize_dict_keys(portfolio_results)
+    
     with open(results_dir / "native_portfolio_metrics.json", "w") as f:
-        json.dump(portfolio_results, f, indent=2, default=str)
+        json.dump(safe_portfolio_results, f, indent=2, default=str)
         
     print(f"\nAll native results saved to: {results_dir}/")
     print("Done!")

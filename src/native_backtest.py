@@ -9,7 +9,8 @@ def run_native_backtest(
     labels: pd.Series, 
     topk: int = 30, 
     cost_buy: float = 0.0003, 
-    cost_sell: float = 0.0013
+    cost_sell: float = 0.0013,
+    rebalance_freq: int = 1
 ) -> pd.DataFrame:
     """
     Perform a fast vectorized backtest on a Top-K long-only strategy.
@@ -26,22 +27,37 @@ def run_native_backtest(
         Transaction cost for buying (e.g., 0.03%).
     cost_sell : float
         Transaction cost for selling (e.g., 0.13% including stamp duty).
+    rebalance_freq : int
+        How often to rebalance in trading days. 1 = daily, 5 = weekly.
         
     Returns
     -------
     pd.DataFrame
         Daily report containing returns, turnover, and cumulative metrics.
     """
-    print(f"[*] Starting Native Vectorized Backtest (Top-{topk})...")
+    print(f"[*] Starting Native Vectorized Backtest (Top-{topk}, Rebalance: {rebalance_freq} days)...")
     
     # Ensure indices are aligned
     common_idx = preds.index.intersection(labels.index)
     preds = preds.loc[common_idx]
     labels = labels.loc[common_idx]
 
-    # 1. Rank predictions daily (Descending)
-    # Use 'first' method to break ties consistently
-    ranks = preds.groupby(level='datetime').rank(ascending=False, method='first')
+    # 1. Rank predictions
+    # We unstack to get a (date x instrument) matrix for easier time-based filtering
+    preds_matrix = preds.unstack(level='instrument')
+    
+    # Apply rebalance frequency: Only keep predictions on rebalance days
+    # We take every Nth row. Other days get NaN predictions.
+    rebalance_dates = preds_matrix.index[::rebalance_freq]
+    
+    # Create a mask for rebalance days
+    is_rebalance_day = preds_matrix.index.isin(rebalance_dates)
+    
+    # Rank only on rebalance days, then forward fill the ranks to keep the same portfolio
+    ranks_matrix = preds_matrix.where(is_rebalance_day).rank(axis=1, ascending=False, method='first').ffill()
+    
+    # Re-stack to Series
+    ranks = ranks_matrix.stack()
     
     # 2. Identify positions (Long-only Top-K)
     # Binary mask: 1 if in top-k, 0 otherwise
@@ -70,20 +86,21 @@ def run_native_backtest(
     turnover = daily_pos_diff / 2.0
     
     # 5. Calculate Transaction Costs
-    # We assume costs are applied to the traded volume (buy + sell)
-    # Total traded volume = Σ|w_t - w_{t-1}| = 2 * turnover
-    # Cost = turnover * (buy_fee + sell_fee)
     transaction_costs = turnover * (cost_buy + cost_sell)
     
     # 6. Calculate Net Returns
     daily_net_returns = daily_gross_returns - transaction_costs
+    
+    # Calculate a simple equal-weight benchmark return (average of all stocks that day)
+    daily_bench_returns = labels.groupby(level='datetime').mean()
     
     # 7. Aggregate Results
     report = pd.DataFrame({
         'gross_return': daily_gross_returns,
         'net_return': daily_net_returns,
         'turnover': turnover,
-        'cost': transaction_costs
+        'cost': transaction_costs,
+        'bench': daily_bench_returns  # Added benchmark for compatibility with Qlib evaluate functions
     })
     
     # Cumulative stats

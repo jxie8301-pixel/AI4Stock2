@@ -80,8 +80,11 @@ def run_rolling_pipeline():
                     raw_digit = ''.join(filter(str.isdigit, sym_key))
                     if raw_digit in uni_symbols:
                         valid_symbol_ids.add(sym_id)
+                print(f"[*] Universe '{universe_name}' loaded. Mapped to {len(valid_symbol_ids)} symbols.")
+            else:
+                print(f"[!] Universe file not found at {uni_path}. Defaulting to full market.")
         except Exception as e:
-            pass
+            print(f"[!] Error parsing universe '{universe_name}': {e}. Defaulting to full market.")
             
     if valid_symbol_ids:
         uni_mask = np.isin(symbols, list(valid_symbol_ids))
@@ -119,47 +122,85 @@ def run_rolling_pipeline():
         valid_mask = (dt_index >= valid_start) & (dt_index <= valid_end) & uni_mask
         test_mask  = (dt_index >= current_test_start)  & (dt_index <= current_test_end) & uni_mask
         
-        train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback)
-        valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback)
-        test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback)
-        
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
-        valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
-        test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
-
-        # Train or Load Model
-        model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
-        
-        trainer = NativeLSTMTrainer(
-            d_feat=meta["num_features"],
-            hidden_size=cfg["model"]["hidden_size"],
-            num_layers=cfg["model"]["num_layers"],
-            dropout=cfg["model"]["dropout"],
-            lr=cfg["model"]["lr"],
-            loss_type=cfg["model"].get("loss", "pearson"),
-            device=device
-        )
-        
-        if args.load_models and model_path.exists():
-            print(f"    Loading pre-trained model from {model_path}...")
-            trainer.model.load_state_dict(torch.load(model_path, weights_only=True))
+        if args.model == "lgbm":
+            from src.models.pure_lightgbm import NativeLGBM
+            import pickle
+            
+            # Mask out NaNs in labels for training
+            valid_train_mask = train_mask & ~np.isnan(y)
+            valid_valid_mask = valid_mask & ~np.isnan(y)
+            
+            X_train_df = pd.DataFrame(X[valid_train_mask])
+            y_train_series = pd.Series(y[valid_train_mask])
+            X_valid_df = pd.DataFrame(X[valid_valid_mask])
+            y_valid_series = pd.Series(y[valid_valid_mask])
+            
+            model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
+            model = NativeLGBM(**cfg["model"])
+            
+            if args.load_models and model_path.exists():
+                print(f"    Loading pre-trained model from {model_path}...")
+                with open(model_path, "rb") as f:
+                    model = pickle.load(f)
+            else:
+                print("    Training LightGBM...")
+                model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series)
+                if args.save_models:
+                    with open(model_path, "wb") as f:
+                        pickle.dump(model, f)
+            
+            test_valid_mask = test_mask & ~np.isnan(X).any(axis=1)
+            X_test_df = pd.DataFrame(X[test_valid_mask])
+            
+            preds_arr = model.predict(X_test_df)
+            end_indices = np.where(test_valid_mask)[0]
+            
         else:
-            print("    Training...")
-            trainer.fit(train_loader, valid_loader, epochs=cfg["model"]["epochs"], early_stop=cfg["model"]["early_stop"])
-            if args.save_models:
-                torch.save(trainer.model.state_dict(), model_path)
-                
-        # Predict for current step
-        trainer.model.eval()
-        step_preds = []
-        with torch.no_grad():
-            for x_batch, _ in test_loader:
-                p = trainer.model(x_batch.to(device))
-                step_preds.append(p.cpu().numpy())
-                
-        if step_preds:
-            preds_arr = np.concatenate(step_preds)
+            train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback)
+            valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback)
+            test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback)
+            
+            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
+            valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+            test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
+    
+            # Train or Load Model
+            model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
+            
+            trainer = NativeLSTMTrainer(
+                d_feat=meta["num_features"],
+                hidden_size=cfg["model"]["hidden_size"],
+                num_layers=cfg["model"]["num_layers"],
+                dropout=cfg["model"]["dropout"],
+                lr=cfg["model"]["lr"],
+                loss_type=cfg["model"].get("loss", "pearson"),
+                device=device
+            )
+            
+            if args.load_models and model_path.exists():
+                print(f"    Loading pre-trained model from {model_path}...")
+                trainer.model.load_state_dict(torch.load(model_path, weights_only=True))
+            else:
+                print("    Training LSTM...")
+                trainer.fit(train_loader, valid_loader, epochs=cfg["model"]["epochs"], early_stop=cfg["model"]["early_stop"])
+                if args.save_models:
+                    torch.save(trainer.model.state_dict(), model_path)
+                    
+            # Predict for current step
+            trainer.model.eval()
+            step_preds = []
+            with torch.no_grad():
+                for x_batch, _ in test_loader:
+                    p = trainer.model(x_batch.to(device))
+                    step_preds.append(p.cpu().numpy())
+            
+            if step_preds:
+                preds_arr = np.concatenate(step_preds)
+            else:
+                preds_arr = np.array([])
             end_indices = test_dataset.valid_end_indices
+            
+        if len(preds_arr) > 0:
             aligned_dates = dt_index[end_indices]
             aligned_symbols = [id_to_symbol[sym] for sym in symbols[end_indices]]
             
@@ -207,8 +248,13 @@ def run_rolling_pipeline():
         preds=aligned_preds,
         labels=aligned_labels,
         topk=cfg["strategy"]["topk"],
+        n_drop=cfg["strategy"]["n_drop"],
         cost_buy=cfg["backtest"]["cost"]["buy"],
         cost_sell=cfg["backtest"]["cost"]["sell"],
+        min_cost=cfg["backtest"].get("min_cost", 5.0),
+        account=cfg["backtest"].get("account", 100_000_000),
+        risk_degree=cfg["backtest"].get("risk_degree", 0.95),
+        slippage=cfg["backtest"].get("slippage", 0.0005),
         rebalance_freq=args.rebalance_freq
     )
     

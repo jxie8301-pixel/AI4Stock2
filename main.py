@@ -222,42 +222,70 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1])) & uni_mask
     test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1])) & uni_mask
     
-    print("\n[Step 3/6] Initializing Native Datasets")
-    train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback)
-    valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback)
-    test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback)
+    print("\n[Step 3/6] Initializing Native Datasets / Models")
     
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
-    valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
-    test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
-    
-    print(f"\n[Step 4/6] Native Model Training ({model_name})")
-    device = f"cuda:{args.gpu}" if args.gpu >= 0 and torch.cuda.is_available() else "cpu"
-    trainer = NativeLSTMTrainer(
-        d_feat=meta["num_features"],
-        hidden_size=cfg["model"]["hidden_size"],
-        num_layers=cfg["model"]["num_layers"],
-        dropout=cfg["model"]["dropout"],
-        lr=cfg["model"]["lr"],
-        loss_type=cfg["model"].get("loss", "pearson"),
-        device=device
-    )
-    
-    trainer.fit(train_loader, valid_loader, epochs=cfg["model"]["epochs"], early_stop=cfg["model"]["early_stop"])
-    
-    print("\n[Step 5/6] Native Prediction & Signal Evaluation")
-    trainer.model.eval()
-    all_preds = []
-    
-    with torch.no_grad():
-        for x, _ in test_loader:
-            x = x.to(device)
-            p = trainer.model(x)
-            all_preds.append(p.cpu().numpy())
-            
-    preds_arr = np.concatenate(all_preds)
-    
-    end_indices = test_dataset.valid_end_indices
+    if model_name == "lgbm":
+        from src.models.pure_lightgbm import NativeLGBM
+        print(f"\n[Step 4/6] Native Model Training ({model_name})")
+        # Extract 2D tabular data directly using masks
+        # Mask out NaNs in labels for training
+        valid_train_mask = train_mask & ~np.isnan(y)
+        valid_valid_mask = valid_mask & ~np.isnan(y)
+        
+        X_train_df = pd.DataFrame(X[valid_train_mask])
+        y_train_series = pd.Series(y[valid_train_mask])
+        X_valid_df = pd.DataFrame(X[valid_valid_mask])
+        y_valid_series = pd.Series(y[valid_valid_mask])
+        
+        model = NativeLGBM(**cfg["model"])
+        model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series)
+        
+        print("\n[Step 5/6] Native Prediction & Signal Evaluation")
+        test_valid_mask = test_mask & ~np.isnan(X).any(axis=1) # Basic safety
+        X_test_df = pd.DataFrame(X[test_valid_mask])
+        preds_arr = model.predict(X_test_df)
+        
+        # We need the indices to align dates and symbols
+        end_indices = np.where(test_valid_mask)[0]
+    else:
+        from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
+        from torch.utils.data import DataLoader
+        train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback)
+        valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback)
+        test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback)
+        
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
+        valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
+        test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
+        
+        print(f"\n[Step 4/6] Native Model Training ({model_name})")
+        device = f"cuda:{args.gpu}" if args.gpu >= 0 and torch.cuda.is_available() else "cpu"
+        trainer = NativeLSTMTrainer(
+            d_feat=meta["num_features"],
+            hidden_size=cfg["model"]["hidden_size"],
+            num_layers=cfg["model"]["num_layers"],
+            dropout=cfg["model"]["dropout"],
+            lr=cfg["model"]["lr"],
+            loss_type=cfg["model"].get("loss", "pearson"),
+            device=device
+        )
+        
+        trainer.fit(train_loader, valid_loader, epochs=cfg["model"]["epochs"], early_stop=cfg["model"]["early_stop"])
+        
+        print("\n[Step 5/6] Native Prediction & Signal Evaluation")
+        trainer.model.eval()
+        all_preds = []
+        
+        with torch.no_grad():
+            for x_batch, _ in test_loader:
+                x_batch = x_batch.to(device)
+                p = trainer.model(x_batch)
+                all_preds.append(p.cpu().numpy())
+                
+        if not all_preds:
+            raise ValueError("No valid test windows were generated for native LSTM inference.")
+        preds_arr = np.concatenate(all_preds)
+        end_indices = test_dataset.valid_end_indices
     
     aligned_dates = dt_index[end_indices]
     aligned_symbols = [id_to_symbol[sym] for sym in symbols[end_indices]]
@@ -291,12 +319,20 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         save_monthly_report,
     )
     
+    rebalance_freq = getattr(args, 'rebalance_freq', None) or cfg.get("backtest", {}).get("rebalance_freq", 1)
+
     backtest_report = run_native_backtest(
         preds=pred_series,
         labels=label_series,
         topk=cfg["strategy"]["topk"],
+        n_drop=cfg["strategy"]["n_drop"],
         cost_buy=cfg["backtest"]["cost"]["buy"],
-        cost_sell=cfg["backtest"]["cost"]["sell"]
+        cost_sell=cfg["backtest"]["cost"]["sell"],
+        min_cost=cfg["backtest"].get("min_cost", 5.0),
+        account=cfg["backtest"].get("account", 100_000_000),
+        risk_degree=cfg["backtest"].get("risk_degree", 0.95),
+        slippage=cfg["backtest"].get("slippage", 0.0005),
+        rebalance_freq=rebalance_freq
     )
     
     # Rename for compatibility with plot functions
@@ -375,16 +411,20 @@ def main():
     parser = argparse.ArgumentParser(description="AI4Stock2 Quantitative Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default=None, help="Model name: lstm / transformer / lgbm")
+    parser.add_argument("--backend", default=None, help="Force backend: qlib or native (overrides config)")
     parser.add_argument("--download-only", action="store_true", help="Only download data")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
     parser.add_argument("--save-model", help="Path to save the trained model (e.g. results/lstm/model.pkl)")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id (-1 for CPU)")
+    parser.add_argument("--rebalance-freq", type=int, default=None, help="Backtest rebalance frequency in days (default: from config or 1)")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.model:
         cfg["model"]["name"] = args.model
+    if args.backend:
+        cfg["backend"] = args.backend
 
     model_name = cfg["model"]["name"]
     results_dir = Path("results") / model_name

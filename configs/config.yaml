@@ -37,3 +37,7 @@ backtest:
   cost:
     buy: 0.0003
     sell: 0.0013
+  slippage: 0.0005
+  min_cost: 5
+  account: 100000000
+  risk_degree: 0.95

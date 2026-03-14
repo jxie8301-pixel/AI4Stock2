@@ -57,7 +57,8 @@ The native model path now does the following:
 
 - `NativeStockDataset` carries sample dates
 - native LSTM validation computes mean daily IC
-- native LightGBM early stopping uses a custom `daily_ic` validation metric
+- native LightGBM reports `daily_ic` as an auxiliary validation metric while
+  early stopping uses a stable regression metric (`l2`/`l1`)
 
 ### 4. Native rolling/main now read project-owned universe files
 

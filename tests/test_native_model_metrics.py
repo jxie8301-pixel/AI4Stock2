@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 
 from src.evaluate import align_prediction_label_pairs, compute_portfolio_metrics
 from src.label_utils import sanitize_label_array, sanitize_label_series
-from src.models.pure_lightgbm import _daily_ic_metric
+from src.models.pure_lightgbm import NativeLGBM, _daily_ic_metric
 from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
 
 
@@ -39,6 +39,15 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(metric_name, "daily_ic")
         self.assertTrue(higher_is_better)
         self.assertAlmostEqual(metric_value, 0.0, places=8)
+
+    def test_native_lgbm_defaults_to_stable_eval_metric(self):
+        mse_model = NativeLGBM(loss="mse")
+        mae_model = NativeLGBM(loss="mae")
+        custom_model = NativeLGBM(loss="mse", eval_metric="rmse")
+
+        self.assertEqual(mse_model.params["metric"], "l2")
+        self.assertEqual(mae_model.params["metric"], "l1")
+        self.assertEqual(custom_model.params["metric"], "rmse")
 
     def test_align_prediction_label_pairs_drops_nan_rows(self):
         index = pd.MultiIndex.from_tuples(

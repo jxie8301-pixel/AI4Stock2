@@ -30,7 +30,7 @@ def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray)
 
 class NativeLGBM:
     """Native LightGBM wrapper mimicking the interface expected by our pipeline."""
-    
+
     def __init__(
         self,
         loss: str = "mse",
@@ -47,14 +47,23 @@ class NativeLGBM:
     ):
         # Map generic loss names to lightgbm specific objectives
         objective = "regression"
+        eval_metric = kwargs.get("eval_metric")
         if loss == "mse":
             objective = "regression"
+            default_metric = "l2"
         elif loss == "mae":
             objective = "regression_l1"
-            
+            default_metric = "l1"
+        else:
+            default_metric = "l2"
+
+        self.eval_metric = eval_metric or default_metric
         self.params = {
             "objective": objective,
-            "metric": "None",
+            # Use a stable regression metric for early stopping. Daily IC remains
+            # as an auxiliary validation metric, but it is too noisy for 10-day
+            # windows and can be undefined when predictions collapse.
+            "metric": self.eval_metric,
             "colsample_bytree": colsample_bytree,
             "learning_rate": learning_rate,
             "subsample": subsample,
@@ -93,14 +102,20 @@ class NativeLGBM:
             
         callbacks = []
         if self.early_stop > 0 and X_valid is not None:
-            callbacks.append(lgb.early_stopping(stopping_rounds=self.early_stop, verbose=True))
-            
+            callbacks.append(
+                lgb.early_stopping(
+                    stopping_rounds=self.early_stop,
+                    first_metric_only=True,
+                    verbose=True,
+                )
+            )
+
         callbacks.append(lgb.log_evaluation(period=50))
-            
+
         self.model = lgb.train(
             self.params,
             dtrain,
-            num_boost_round=1000, # Large number, rely on early stopping
+            num_boost_round=1000,  # Large number, rely on early stopping
             valid_sets=valid_sets,
             valid_names=valid_names,
             feval=feval,

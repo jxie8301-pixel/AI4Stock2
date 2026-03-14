@@ -19,7 +19,9 @@ def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default="lstm", help="Model name")
-    parser.add_argument("--horizon", type=int, default=120, help="Rolling horizon in trading days")
+    parser.add_argument("--horizon", type=int, default=10, help="Rolling horizon in trading days")
+    parser.add_argument("--train-days", type=int, default=242, help="Training window length in trading days")
+    parser.add_argument("--valid-days", type=int, default=10, help="Validation window length in trading days")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id")
     parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
     parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step")
@@ -62,13 +64,13 @@ def run_rolling_pipeline():
     
     # Extract unique trading dates from the dataset
     all_trading_dates = sorted(dt_index.unique())
-    calendar = pd.Series(all_trading_dates)
+    full_calendar = pd.Series(all_trading_dates)
     
     # Filter global calendar to our test period
     test_start = pd.Timestamp(cfg["time"]["test"][0])
     test_end = pd.Timestamp(cfg["time"]["test"][1])
     
-    test_calendar = calendar[(calendar >= test_start) & (calendar <= test_end)].reset_index(drop=True)
+    test_calendar = full_calendar[(full_calendar >= test_start) & (full_calendar <= test_end)].reset_index(drop=True)
     
     # Universe Filtering
     universe_name = cfg.get("universe", "all")
@@ -105,13 +107,21 @@ def run_rolling_pipeline():
         current_test_start = test_calendar[start_idx]
         end_idx = min(start_idx + args.horizon - 1, len(test_calendar) - 1)
         current_test_end = test_calendar[end_idx]
-        
-        # Training window: Use previous 6 years up to test_start
-        # Validation window: Use 1 year before test_start
-        train_start = current_test_start - pd.Timedelta(days=365*6)
-        train_end = current_test_start - pd.Timedelta(days=260)
-        valid_start = current_test_start - pd.Timedelta(days=259)
-        valid_end = current_test_start - pd.Timedelta(days=1)
+        full_start_idx = int(full_calendar.searchsorted(current_test_start))
+
+        valid_end_idx = full_start_idx - 1
+        valid_start_idx = valid_end_idx - args.valid_days + 1
+        train_end_idx = valid_start_idx - 1
+        train_start_idx = train_end_idx - args.train_days + 1
+
+        if valid_end_idx < 0 or valid_start_idx < 0 or train_end_idx < 0 or train_start_idx < 0:
+            print("    Skipping window: insufficient trading-day history for requested train/valid lengths.")
+            continue
+
+        train_start = full_calendar.iloc[train_start_idx]
+        train_end = full_calendar.iloc[train_end_idx]
+        valid_start = full_calendar.iloc[valid_start_idx]
+        valid_end = full_calendar.iloc[valid_end_idx]
         
         print(f"\n>>> [Step {i+1}/{len(rolling_steps)}] Window: {current_test_start.date()} to {current_test_end.date()}")
         print(f"    Train: {train_start.date()} ~ {train_end.date()} | Valid: {valid_start.date()} ~ {valid_end.date()}")

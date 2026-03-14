@@ -3,11 +3,49 @@
 import argparse
 from pathlib import Path
 import json
+import pickle
 import yaml
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f)
+
+
+def _ensure_parent_dir(path_str: str) -> Path:
+    path = Path(path_str)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _save_native_model(model_name: str, model_obj, save_path: str) -> None:
+    path = _ensure_parent_dir(save_path)
+    if model_name == "lgbm":
+        with open(path, "wb") as f:
+            pickle.dump(model_obj, f)
+    else:
+        import torch
+
+        torch.save(model_obj.state_dict(), path)
+    print(f"Model saved: {path}")
+
+
+def _load_native_model(model_name: str, load_path: str, model_obj, device: str | None = None):
+    path = Path(load_path)
+    if not path.exists():
+        raise FileNotFoundError(f"Native model file not found: {path}")
+
+    if model_name == "lgbm":
+        with open(path, "rb") as f:
+            loaded = pickle.load(f)
+        print(f"Model loaded: {path}")
+        return loaded
+
+    import torch
+
+    state_dict = torch.load(path, map_location=device or "cpu", weights_only=True)
+    model_obj.load_state_dict(state_dict)
+    print(f"Model loaded: {path}")
+    return model_obj
 
 def run_qlib_pipeline(cfg, args, results_dir, model_name):
     """Original Qlib-dependent pipeline."""
@@ -84,6 +122,7 @@ def run_qlib_pipeline(cfg, args, results_dir, model_name):
     # ── Step 5: Prediction & signal evaluation ────────────────────────
     print("\n[Step 5/6] Prediction & Signal Evaluation")
     from src.evaluate import (
+        build_cross_section_benchmark,
         compute_signal_metrics,
         plot_ic_series,
         print_metrics,
@@ -135,6 +174,8 @@ def run_qlib_pipeline(cfg, args, results_dir, model_name):
     )
 
     portfolio_results, report = compute_portfolio_metrics(portfolio_metric)
+    bench_series = build_cross_section_benchmark(aligned_labels)
+    report["bench"] = bench_series.reindex(pd.to_datetime(report.index)).fillna(0.0).to_numpy()
 
     plot_cumulative_return(report, save_path=str(results_dir / "cumulative_return.png"))
     plot_drawdown(report, save_path=str(results_dir / "drawdown.png"))
@@ -158,6 +199,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
     from src.evaluate import (
         align_prediction_label_pairs,
+        build_cross_section_benchmark,
         compute_signal_metrics,
         print_metrics,
         plot_ic_series,
@@ -234,7 +276,13 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         valid_dates = pd.to_datetime(dates[valid_valid_mask])
         
         model = NativeLGBM(**cfg["model"])
-        model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
+        if args.load_model:
+            model = _load_native_model(model_name, args.load_model, model)
+            print("Skipping training.")
+        else:
+            model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
+            if args.save_model:
+                _save_native_model(model_name, model, args.save_model)
         
         print("\n[Step 5/6] Native Prediction & Signal Evaluation")
         test_valid_mask = test_mask & finite_feature_mask
@@ -281,8 +329,13 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             loss_type=cfg["model"].get("loss", "pearson"),
             device=device
         )
-        
-        trainer.fit(train_loader, valid_loader, epochs=cfg["model"]["epochs"], early_stop=cfg["model"]["early_stop"])
+        if args.load_model:
+            trainer.model = _load_native_model(model_name, args.load_model, trainer.model, device=device)
+            print("Skipping training.")
+        else:
+            trainer.fit(train_loader, valid_loader, epochs=cfg["model"]["epochs"], early_stop=cfg["model"]["early_stop"])
+            if args.save_model:
+                _save_native_model(model_name, trainer.model, args.save_model)
         
         print("\n[Step 5/6] Native Prediction & Signal Evaluation")
         trainer.model.eval()
@@ -352,6 +405,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     
     # Pass a tuple (report, indicator) to match Qlib's expected format in evaluate.py
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
+    bench_series = build_cross_section_benchmark(label_series)
+    metric_report["bench"] = bench_series.reindex(metric_report.index).fillna(0.0).to_numpy()
     
     # Generate native-specific plots/reports
     plot_cumulative_return(metric_report, save_path=str(results_dir / "native_cumulative_return.png"))
@@ -438,11 +493,10 @@ def main():
     if args.backend:
         cfg["backend"] = args.backend
 
-    model_name = cfg["model"]["name"]
-    results_dir = Path("results") / model_name
-    results_dir.mkdir(parents=True, exist_ok=True)
-    
     backend = cfg.get("backend", "qlib")
+    model_name = cfg["model"]["name"]
+    results_dir = Path("results") / backend / model_name
+    results_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n>>> Running Pipeline with Backend: {backend.upper()} <<<")
     
     if backend == "native":

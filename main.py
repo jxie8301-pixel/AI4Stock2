@@ -156,7 +156,12 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     import torch
     from torch.utils.data import DataLoader
     from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
-    from src.evaluate import compute_signal_metrics, print_metrics, plot_ic_series
+    from src.evaluate import (
+        align_prediction_label_pairs,
+        compute_signal_metrics,
+        print_metrics,
+        plot_ic_series,
+    )
     
     alpha = cfg.get("alpha_version", 158)
     cache_dir = f"data/cache/alpha{alpha}_panel"
@@ -186,36 +191,21 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     
     # --- Universe Filtering ---
     universe_name = cfg.get("universe", "all")
-    valid_symbol_ids = set()
-    if universe_name != "all":
-        try:
-            # Attempt to read the universe file
-            # Format: '600000\t2005-01-01\t2099-12-31'
-            uni_path = Path(cfg["qlib"]["provider_uri"]) / "instruments" / f"{universe_name}.txt"
-            if uni_path.exists():
-                with open(uni_path, "r") as f:
-                    # Extract raw symbols, e.g., '600000'
-                    uni_symbols = set([line.split('\t')[0].strip() for line in f])
-                
-                # Match against the keys in meta["symbol_to_id"]
-                # gen_feature keys usually look like 'SH600000' or '600000.SH'
-                for sym_key, sym_id in meta["symbol_to_id"].items():
-                    # We strip non-digit characters to match with universe
-                    raw_digit = ''.join(filter(str.isdigit, sym_key))
-                    if raw_digit in uni_symbols:
-                        valid_symbol_ids.add(sym_id)
-                print(f"[*] Universe '{universe_name}' loaded. Mapped to {len(valid_symbol_ids)} symbols.")
-            else:
-                print(f"[!] Universe file not found at {uni_path}. Defaulting to full market.")
-        except Exception as e:
-            print(f"[!] Error parsing universe {universe_name}: {e}. Defaulting to full market.")
-            
-    # Create universe mask
-    if valid_symbol_ids:
-        # np.isin is fast and works perfectly on memmap/ndarrays
-        uni_mask = np.isin(symbols, list(valid_symbol_ids))
-    else:
+    if universe_name == "all":
         uni_mask = np.ones(num_rows, dtype=bool)
+    else:
+        from src.native_universe import build_universe_mask, resolve_universe_path
+
+        universe_dir = cfg.get("native", {}).get("universe_dir", "data/universes")
+        universe_path = resolve_universe_path(universe_name, universe_dir=universe_dir)
+        uni_mask = build_universe_mask(
+            dates_ns=dates,
+            symbol_ids=symbols,
+            symbol_to_id=meta["symbol_to_id"],
+            universe_name=universe_name,
+            universe_dir=universe_dir,
+        )
+        print(f"[*] Native universe '{universe_name}' loaded from {universe_path}. Matched rows: {int(uni_mask.sum())}.")
 
     # --- Time Splitting (Intersection with Universe) ---
     train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1])) & uni_mask
@@ -229,19 +219,27 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         print(f"\n[Step 4/6] Native Model Training ({model_name})")
         # Extract 2D tabular data directly using masks
         # Mask out NaNs in labels for training
-        valid_train_mask = train_mask & ~np.isnan(y)
-        valid_valid_mask = valid_mask & ~np.isnan(y)
+        valid_train_mask = train_mask & np.isfinite(y)
+        valid_valid_mask = valid_mask & np.isfinite(y)
+
+        if not np.any(valid_train_mask):
+            raise ValueError("No valid native LightGBM training rows after filtering labels.")
+        if not np.any(valid_valid_mask):
+            raise ValueError("No valid native LightGBM validation rows after filtering labels.")
         
         X_train_df = pd.DataFrame(X[valid_train_mask])
         y_train_series = pd.Series(y[valid_train_mask])
         X_valid_df = pd.DataFrame(X[valid_valid_mask])
         y_valid_series = pd.Series(y[valid_valid_mask])
+        valid_dates = pd.to_datetime(dates[valid_valid_mask])
         
         model = NativeLGBM(**cfg["model"])
-        model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series)
+        model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
         
         print("\n[Step 5/6] Native Prediction & Signal Evaluation")
-        test_valid_mask = test_mask & ~np.isnan(X).any(axis=1) # Basic safety
+        test_valid_mask = test_mask & ~np.isnan(X).any(axis=1)
+        if not np.any(test_valid_mask):
+            raise ValueError("No valid native LightGBM test rows after filtering features.")
         X_test_df = pd.DataFrame(X[test_valid_mask])
         preds_arr = model.predict(X_test_df)
         
@@ -250,11 +248,25 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     else:
         from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
         from torch.utils.data import DataLoader
-        train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback)
-        valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback)
-        test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback)
+        train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback, full_dates=dates)
+        valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback, full_dates=dates)
+        test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback, full_dates=dates)
+
+        if len(train_dataset) == 0:
+            raise ValueError("Native LSTM training dataset is empty for the configured train split.")
+        if len(valid_dataset) == 0:
+            raise ValueError("Native LSTM validation dataset is empty for the configured valid split.")
+        if len(test_dataset) == 0:
+            raise ValueError("Native LSTM test dataset is empty for the configured test split.")
         
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=batch_size,
+            shuffle=True,
+            num_workers=0,
+            pin_memory=True,
+            drop_last=len(train_dataset) >= batch_size,
+        )
         valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
         test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
         
@@ -299,8 +311,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         y[end_indices],
         index=pred_series.index
     )
-    
-    signal_metrics, daily_ic = compute_signal_metrics(pred_series, label_series)
+    aligned_preds, aligned_labels = align_prediction_label_pairs(pred_series, label_series)
+    signal_metrics, daily_ic = compute_signal_metrics(aligned_preds, aligned_labels)
     plot_ic_series(daily_ic, save_path=str(results_dir / "native_ic_series.png"))
     
     if args.skip_backtest:
@@ -339,13 +351,13 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
     
     # Pass a tuple (report, indicator) to match Qlib's expected format in evaluate.py
-    portfolio_results, _ = compute_portfolio_metrics((plot_report, None))
+    portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     
     # Generate native-specific plots/reports
-    plot_cumulative_return(plot_report, save_path=str(results_dir / "native_cumulative_return.png"))
-    plot_drawdown(plot_report, save_path=str(results_dir / "native_drawdown.png"))
-    plot_monthly_heatmap(plot_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
-    save_monthly_report(plot_report, save_path=str(results_dir / "native_monthly_report.csv"))
+    plot_cumulative_return(metric_report, save_path=str(results_dir / "native_cumulative_return.png"))
+    plot_drawdown(metric_report, save_path=str(results_dir / "native_drawdown.png"))
+    plot_monthly_heatmap(metric_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
+    save_monthly_report(metric_report, save_path=str(results_dir / "native_monthly_report.csv"))
     
     print_metrics(signal_metrics, portfolio_results)
     

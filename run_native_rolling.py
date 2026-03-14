@@ -69,27 +69,21 @@ def run_rolling_pipeline():
     
     # Universe Filtering
     universe_name = cfg.get("universe", "all")
-    valid_symbol_ids = set()
-    if universe_name != "all":
-        try:
-            uni_path = Path(cfg["qlib"]["provider_uri"]) / "instruments" / f"{universe_name}.txt"
-            if uni_path.exists():
-                with open(uni_path, "r") as f:
-                    uni_symbols = set([line.split('\t')[0].strip() for line in f])
-                for sym_key, sym_id in meta["symbol_to_id"].items():
-                    raw_digit = ''.join(filter(str.isdigit, sym_key))
-                    if raw_digit in uni_symbols:
-                        valid_symbol_ids.add(sym_id)
-                print(f"[*] Universe '{universe_name}' loaded. Mapped to {len(valid_symbol_ids)} symbols.")
-            else:
-                print(f"[!] Universe file not found at {uni_path}. Defaulting to full market.")
-        except Exception as e:
-            print(f"[!] Error parsing universe '{universe_name}': {e}. Defaulting to full market.")
-            
-    if valid_symbol_ids:
-        uni_mask = np.isin(symbols, list(valid_symbol_ids))
-    else:
+    if universe_name == "all":
         uni_mask = np.ones(num_rows, dtype=bool)
+    else:
+        from src.native_universe import build_universe_mask, resolve_universe_path
+
+        universe_dir = cfg.get("native", {}).get("universe_dir", "data/universes")
+        universe_path = resolve_universe_path(universe_name, universe_dir=universe_dir)
+        uni_mask = build_universe_mask(
+            dates_ns=dates,
+            symbol_ids=symbols,
+            symbol_to_id=meta["symbol_to_id"],
+            universe_name=universe_name,
+            universe_dir=universe_dir,
+        )
+        print(f"[*] Native universe '{universe_name}' loaded from {universe_path}. Matched rows: {int(uni_mask.sum())}.")
 
     # ── 2. Setup Rolling Windows ────────────────────────
     rolling_steps = range(0, len(test_calendar), args.horizon)
@@ -99,6 +93,7 @@ def run_rolling_pipeline():
 
     from torch.utils.data import DataLoader
     from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
+    from src.evaluate import align_prediction_label_pairs
     
     device = f"cuda:{args.gpu}" if args.gpu >= 0 and torch.cuda.is_available() else "cpu"
 
@@ -127,13 +122,21 @@ def run_rolling_pipeline():
             import pickle
             
             # Mask out NaNs in labels for training
-            valid_train_mask = train_mask & ~np.isnan(y)
-            valid_valid_mask = valid_mask & ~np.isnan(y)
+            valid_train_mask = train_mask & np.isfinite(y)
+            valid_valid_mask = valid_mask & np.isfinite(y)
+
+            if not np.any(valid_train_mask):
+                print("    Skipping window: no valid LightGBM training rows.")
+                continue
+            if not np.any(valid_valid_mask):
+                print("    Skipping window: no valid LightGBM validation rows.")
+                continue
             
             X_train_df = pd.DataFrame(X[valid_train_mask])
             y_train_series = pd.Series(y[valid_train_mask])
             X_valid_df = pd.DataFrame(X[valid_valid_mask])
             y_valid_series = pd.Series(y[valid_valid_mask])
+            valid_dates = pd.to_datetime(dates[valid_valid_mask])
             
             model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
             model = NativeLGBM(**cfg["model"])
@@ -144,23 +147,43 @@ def run_rolling_pipeline():
                     model = pickle.load(f)
             else:
                 print("    Training LightGBM...")
-                model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series)
+                model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
                 if args.save_models:
                     with open(model_path, "wb") as f:
                         pickle.dump(model, f)
             
             test_valid_mask = test_mask & ~np.isnan(X).any(axis=1)
+            if not np.any(test_valid_mask):
+                print("    Skipping window: no valid LightGBM test rows.")
+                continue
             X_test_df = pd.DataFrame(X[test_valid_mask])
             
             preds_arr = model.predict(X_test_df)
             end_indices = np.where(test_valid_mask)[0]
             
         else:
-            train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback)
-            valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback)
-            test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback)
+            train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback, full_dates=dates)
+            valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback, full_dates=dates)
+            test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback, full_dates=dates)
+
+            if len(train_dataset) == 0:
+                print("    Skipping window: native LSTM training dataset is empty.")
+                continue
+            if len(valid_dataset) == 0:
+                print("    Skipping window: native LSTM validation dataset is empty.")
+                continue
+            if len(test_dataset) == 0:
+                print("    Skipping window: native LSTM test dataset is empty.")
+                continue
             
-            train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=0, pin_memory=True, drop_last=True)
+            train_loader = DataLoader(
+                train_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=0,
+                pin_memory=True,
+                drop_last=len(train_dataset) >= batch_size,
+            )
             valid_loader = DataLoader(valid_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=True)
             test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=False)
     
@@ -236,6 +259,7 @@ def run_rolling_pipeline():
     common_idx = final_predictions.index.intersection(label_series.index)
     aligned_preds = final_predictions.loc[common_idx]
     aligned_labels = label_series.loc[common_idx]
+    aligned_preds, aligned_labels = align_prediction_label_pairs(aligned_preds, aligned_labels)
     
     from src.evaluate import compute_signal_metrics, print_metrics
     signal_metrics, daily_ic = compute_signal_metrics(aligned_preds, aligned_labels)
@@ -245,8 +269,8 @@ def run_rolling_pipeline():
     print(f"\n[Global Backtest] Rebalance Freq: {args.rebalance_freq} days")
     from src.native_backtest import run_native_backtest
     backtest_report = run_native_backtest(
-        preds=aligned_preds,
-        labels=aligned_labels,
+        preds=final_predictions,
+        labels=label_series,
         topk=cfg["strategy"]["topk"],
         n_drop=cfg["strategy"]["n_drop"],
         cost_buy=cfg["backtest"]["cost"]["buy"],
@@ -261,12 +285,12 @@ def run_rolling_pipeline():
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
     
     from src.evaluate import compute_portfolio_metrics, plot_cumulative_return, plot_drawdown, plot_monthly_heatmap, save_monthly_report
-    portfolio_results, _ = compute_portfolio_metrics((plot_report, None))
+    portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     
-    plot_cumulative_return(plot_report, save_path=str(results_dir / "native_cumulative_return.png"))
-    plot_drawdown(plot_report, save_path=str(results_dir / "native_drawdown.png"))
-    plot_monthly_heatmap(plot_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
-    save_monthly_report(plot_report, save_path=str(results_dir / "native_monthly_report.csv"))
+    plot_cumulative_return(metric_report, save_path=str(results_dir / "native_cumulative_return.png"))
+    plot_drawdown(metric_report, save_path=str(results_dir / "native_drawdown.png"))
+    plot_monthly_heatmap(metric_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
+    save_monthly_report(metric_report, save_path=str(results_dir / "native_monthly_report.csv"))
     
     print_metrics(signal_metrics, portfolio_results)
     

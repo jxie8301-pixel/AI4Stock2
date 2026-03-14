@@ -93,9 +93,16 @@ def run_native_backtest(
     common_idx = preds.index.intersection(labels.index)
     preds = preds.loc[common_idx].sort_index()
     labels = labels.loc[common_idx].sort_index()
+    if preds.empty:
+        raise ValueError("Native backtest received no overlapping prediction/label index.")
 
     pred_matrix = preds.unstack(level="instrument").sort_index()
     label_matrix = labels.unstack(level="instrument").reindex(pred_matrix.index).sort_index()
+    valid_dates = label_matrix.notna().any(axis=1)
+    pred_matrix = pred_matrix.loc[valid_dates]
+    label_matrix = label_matrix.loc[valid_dates]
+    if pred_matrix.empty:
+        raise ValueError("Native backtest received no dates with any realized returns.")
     rebalance_dates = set(pred_matrix.index[::rebalance_freq])
 
     cash = float(account)

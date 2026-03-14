@@ -88,6 +88,7 @@ def run_rolling_pipeline():
     # ── 2. Setup Rolling Windows ────────────────────────
     rolling_steps = range(0, len(test_calendar), args.horizon)
     all_predictions = []
+    finite_feature_mask = ~np.isinf(X).any(axis=1)
     
     print(f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} with {args.horizon}-day steps.")
 
@@ -122,8 +123,8 @@ def run_rolling_pipeline():
             import pickle
             
             # Mask out NaNs in labels for training
-            valid_train_mask = train_mask & np.isfinite(y)
-            valid_valid_mask = valid_mask & np.isfinite(y)
+            valid_train_mask = train_mask & finite_feature_mask & np.isfinite(y)
+            valid_valid_mask = valid_mask & finite_feature_mask & np.isfinite(y)
 
             if not np.any(valid_train_mask):
                 print("    Skipping window: no valid LightGBM training rows.")
@@ -152,7 +153,7 @@ def run_rolling_pipeline():
                     with open(model_path, "wb") as f:
                         pickle.dump(model, f)
             
-            test_valid_mask = test_mask & ~np.isnan(X).any(axis=1)
+            test_valid_mask = test_mask & finite_feature_mask
             if not np.any(test_valid_mask):
                 print("    Skipping window: no valid LightGBM test rows.")
                 continue

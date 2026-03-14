@@ -6,16 +6,48 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import pandas as pd
-from typing import Dict, Tuple, Optional
 from src.models.utils.losses import PearsonLoss, CCCLoss
+
+
+def compute_daily_ic(predictions: np.ndarray, labels: np.ndarray, dates: np.ndarray) -> float:
+    """Compute mean daily cross-sectional IC for validation."""
+    if len(predictions) == 0:
+        return 0.0
+
+    frame = pd.DataFrame(
+        {
+            "pred": np.asarray(predictions, dtype=np.float32),
+            "label": np.asarray(labels, dtype=np.float32),
+            "date": pd.to_datetime(np.asarray(dates)),
+        }
+    ).dropna()
+    if frame.empty:
+        return 0.0
+
+    daily_ic = frame.groupby("date", sort=True).apply(
+        lambda x: x["pred"].corr(x["label"]),
+        include_groups=False,
+    )
+    daily_ic = daily_ic.dropna()
+    if daily_ic.empty:
+        return 0.0
+    return float(daily_ic.mean())
+
 
 class NativeStockDataset(Dataset):
     """
     A PyTorch Dataset that efficiently slices 3D time-series windows from a 2D panel.
     Preserves zero-copy memmap behavior by keeping the full array and mapping indices.
     """
-    def __init__(self, full_features: np.ndarray, full_labels: np.ndarray, 
-                 full_symbols: np.ndarray, mask: np.ndarray, lookback: int = 20):
+    def __init__(
+        self,
+        full_features: np.ndarray,
+        full_labels: np.ndarray,
+        full_symbols: np.ndarray,
+        mask: np.ndarray,
+        lookback: int = 20,
+        full_dates: np.ndarray | None = None,
+    ):
         """
         Parameters
         ----------
@@ -33,6 +65,7 @@ class NativeStockDataset(Dataset):
         self.features = torch.from_numpy(full_features)
         self.labels = torch.from_numpy(full_labels)
         self.lookback = lookback
+        self.full_dates = np.asarray(full_dates) if full_dates is not None else None
         
         # 1. Find all rows where the stock symbol has been continuous for 'lookback' days
         continuous_mask = np.zeros_like(mask, dtype=bool)
@@ -43,6 +76,11 @@ class NativeStockDataset(Dataset):
         
         # 3. Store the actual global integer indices of the END of each valid window
         self.valid_end_indices = np.where(final_valid_mask)[0]
+
+    def get_dates_for_indices(self, indices: np.ndarray) -> np.ndarray:
+        if self.full_dates is None:
+            raise ValueError("Dataset was created without full_dates.")
+        return self.full_dates[indices]
 
     def __len__(self):
         return len(self.valid_end_indices)
@@ -60,11 +98,7 @@ class NativeStockDataset(Dataset):
         
         # Y: scalar (the label at the END of the window)
         y = self.labels[end_idx]
-        
-        # Clamp labels to handle extreme outliers (matches CSRankNorm spirit)
-        if not torch.isnan(y) and not torch.isinf(y):
-            y = torch.clamp(y, min=-0.1, max=0.1)
-        
+
         return x, y
 
 
@@ -112,8 +146,11 @@ class NativeLSTMTrainer:
             self.loss_fn = nn.MSELoss()
 
     def train_epoch(self, dataloader: DataLoader):
+        if len(dataloader) == 0:
+            return 0.0
         self.model.train()
         total_loss = 0.0
+        steps = 0
         for x, y in dataloader:
             x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
             self.optimizer.zero_grad(set_to_none=True)
@@ -135,14 +172,22 @@ class NativeLSTMTrainer:
             self.optimizer.step()
                 
             total_loss += loss.item()
-        return total_loss / len(dataloader)
+            steps += 1
+        return total_loss / steps if steps > 0 else 0.0
 
     def evaluate(self, dataloader: DataLoader):
         self.model.eval()
         all_preds = []
         all_labels = []
+        all_dates = []
+        dataset = dataloader.dataset
+        offset = 0
         with torch.no_grad():
             for x, y in dataloader:
+                batch_size = len(y)
+                batch_end_indices = dataset.valid_end_indices[offset : offset + batch_size]
+                offset += batch_size
+
                 x, y = x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
                 
                 # Mask out NaN and Inf labels
@@ -160,22 +205,25 @@ class NativeLSTMTrainer:
                 
                 all_preds.append(pred[valid_pred_mask].cpu())
                 all_labels.append(y_masked[valid_pred_mask].cpu())
+                valid_indices = batch_end_indices[mask.cpu().numpy()]
+                valid_dates = dataset.get_dates_for_indices(valid_indices[valid_pred_mask.cpu().numpy()])
+                all_dates.append(valid_dates)
                 
         if not all_preds:
             return 0.0
             
-        all_preds = torch.cat(all_preds)
-        all_labels = torch.cat(all_labels)
-        # Calculate full-set Pearson Correlation
-        if len(all_preds) > 1:
-            vx = all_preds - torch.mean(all_preds)
-            vy = all_labels - torch.mean(all_labels)
-            corr = torch.sum(vx * vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)) + 1e-8)
-            return corr.item()
-        return 0.0
+        all_preds_np = torch.cat(all_preds).numpy()
+        all_labels_np = torch.cat(all_labels).numpy()
+        all_dates_np = np.concatenate(all_dates)
+        return compute_daily_ic(all_preds_np, all_labels_np, all_dates_np)
 
     def fit(self, train_loader: DataLoader, valid_loader: DataLoader, 
             epochs: int = 200, early_stop: int = 10):
+        if len(train_loader) == 0:
+            raise ValueError("Training loader is empty. Reduce batch_size or widen the training window.")
+        if len(valid_loader) == 0:
+            raise ValueError("Validation loader is empty. Reduce batch_size or widen the validation window.")
+
         best_score = -np.inf
         stop_count = 0
         best_state = None

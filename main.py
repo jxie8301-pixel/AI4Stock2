@@ -213,14 +213,14 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1])) & uni_mask
     
     print("\n[Step 3/6] Initializing Native Datasets / Models")
+    finite_feature_mask = ~np.isinf(X).any(axis=1)
     
     if model_name == "lgbm":
         from src.models.pure_lightgbm import NativeLGBM
         print(f"\n[Step 4/6] Native Model Training ({model_name})")
         # Extract 2D tabular data directly using masks
-        # Mask out NaNs in labels for training
-        valid_train_mask = train_mask & np.isfinite(y)
-        valid_valid_mask = valid_mask & np.isfinite(y)
+        valid_train_mask = train_mask & finite_feature_mask & np.isfinite(y)
+        valid_valid_mask = valid_mask & finite_feature_mask & np.isfinite(y)
 
         if not np.any(valid_train_mask):
             raise ValueError("No valid native LightGBM training rows after filtering labels.")
@@ -237,9 +237,9 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
         
         print("\n[Step 5/6] Native Prediction & Signal Evaluation")
-        test_valid_mask = test_mask & ~np.isnan(X).any(axis=1)
+        test_valid_mask = test_mask & finite_feature_mask
         if not np.any(test_valid_mask):
-            raise ValueError("No valid native LightGBM test rows after filtering features.")
+            raise ValueError("No valid native LightGBM test rows after filtering invalid features.")
         X_test_df = pd.DataFrame(X[test_valid_mask])
         preds_arr = model.predict(X_test_df)
         

@@ -4,6 +4,8 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
+from src.evaluate import safe_cross_sectional_corr
+
 
 def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray):
     labels = dataset.get_label()
@@ -18,7 +20,7 @@ def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray)
         return "daily_ic", 0.0, True
 
     daily_ic = frame.groupby("date", sort=True).apply(
-        lambda x: x["pred"].corr(x["label"]),
+        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="pearson"),
         include_groups=False,
     ).dropna()
     if daily_ic.empty:

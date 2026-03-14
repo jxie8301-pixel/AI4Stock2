@@ -7,6 +7,22 @@ import numpy as np
 import pandas as pd
 
 
+def safe_cross_sectional_corr(
+    pred: pd.Series,
+    label: pd.Series,
+    method: str = "pearson",
+) -> float:
+    """Return NaN instead of warning when a cross-section has no variance."""
+    frame = pd.DataFrame({"pred": pred, "label": label}).dropna()
+    if len(frame) < 2:
+        return np.nan
+    if frame["pred"].nunique(dropna=True) < 2:
+        return np.nan
+    if frame["label"].nunique(dropna=True) < 2:
+        return np.nan
+    return float(frame["pred"].corr(frame["label"], method=method))
+
+
 def build_cross_section_benchmark(labels: pd.Series) -> pd.Series:
     """Compute daily cross-sectional mean return as a common reference series."""
     aligned_labels = labels.dropna()
@@ -59,10 +75,12 @@ def compute_signal_metrics(predictions: pd.Series, labels: pd.Series) -> dict:
 
     # Group by date, compute daily IC (Pearson correlation of ranks)
     daily_ic = df.groupby(level=0).apply(
-        lambda x: x["pred"].corr(x["label"]), include_groups=False
+        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="pearson"),
+        include_groups=False,
     )
     daily_rank_ic = df.groupby(level=0).apply(
-        lambda x: x["pred"].corr(x["label"], method="spearman"), include_groups=False
+        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="spearman"),
+        include_groups=False,
     )
 
     metrics = {

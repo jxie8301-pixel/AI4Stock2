@@ -6,6 +6,7 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import pandas as pd
+from src.evaluate import safe_cross_sectional_corr
 from src.models.utils.losses import PearsonLoss, CCCLoss
 
 
@@ -25,7 +26,7 @@ def compute_daily_ic(predictions: np.ndarray, labels: np.ndarray, dates: np.ndar
         return 0.0
 
     daily_ic = frame.groupby("date", sort=True).apply(
-        lambda x: x["pred"].corr(x["label"]),
+        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="pearson"),
         include_groups=False,
     )
     daily_ic = daily_ic.dropna()

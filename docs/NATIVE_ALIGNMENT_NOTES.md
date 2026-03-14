@@ -45,6 +45,34 @@ Default config values now match the Qlib wrapper:
 - `account: 100000000`
 - `risk_degree: 0.95`
 
+### 3. Native model selection now uses daily IC
+
+The old native LSTM early stopping logic used one global Pearson correlation over
+the entire validation split.
+
+That was not aligned with the project's reporting target, which is daily
+cross-sectional IC.
+
+The native model path now does the following:
+
+- `NativeStockDataset` carries sample dates
+- native LSTM validation computes mean daily IC
+- native LightGBM early stopping uses a custom `daily_ic` validation metric
+
+### 4. Native rolling/main now read project-owned universe files
+
+The old native path still read:
+
+`data/qlib_data_cn/instruments/<universe>.txt`
+
+That dependency has been replaced with project-owned native assets under:
+
+`data/universes/`
+
+The native loader now supports symbol membership windows with start/end dates,
+so the project can keep PIT-aware universe files without relying on Qlib's
+instrument directory structure.
+
 ## Still not fully aligned
 
 ### 1. Tradability rules are still missing
@@ -58,15 +86,7 @@ Native backtest still does not model:
 
 So native results are now closer, but still not a byte-for-byte replacement for `backtest_daily`.
 
-### 2. Native universe still depends on Qlib instrument files
-
-`main.py` and `run_native_rolling.py` still read:
-
-`data/qlib_data_cn/instruments/<universe>.txt`
-
-This blocks full de-Qlib execution and can silently fall back to the full market if the file is missing.
-
-### 3. Feature/processor semantics still differ
+### 2. Feature/processor semantics still differ
 
 The Qlib handler path still includes:
 
@@ -79,15 +99,9 @@ The Qlib handler path still includes:
 The native cache path does not yet reproduce those processors exactly.
 So model training is still not apples-to-apples with the legacy Qlib path.
 
-### 4. Validation metric is still mismatched
-
-Native LSTM early stopping still uses a global Pearson correlation over the whole validation set.
-Final reporting uses daily IC / RankIC.
-This can bias checkpoint selection away from the real production objective.
-
 ## Recommended next fixes
 
-1. Replace Qlib universe files with a native universe source and fail fast if the configured universe is unavailable.
-2. Reproduce the Qlib processor chain in native mode before training.
-3. Align the validation objective with daily IC / RankIC.
-4. Add a regression fixture comparing native and Qlib backtest outputs on a tiny deterministic panel.
+1. Reproduce the Qlib processor chain in native mode before training.
+2. Decide whether native training should also optimize rank-based metrics, not only Pearson-based daily IC.
+3. Add a regression fixture comparing native and Qlib backtest outputs on a tiny deterministic panel.
+4. Decide whether native universe files should become part of the data generation pipeline instead of being copied manually.

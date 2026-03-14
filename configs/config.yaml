@@ -5,6 +5,9 @@ qlib:
 backend: native
 alpha_version: 158
 
+native:
+  universe_dir: ./data/universes
+
 universe: csi300_real
 
 time:

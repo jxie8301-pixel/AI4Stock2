@@ -1,31 +1,14 @@
 """Qlib initialization and data download."""
 
 import qlib
-from qlib.utils import init_instance_by_config
 from pathlib import Path
 
 
 def init_qlib(provider_uri: str = "./data/qlib_data_cn", region: str = "cn"):
-    """Initialize Qlib with global caches enabled for performance."""
+    """Initialize Qlib with the given data directory and region."""
     provider_path = Path(provider_uri)
-    
-    # Enable Expression and Dataset Cache to speed up rolling training
-    cache_dir = Path("./data/qlib_cache")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    
-    qlib.init(
-        provider_uri=str(provider_path.resolve()), 
-        region=region,
-        expression_cache={
-            "class": "DiskExpressionCache",
-            "kwargs": {"cache_dir": str(cache_dir / "expr_cache")},
-        },
-        dataset_cache={
-            "class": "DiskDatasetCache",
-            "kwargs": {"cache_dir": str(cache_dir / "ds_cache")},
-        }
-    )
-    print(f"Qlib initialized with Cache: provider_uri={provider_path.resolve()}, region={region}")
+    qlib.init(provider_uri=str(provider_path.resolve()), region=region)
+    print(f"Qlib initialized: provider_uri={provider_path.resolve()}, region={region}")
 
 
 def download_data(target_dir: str = "./data/qlib_data_cn", region: str = "cn"):

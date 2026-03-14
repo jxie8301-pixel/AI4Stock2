@@ -2,6 +2,9 @@ qlib:
   provider_uri: ./data/qlib_data_cn
   region: cn
 
+native:
+  universe_dir: ./data/universes
+
 universe: csi300_real
 
 time:

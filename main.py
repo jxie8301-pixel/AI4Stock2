@@ -6,6 +6,8 @@ import json
 import pickle
 import yaml
 
+from src.label_utils import sanitize_label_array
+
 def load_config(config_path: str = "configs/config.yaml") -> dict:
     with open(config_path) as f:
         return yaml.safe_load(f)
@@ -222,7 +224,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     num_rows = meta["num_rows"]
     
     X = np.lib.format.open_memmap(Path(cache_dir) / "X.npy", mode="r", dtype=np.float32, shape=shape)
-    y = np.lib.format.open_memmap(Path(cache_dir) / "y.npy", mode="r", dtype=np.float32, shape=(num_rows,))
+    y_memmap = np.lib.format.open_memmap(Path(cache_dir) / "y.npy", mode="r", dtype=np.float32, shape=(num_rows,))
+    y = sanitize_label_array(y_memmap)
     dates = np.lib.format.open_memmap(Path(cache_dir) / "date.npy", mode="r", dtype=np.int64, shape=(num_rows,))
     symbols = np.lib.format.open_memmap(Path(cache_dir) / "symbol.npy", mode="r", dtype=np.int32, shape=(num_rows,))
     

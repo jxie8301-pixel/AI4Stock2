@@ -22,6 +22,8 @@ import pyarrow.parquet as pq
 from scipy.stats import percentileofscore
 from tqdm import tqdm
 
+from src.label_utils import DEFAULT_LABEL_ABS_CAP
+
 EPS = 1e-12
 
 
@@ -549,7 +551,28 @@ def compute_alpha158(df: pd.DataFrame, config: dict[str, Any] | None = None) -> 
 def build_open_to_open_label(df: pd.DataFrame) -> pd.Series:
     """Label: open_{t+2}/open_{t+1} - 1."""
     base = _prepare_ohlcv(df)
-    return base["open"].shift(-2) / base["open"].shift(-1) - 1
+    next_open = base["open"].shift(-1)
+    next2_open = base["open"].shift(-2)
+    label = next2_open / next_open - 1
+
+    valid = (
+        np.isfinite(next_open)
+        & np.isfinite(next2_open)
+        & (next_open > 0)
+        & (next2_open > 0)
+    )
+    if "volume" in base.columns:
+        next_vol = base["volume"].shift(-1)
+        next2_vol = base["volume"].shift(-2)
+        valid &= np.isfinite(next_vol) & np.isfinite(next2_vol) & (next_vol > 0) & (next2_vol > 0)
+    if "amount" in base.columns:
+        next_amt = base["amount"].shift(-1)
+        next2_amt = base["amount"].shift(-2)
+        valid &= np.isfinite(next_amt) & np.isfinite(next2_amt) & (next_amt > 0) & (next2_amt > 0)
+
+    label = label.where(valid)
+    label = label.where(label.abs() <= DEFAULT_LABEL_ABS_CAP)
+    return label
 
 
 def _index_to_epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:

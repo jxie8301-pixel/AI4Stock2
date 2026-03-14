@@ -5,6 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.label_utils import sanitize_label_series
+
 
 DEFAULT_ACCOUNT = 100_000_000.0
 DEFAULT_MIN_COST = 5.0
@@ -92,7 +94,7 @@ def run_native_backtest(
 
     common_idx = preds.index.intersection(labels.index)
     preds = preds.loc[common_idx].sort_index()
-    labels = labels.loc[common_idx].sort_index()
+    labels = sanitize_label_series(labels.loc[common_idx].sort_index())
     if preds.empty:
         raise ValueError("Native backtest received no overlapping prediction/label index.")
 

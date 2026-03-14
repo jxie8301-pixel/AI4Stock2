@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from src.evaluate import align_prediction_label_pairs, compute_portfolio_metrics
+from src.label_utils import sanitize_label_array, sanitize_label_series
 from src.models.pure_lightgbm import _daily_ic_metric
 from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
 
@@ -108,6 +109,25 @@ class NativeModelMetricsTest(unittest.TestCase):
         _, label = dataset[0]
 
         self.assertAlmostEqual(float(label), 0.25, places=8)
+
+    def test_sanitize_label_array_masks_unrealistic_returns(self):
+        labels = np.array([0.02, 0.31, -0.4, np.inf], dtype=np.float32)
+
+        cleaned = sanitize_label_array(labels, abs_cap=0.35)
+
+        self.assertTrue(np.isfinite(cleaned[0]))
+        self.assertTrue(np.isfinite(cleaned[1]))
+        self.assertTrue(np.isnan(cleaned[2]))
+        self.assertTrue(np.isnan(cleaned[3]))
+
+    def test_sanitize_label_series_masks_unrealistic_returns(self):
+        labels = pd.Series([0.01, 1.2, -0.5], index=["a", "b", "c"])
+
+        cleaned = sanitize_label_series(labels, abs_cap=0.35)
+
+        self.assertAlmostEqual(cleaned.loc["a"], 0.01, places=8)
+        self.assertTrue(np.isnan(cleaned.loc["b"]))
+        self.assertTrue(np.isnan(cleaned.loc["c"]))
 
 
 if __name__ == "__main__":

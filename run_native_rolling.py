@@ -10,6 +10,7 @@ import torch
 import numpy as np
 
 from src.label_utils import sanitize_label_array
+from src.model_config import get_lgbm_config
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
     with open(config_path) as f:
@@ -153,7 +154,7 @@ def run_rolling_pipeline():
             valid_dates = pd.to_datetime(dates[valid_valid_mask])
             
             model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
-            model = NativeLGBM(**cfg["model"])
+            model = NativeLGBM(**get_lgbm_config(cfg))
             
             if args.load_models and model_path.exists():
                 print(f"    Loading pre-trained model from {model_path}...")

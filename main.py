@@ -7,6 +7,7 @@ import pickle
 import yaml
 
 from src.label_utils import sanitize_label_array
+from src.model_config import get_lgbm_config
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
     with open(config_path) as f:
@@ -278,7 +279,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         y_valid_series = pd.Series(y[valid_valid_mask])
         valid_dates = pd.to_datetime(dates[valid_valid_mask])
         
-        model = NativeLGBM(**cfg["model"])
+        model = NativeLGBM(**get_lgbm_config(cfg))
         if args.load_model:
             model = _load_native_model(model_name, args.load_model, model)
             print("Skipping training.")

@@ -33,27 +33,33 @@ class NativeLGBM:
 
     def __init__(
         self,
-        loss: str = "mse",
+        loss: str = "huber",
         colsample_bytree: float = 0.8879,
-        learning_rate: float = 0.2,
+        learning_rate: float = 0.05,
         subsample: float = 0.8789,
-        lambda_l1: float = 205.6999,
-        lambda_l2: float = 580.9768,
+        subsample_freq: int = 1,
+        lambda_l1: float = 1.0,
+        lambda_l2: float = 1.0,
         max_depth: int = 8,
-        num_leaves: int = 210,
+        num_leaves: int = 63,
+        min_data_in_leaf: int = 100,
         num_threads: int = 20,
         early_stop: int = 50,
+        alpha: float = 0.9,
         **kwargs
     ):
         # Map generic loss names to lightgbm specific objectives
         objective = "regression"
         eval_metric = kwargs.get("eval_metric")
-        if loss == "mse":
+        if loss in {"mse", "regression", "l2"}:
             objective = "regression"
             default_metric = "l2"
-        elif loss == "mae":
+        elif loss in {"mae", "regression_l1", "l1"}:
             objective = "regression_l1"
             default_metric = "l1"
+        elif loss == "huber":
+            objective = "huber"
+            default_metric = "rmse"
         else:
             default_metric = "l2"
 
@@ -67,14 +73,18 @@ class NativeLGBM:
             "colsample_bytree": colsample_bytree,
             "learning_rate": learning_rate,
             "subsample": subsample,
+            "subsample_freq": subsample_freq,
             "lambda_l1": lambda_l1,
             "lambda_l2": lambda_l2,
             "max_depth": max_depth,
             "num_leaves": num_leaves,
+            "min_data_in_leaf": min_data_in_leaf,
             "num_threads": num_threads,
             "verbosity": -1,
             "seed": 42
         }
+        if objective == "huber":
+            self.params["alpha"] = alpha
         self.early_stop = early_stop
         self.model = None
 

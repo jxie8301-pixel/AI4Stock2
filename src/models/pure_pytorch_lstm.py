@@ -48,6 +48,7 @@ class NativeStockDataset(Dataset):
         mask: np.ndarray,
         lookback: int = 20,
         full_dates: np.ndarray | None = None,
+        feature_indices: np.ndarray | None = None,
     ):
         """
         Parameters
@@ -67,6 +68,7 @@ class NativeStockDataset(Dataset):
         self.labels = torch.from_numpy(full_labels)
         self.lookback = lookback
         self.full_dates = np.asarray(full_dates) if full_dates is not None else None
+        self.feature_indices = None if feature_indices is None else torch.as_tensor(feature_indices, dtype=torch.long)
         
         # 1. Find all rows where the stock symbol has been continuous for 'lookback' days
         continuous_mask = np.zeros_like(mask, dtype=bool)
@@ -92,6 +94,8 @@ class NativeStockDataset(Dataset):
         
         # X: (lookback, F)
         x = self.features[start_idx : end_idx + 1]
+        if self.feature_indices is not None:
+            x = x[:, self.feature_indices]
         x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         
         # Clamp extreme features (Winsorization) to stabilize training

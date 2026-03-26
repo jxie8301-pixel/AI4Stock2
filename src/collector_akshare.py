@@ -6,7 +6,6 @@ import akshare as ak
 from pathlib import Path
 import subprocess
 import sys
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 import pyarrow.parquet as pq
@@ -78,8 +77,6 @@ class RequestPatcher:
 RAW_DAILY_DIR = Path("data/raw/daily")
 RAW_VAL_DIR = Path("data/raw/valuation")
 PROCESSED_DIR = Path("data/processed/combined")
-QLIB_CSV_DIR = Path("data/qlib_csv_temp") # Temp dir just for dump_bin
-QLIB_DIR = Path("data/qlib_data_cn")
 
 DAILY_COLS = ['date', 'symbol', 'open', 'high', 'low', 'close', 'volume', 'amount', 'turnover']
 VAL_RENAME_MAP = {
@@ -88,12 +85,7 @@ VAL_RENAME_MAP = {
     '市净率': 'pb', 'PEG值': 'peg', '市现率': 'pcf', '市销率': 'ps'
 }
 
-# ALL fields that will be dumped into Qlib (including factor which we set to 1.0)
-QLIB_FIELDS = ['open', 'high', 'low', 'close', 'volume', 'amount', 'turnover', 
-               'total_mv', 'circ_mv', 'total_share', 'circ_share', 
-               'pe_ttm', 'pe_static', 'pb', 'peg', 'pcf', 'ps', 'factor']
-
-for d in [RAW_DAILY_DIR, RAW_VAL_DIR, PROCESSED_DIR, QLIB_CSV_DIR, QLIB_DIR]:
+for d in [RAW_DAILY_DIR, RAW_VAL_DIR, PROCESSED_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 def fetch_stock_list():
@@ -194,46 +186,6 @@ def fetch_and_fuse(symbol):
     except Exception:
         return False
 
-def convert_to_qlib():
-    """Convert combined parquets to CSV temporarily, then run dump_bin.py."""
-    print("[*] Generating temporary CSVs with all features for Qlib...")
-    files = list(PROCESSED_DIR.glob("*.parquet"))
-    
-    for f in tqdm(files, desc="Exporting CSV"):
-        try:
-            df = pd.read_parquet(f)
-            # Ensure factor exists
-            df['factor'] = 1.0
-            
-            # Keep date and all required QLIB_FIELDS. Fill missing cols with NaN.
-            out_cols = ['date'] + QLIB_FIELDS
-            for col in out_cols:
-                if col not in df.columns:
-                    df[col] = float('nan')
-                    
-            df[out_cols].to_csv(QLIB_CSV_DIR / f"{f.stem}.csv", index=False)
-        except Exception as e:
-            pass
-            
-    script_path = Path("dump_bin.py")
-    if not script_path.exists():
-        url = "https://raw.githubusercontent.com/microsoft/qlib/main/scripts/dump_bin.py"
-        urllib.request.urlretrieve(url, script_path)
-    
-    cmd = [
-        sys.executable, str(script_path), "dump_all",
-        "--data_path", str(QLIB_CSV_DIR.resolve()),
-        "--qlib_dir", str(QLIB_DIR.resolve()),
-        "--include_fields", ",".join(QLIB_FIELDS),
-        "--date_field_name", "date"
-    ]
-    print(f"[*] Running Qlib conversion: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True)
-    
-    # Clean up temp CSVs
-    import shutil
-    shutil.rmtree(QLIB_CSV_DIR)
-
 def collect_data(symbols=None, max_workers=4):
     if symbols is None:
         symbols = fetch_stock_list()
@@ -255,7 +207,6 @@ if __name__ == "__main__":
     parser.add_argument("--all", action="store_true", help="Fetch/update all A-share stocks")
     parser.add_argument("--symbols", help="Comma separated symbols to fetch")
     parser.add_argument("--update", action="store_true", help="Fetch missing data for existing symbols in cache via network")
-    parser.add_argument("--convert", action="store_true", help="Convert processed Parquets to Qlib binary format")
     parser.add_argument("--workers", type=int, default=4)
     args = parser.parse_args()
     
@@ -278,5 +229,3 @@ if __name__ == "__main__":
         else:
             print("[!] No symbols to update.")
             
-    if args.convert:
-        convert_to_qlib()

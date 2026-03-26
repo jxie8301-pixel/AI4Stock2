@@ -14,11 +14,16 @@ DEFAULT_RISK_DEGREE = 0.95
 DEFAULT_SLIPPAGE = 0.0005
 
 
+def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
+    return {stock: float(value) for stock, value in sorted(holdings.items())}
+
+
 def _select_topk_dropout_trades(
     scores: pd.Series,
     current_holdings: list[str],
     topk: int,
     n_drop: int,
+    locked_holdings: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
     """Mirror Qlib TopkDropoutStrategy's sell/buy selection."""
     ranked_scores = scores.dropna().sort_values(ascending=False)
@@ -26,18 +31,27 @@ def _select_topk_dropout_trades(
         return [], []
 
     current_index = pd.Index(current_holdings, dtype=object)
-    ranked_current = ranked_scores.reindex(current_index).sort_values(ascending=False).index
+    ranked_current = ranked_scores.reindex(current_index).sort_values(
+        ascending=False,
+        na_position="last",
+    ).index
+    locked_set = set() if locked_holdings is None else set(locked_holdings)
+    sellable_current = pd.Index([stock for stock in ranked_current if stock not in locked_set], dtype=object)
 
     n_drop = max(0, int(n_drop))
     topk = max(0, int(topk))
     candidate_count = n_drop + max(topk - len(ranked_current), 0)
     today = ranked_scores[~ranked_scores.index.isin(ranked_current)].index[:candidate_count]
 
-    comb = ranked_scores.reindex(ranked_current.union(today)).sort_values(ascending=False).index
-    effective_drop = min(n_drop, len(ranked_current))
-    drop_set = set(comb[-effective_drop:]) if effective_drop > 0 else set()
+    comb = ranked_scores.reindex(ranked_current.union(today)).sort_values(
+        ascending=False,
+        na_position="last",
+    ).index
+    sellable_comb = pd.Index([stock for stock in comb if stock not in locked_set], dtype=object)
+    effective_drop = min(n_drop, len(sellable_current))
+    drop_set = set(sellable_comb[-effective_drop:]) if effective_drop > 0 else set()
 
-    sell = [stock for stock in ranked_current if stock in drop_set]
+    sell = [stock for stock in sellable_current if stock in drop_set]
     buy_count = len(sell) + max(topk - len(ranked_current), 0)
     buy = list(today[:buy_count])
     return sell, buy
@@ -74,7 +88,9 @@ def run_native_backtest(
     risk_degree: float = DEFAULT_RISK_DEGREE,
     slippage: float = DEFAULT_SLIPPAGE,
     rebalance_freq: int = 1,
-) -> pd.DataFrame:
+    return_trace: bool = False,
+    trace_dates: set[pd.Timestamp] | None = None,
+) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
     """
     Simulate a Top-K long-only portfolio with Qlib-like dropout and costs.
 
@@ -106,18 +122,31 @@ def run_native_backtest(
     if pred_matrix.empty:
         raise ValueError("Native backtest received no dates with any realized returns.")
     rebalance_dates = set(pred_matrix.index[::rebalance_freq])
+    trace_dates_norm = None
+    if trace_dates is not None:
+        trace_dates_norm = {pd.Timestamp(date) for date in trace_dates}
 
     cash = float(account)
     holdings: dict[str, float] = {}
     records: list[dict[str, float | int | pd.Timestamp]] = []
+    trace_records: list[dict[str, object]] = []
 
     for date in pred_matrix.index:
+        cash_before = float(cash)
+        holdings_before = _snapshot_holdings(holdings)
         start_value = cash + sum(holdings.values())
         trade_cost_value = 0.0
         buy_value = 0.0
         sell_value = 0.0
         buy_count = 0
         sell_count = 0
+        frozen_holdings = 0
+        date_returns = label_matrix.loc[date]
+        locked_holdings = {
+            stock
+            for stock in holdings
+            if pd.isna(date_returns.get(stock, np.nan))
+        }
 
         if date in rebalance_dates:
             sell_list, buy_list = _select_topk_dropout_trades(
@@ -125,6 +154,7 @@ def run_native_backtest(
                 current_holdings=list(holdings.keys()),
                 topk=topk,
                 n_drop=n_drop,
+                locked_holdings=locked_holdings,
             )
 
             for stock in sell_list:
@@ -155,12 +185,17 @@ def run_native_backtest(
                     trade_cost_value += cost_value
                     buy_value += trade_value
                     buy_count += 1
+        else:
+            sell_list = []
+            buy_list = []
 
-        date_returns = label_matrix.loc[date]
         gross_pnl = 0.0
         for stock, position_value in list(holdings.items()):
             stock_ret = date_returns.get(stock, np.nan)
             if pd.isna(stock_ret):
+                # Treat missing realized return as a frozen position: mark flat
+                # for this step, keep the capital tied up, and block rebalancing.
+                frozen_holdings += 1
                 stock_ret = 0.0
             new_value = position_value * (1.0 + float(stock_ret))
             gross_pnl += new_value - position_value
@@ -186,9 +221,33 @@ def run_native_backtest(
                 "buy_count": buy_count,
                 "sell_count": sell_count,
                 "holdings": len(holdings),
+                "frozen_holdings": frozen_holdings,
                 "account_value": end_value,
             }
         )
+        if return_trace and (trace_dates_norm is None or pd.Timestamp(date) in trace_dates_norm):
+            trace_records.append(
+                {
+                    "datetime": date,
+                    "start_value": float(start_value),
+                    "end_value": float(end_value),
+                    "cash_before": cash_before,
+                    "cash_after": float(cash),
+                    "holdings_before": holdings_before,
+                    "holdings_after": _snapshot_holdings(holdings),
+                    "locked_holdings": sorted(locked_holdings),
+                    "sell_list": list(sell_list),
+                    "buy_list": list(buy_list),
+                    "buy_count": int(buy_count),
+                    "sell_count": int(sell_count),
+                    "buy_value": float(buy_value),
+                    "sell_value": float(sell_value),
+                    "trade_cost_value": float(trade_cost_value),
+                    "gross_return": float(gross_return),
+                    "net_return": float(net_return),
+                    "frozen_holdings": int(frozen_holdings),
+                }
+            )
 
     report = pd.DataFrame.from_records(records).set_index("datetime")
     report["cum_gross_return"] = (1.0 + report["gross_return"]).cumprod()
@@ -209,4 +268,10 @@ def run_native_backtest(
     print(f"Max Drawdown    : {max_drawdown:.2%}")
     print(f"Avg Daily Turnover: {report['turnover'].mean():.2%}")
 
-    return report
+    if not return_trace:
+        return report
+
+    trace_df = pd.DataFrame.from_records(trace_records)
+    if not trace_df.empty:
+        trace_df = trace_df.set_index("datetime")
+    return report, trace_df

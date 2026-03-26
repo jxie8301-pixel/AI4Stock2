@@ -21,8 +21,14 @@ import pandas as pd
 import pyarrow.parquet as pq
 from scipy.stats import percentileofscore
 from tqdm import tqdm
+import yaml
 
-from src.label_utils import DEFAULT_LABEL_ABS_CAP
+try:
+    from src.feature_profiles import resolve_feature_profile
+    from src.label_utils import DEFAULT_LABEL_ABS_CAP
+except ModuleNotFoundError:
+    from feature_profiles import resolve_feature_profile  # type: ignore
+    from label_utils import DEFAULT_LABEL_ABS_CAP  # type: ignore
 
 EPS = 1e-12
 
@@ -590,19 +596,23 @@ def _to_panel_arrays(feat: pd.DataFrame, label: pd.Series) -> tuple[np.ndarray, 
     return x2d, y1d, date_ns
 
 
-def _alpha_feature_count(alpha: str) -> int:
+def _alpha_feature_count(alpha: str, alpha158_config: dict[str, Any] | None = None) -> int:
     if alpha == "158":
-        return 158
+        return len(get_alpha158_feature_config(alpha158_config)[1])
     if alpha == "360":
         return 360
     raise ValueError(f"Unknown alpha: {alpha}")
 
 
-def _compute_symbol_feat_label(file_path: str, alpha: str) -> tuple[str, pd.DataFrame, pd.Series]:
+def _compute_symbol_feat_label(
+    file_path: str,
+    alpha: str,
+    alpha158_config: dict[str, Any] | None = None,
+) -> tuple[str, pd.DataFrame, pd.Series]:
     """Load one parquet and compute features + label."""
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
-    feat = compute_alpha158(df) if alpha == "158" else compute_alpha360(df)
+    feat = compute_alpha158(df, config=alpha158_config) if alpha == "158" else compute_alpha360(df)
     label = build_open_to_open_label(df)
     return symbol, feat, label
 
@@ -610,6 +620,7 @@ def _compute_symbol_feat_label(file_path: str, alpha: str) -> tuple[str, pd.Data
 def _count_file_worker(
     file_path: str,
     alpha: str,
+    alpha158_config: dict[str, Any] | None = None,
 ) -> tuple[str, int, int]:
     """Worker for panel-cache counting pass (fast metadata path)."""
     symbol = Path(file_path).stem
@@ -619,15 +630,16 @@ def _count_file_worker(
     except Exception:
         # Fallback for corrupted/unusual parquet metadata.
         n_rows = int(len(pd.read_parquet(file_path, columns=["date"])))
-    return file_path, symbol, _alpha_feature_count(alpha), n_rows
+    return file_path, symbol, _alpha_feature_count(alpha, alpha158_config), n_rows
 
 
 def _build_file_payload_worker(
     file_path: str,
     alpha: str,
+    alpha158_config: dict[str, Any] | None = None,
 ) -> tuple[str, int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Worker for panel-cache payload pass."""
-    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha)
+    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha, alpha158_config)
     payload = _to_panel_arrays(feat, label)
     return symbol, feat.shape[1], payload
 
@@ -635,6 +647,7 @@ def _build_file_payload_worker(
 def _write_panel_file_slice_process(
     file_path: str,
     alpha: str,
+    alpha158_config: dict[str, Any] | None,
     start: int,
     count: int,
     symbol_id: int,
@@ -646,7 +659,7 @@ def _write_panel_file_slice_process(
     n_feat: int,
 ) -> int:
     """Process worker: compute one file and write to fixed memmap slice."""
-    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha)
+    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha, alpha158_config)
     x_arr, y_arr, d_arr = _to_panel_arrays(feat, label)
     if x_arr.shape[0] != count:
         raise RuntimeError(
@@ -670,6 +683,8 @@ def generate_panel_cache(
     parquet_dir: str = "data/processed/combined",
     output_dir: str = "data/cache/alpha158_panel",
     alpha: str = "158",
+    alpha158_config: dict[str, Any] | None = None,
+    profile_name: str | None = None,
     workers: int = 1,
 ) -> dict[str, Any]:
     """Generate 2D panel cache arrays with no lookback/split."""
@@ -693,7 +708,7 @@ def generate_panel_cache(
     if workers == 1:
         pbar = tqdm(files, desc="counting", total=total_files, unit="file")
         for idx, fp in enumerate(pbar, start=1):
-            file_path, symbol, file_n_feat, cnt = _count_file_worker(str(fp), alpha)
+            file_path, symbol, file_n_feat, cnt = _count_file_worker(str(fp), alpha, alpha158_config)
             symbols.add(symbol)
             n_feat = file_n_feat if n_feat is None else n_feat
             if n_feat != file_n_feat:
@@ -707,7 +722,7 @@ def generate_panel_cache(
     else:
         def _run_parallel_count(executor) -> None:
             nonlocal n_feat, total_count
-            futures = [executor.submit(_count_file_worker, str(fp), alpha) for fp in files]
+            futures = [executor.submit(_count_file_worker, str(fp), alpha, alpha158_config) for fp in files]
             pbar = tqdm(total=total_files, desc="counting", unit="file")
             for idx, fut in enumerate(as_completed(futures), start=1):
                 file_path, symbol, file_n_feat, cnt = fut.result()
@@ -768,7 +783,7 @@ def generate_panel_cache(
     if workers == 1:
         pbar = tqdm(file_layout, desc="processing", total=total_files, unit="file")
         for idx, (file_path, symbol, start, cnt) in enumerate(pbar, start=1):
-            symbol2, file_n_feat, payload = _build_file_payload_worker(file_path, alpha)
+            symbol2, file_n_feat, payload = _build_file_payload_worker(file_path, alpha, alpha158_config)
             if file_n_feat != n_feat:
                 raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
             if symbol2 != symbol:
@@ -791,7 +806,7 @@ def generate_panel_cache(
     else:
         def _run_thread_write() -> None:
             def _thread_job(file_path: str, symbol: str, start: int, cnt: int) -> int:
-                symbol2, file_n_feat, payload = _build_file_payload_worker(file_path, alpha)
+                symbol2, file_n_feat, payload = _build_file_payload_worker(file_path, alpha, alpha158_config)
                 if file_n_feat != n_feat:
                     raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
                 if symbol2 != symbol:
@@ -841,6 +856,7 @@ def generate_panel_cache(
                             _write_panel_file_slice_process,
                             file_path,
                             alpha,
+                            alpha158_config,
                             start,
                             cnt,
                             sid,
@@ -869,12 +885,14 @@ def generate_panel_cache(
     metadata = {
         "cache_mode": "panel_2d",
         "alpha": alpha,
+        "profile_name": profile_name or ("alpha158_custom" if alpha == "158" and alpha158_config else f"alpha{alpha}"),
         "date_unit": "ns",
         "num_features": n_feat,
         "num_rows": total_count,
         "shape": [total_count, n_feat],
-        "feature_names": get_alpha158_feature_config()[1] if alpha == "158" else get_alpha360_feature_config()[1],
+        "feature_names": get_alpha158_feature_config(alpha158_config)[1] if alpha == "158" else get_alpha360_feature_config()[1],
         "label": "open_t+2 / open_t+1 - 1",
+        "alpha158_config": alpha158_config if alpha == "158" else None,
         "symbol_to_id": symbol_to_id,
         "row_order": "symbol-major (input file order), date ascending within symbol",
     }
@@ -897,8 +915,10 @@ def validate_default_dimensions() -> dict[str, int]:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate 2D panel cache from parquet (no qlib).")
+    parser.add_argument("--config", default="configs/config.yaml", help="Experiment config path for resolving feature profile.")
     parser.add_argument("--parquet-dir", default="data/processed/combined", help="Input parquet directory.")
     parser.add_argument("--output-dir", default=None, help="Output cache directory.")
+    parser.add_argument("--profile", default=None, help="Feature profile name defined in configs/feature_profiles.yaml.")
     parser.add_argument("--alpha", choices=["158", "360"], default="158", help="Alpha feature set.")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for counting/writing.")
     return parser.parse_args()
@@ -907,12 +927,31 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     validate_default_dimensions()
-    out_dir = args.output_dir or f"data/cache/alpha{args.alpha}_panel"
-    print(f"cache_mode=panel_2d, alpha={args.alpha}, output={out_dir}")
+    cfg = {}
+    if args.config:
+        with open(args.config, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+
+    use_profile = args.profile is not None or "features" in cfg
+    if use_profile:
+        profile = resolve_feature_profile(cfg, profile_name=args.profile)
+        alpha = profile["alpha"]
+        alpha158_config = profile["alpha158_config"] if alpha == "158" else None
+        out_dir = args.output_dir or profile["cache_dir"]
+        profile_name = profile["name"]
+    else:
+        alpha = args.alpha
+        alpha158_config = None
+        out_dir = args.output_dir or f"data/cache/alpha{alpha}_panel"
+        profile_name = f"alpha{alpha}_full"
+
+    print(f"cache_mode=panel_2d, alpha={alpha}, profile={profile_name}, output={out_dir}")
     generate_panel_cache(
         parquet_dir=args.parquet_dir,
         output_dir=out_dir,
-        alpha=args.alpha,
+        alpha=alpha,
+        alpha158_config=alpha158_config,
+        profile_name=profile_name,
         workers=max(1, int(args.workers)),
     )
 

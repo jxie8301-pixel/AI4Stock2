@@ -9,6 +9,9 @@ import datetime
 import torch
 import numpy as np
 
+from src.experiment_store import finalize_run_store, prepare_run_store
+from src.feature_profiles import get_native_cache_dir
+from src.feature_selection import compute_finite_feature_mask, resolve_selected_features
 from src.label_utils import sanitize_label_array
 from src.model_config import get_lgbm_config
 
@@ -19,7 +22,7 @@ def load_config(config_path: str = "configs/config.yaml") -> dict:
 def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
-    parser.add_argument("--model", default="lstm", help="Model name")
+    parser.add_argument("--model", default="lgbm", help="Model name")
     parser.add_argument("--horizon", type=int, default=10, help="Rolling horizon in trading days")
     parser.add_argument("--train-days", type=int, default=242, help="Training window length in trading days")
     parser.add_argument("--valid-days", type=int, default=10, help="Validation window length in trading days")
@@ -27,29 +30,53 @@ def run_rolling_pipeline():
     parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
     parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step")
     parser.add_argument("--rebalance-freq", type=int, default=5, help="Backtest rebalance frequency in days (default: 5 for weekly)")
+    parser.add_argument("--topk", type=int, help="Override strategy top-k holdings")
+    parser.add_argument("--n-drop", dest="n_drop", type=int, help="Override strategy daily replacement count")
+    parser.add_argument("--run-tag", help="Short label for local experiment storage/comparison")
+    parser.add_argument("--store-dir", help="Override local experiment store root")
+    parser.add_argument("--disable-local-store", action="store_true", help="Disable automatic local experiment/model storage")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     cfg["model"]["name"] = args.model
+    if args.topk is not None:
+        cfg["strategy"]["topk"] = args.topk
+    if args.n_drop is not None:
+        cfg["strategy"]["n_drop"] = args.n_drop
     
     results_dir = Path("results") / f"native_rolling_{args.model}"
     models_dir = results_dir / "models"
     results_dir.mkdir(parents=True, exist_ok=True)
     if args.save_models or args.load_models:
         models_dir.mkdir(parents=True, exist_ok=True)
+    run_store = prepare_run_store(
+        cfg,
+        args,
+        backend="native",
+        pipeline="rolling",
+        model_name=args.model,
+        model_ext=".pt" if args.model != "lgbm" else ".pkl",
+    )
         
     print(f"\n>>> Running Native Rolling Pipeline (Backend: NATIVE) <<<")
     
     # ── 1. Load Global Native Data ────────────────────────
-    alpha = cfg.get("alpha_version", 158)
-    cache_dir = f"data/cache/alpha{alpha}_panel"
+    cache_dir = get_native_cache_dir(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
     
     print("\n[Step 1] Loading Global Native Memmap Data")
     meta_path = Path(cache_dir) / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Native cache missing: {cache_dir}. "
+            "Please run `uv run python src/gen_feature.py --config configs/config.yaml` first."
+        )
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
+
+    selected_feature_idx, selected_feature_names = resolve_selected_features(meta, cfg)
+    print(f"Selected features: {len(selected_feature_names)} / {len(meta['feature_names'])}")
         
     shape = tuple(meta["shape"])
     num_rows = meta["num_rows"]
@@ -94,7 +121,7 @@ def run_rolling_pipeline():
     # ── 2. Setup Rolling Windows ────────────────────────
     rolling_steps = range(0, len(test_calendar), args.horizon)
     all_predictions = []
-    finite_feature_mask = ~np.isinf(X).any(axis=1)
+    finite_feature_mask = compute_finite_feature_mask(X, selected_feature_idx, num_rows)
     
     print(f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} with {args.horizon}-day steps.")
 
@@ -147,9 +174,9 @@ def run_rolling_pipeline():
                 print("    Skipping window: no valid LightGBM validation rows.")
                 continue
             
-            X_train_df = pd.DataFrame(X[valid_train_mask])
+            X_train_df = pd.DataFrame(X[valid_train_mask][:, selected_feature_idx], columns=selected_feature_names)
             y_train_series = pd.Series(y[valid_train_mask])
-            X_valid_df = pd.DataFrame(X[valid_valid_mask])
+            X_valid_df = pd.DataFrame(X[valid_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
             y_valid_series = pd.Series(y[valid_valid_mask])
             valid_dates = pd.to_datetime(dates[valid_valid_mask])
             
@@ -171,15 +198,40 @@ def run_rolling_pipeline():
             if not np.any(test_valid_mask):
                 print("    Skipping window: no valid LightGBM test rows.")
                 continue
-            X_test_df = pd.DataFrame(X[test_valid_mask])
+            X_test_df = pd.DataFrame(X[test_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
             
             preds_arr = model.predict(X_test_df)
             end_indices = np.where(test_valid_mask)[0]
             
         else:
-            train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback, full_dates=dates)
-            valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback, full_dates=dates)
-            test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback, full_dates=dates)
+            feature_indices = np.asarray(selected_feature_idx)
+            train_dataset = NativeStockDataset(
+                X,
+                y,
+                symbols,
+                train_mask,
+                lookback=lookback,
+                full_dates=dates,
+                feature_indices=feature_indices,
+            )
+            valid_dataset = NativeStockDataset(
+                X,
+                y,
+                symbols,
+                valid_mask,
+                lookback=lookback,
+                full_dates=dates,
+                feature_indices=feature_indices,
+            )
+            test_dataset = NativeStockDataset(
+                X,
+                y,
+                symbols,
+                test_mask,
+                lookback=lookback,
+                full_dates=dates,
+                feature_indices=feature_indices,
+            )
 
             if len(train_dataset) == 0:
                 print("    Skipping window: native LSTM training dataset is empty.")
@@ -206,7 +258,7 @@ def run_rolling_pipeline():
             model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
             
             trainer = NativeLSTMTrainer(
-                d_feat=meta["num_features"],
+                d_feat=len(selected_feature_names),
                 hidden_size=cfg["model"]["hidden_size"],
                 num_layers=cfg["model"]["num_layers"],
                 dropout=cfg["model"]["dropout"],
@@ -315,6 +367,29 @@ def run_rolling_pipeline():
     
     with open(results_dir / "native_portfolio_metrics.json", "w") as f:
         json.dump(sanitize_dict_keys(portfolio_results), f, indent=2, default=str)
+
+    manifest_path = finalize_run_store(
+        run_store,
+        cfg=cfg,
+        args=args,
+        backend="native",
+        pipeline="rolling",
+        model_name=args.model,
+        results_dir=results_dir,
+        signal_metrics=signal_metrics,
+        portfolio_metrics=sanitize_dict_keys(portfolio_results),
+        models_dir=models_dir if (args.save_models or args.load_models) else None,
+        extra_context={
+            "horizon": args.horizon,
+            "train_days": args.train_days,
+            "valid_days": args.valid_days,
+            "test_start": str(test_start.date()),
+            "test_end": str(test_end.date()),
+            "selected_features": selected_feature_names,
+        },
+    )
+    if manifest_path:
+        print(f"Local experiment manifest saved: {manifest_path}")
 
     print(f"\nNative rolling results saved to {results_dir}")
 

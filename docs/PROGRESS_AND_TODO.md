@@ -1,82 +1,84 @@
-# AI4Stock2: Progress & TODO Map
+# AI4Stock2 Progress And TODO
 
-## 1. Version History & Milestones
+## Current Status
 
-### V2.2 - The Final Realistic Stable Version (Current)
-*   **True Realism Alignment**: 
-    *   **Label Correction**: Switched to `Open-to-Open` labels (`Ref($open, -2)/Ref($open, -1) - 1`). This perfectly aligns the model's prediction target with our T+1 morning execution strategy.
-    *   **Universe Correction**: Cleaned the `csi300_real.txt` universe to use authentic index constituents while matching our pure-numeric data format.
-    *   **Data Error Filtering**: Implemented a sanity check in `evaluate.py` to clip extreme daily portfolio returns (>50%) caused by data artifacts.
-*   **Algorithm Upgrade**: Integrated **AdamW** with a `1e-4` weight decay as the default optimizer for LSTM, significantly improving generalization and preventing the "Epoch 2 collapse".
-*   **Performance Stability**: Standardized the `early_stop` to 10 rounds to save 50% training time without losing signal quality.
-*   **Results (Rolling 2022-2025)**:
-    *   **Rank IC**: 0.0579 (Extremely high for realistic Open-to-Open prediction).
-    *   **Annualized Return**: **+184.3%** (True profit after 10% limit rules and 5bps slippage).
-    *   **Information Ratio (IR)**: **2.19** (Exceptional risk-adjusted performance).
-    *   **Max Drawdown**: **-26.1%** (Controlled risk during the 2024 volatility).
+The project has completed the runtime transition to a native pipeline.
 
-### V2.1 - The Realism & Rolling Breakthrough
-*   **Rolling Retrain Pipeline**: Implemented `run_rolling.py` training a new model every 6 months.
-*   **Realistic Backtesting**: Switched to `open` price execution and 10% limit rules.
-*   **Digital Reporting**: Added CSV exports and monthly heatmap visualization.
+What is true now:
 
-### V2.0 - The Feature Fusion Update
-*   **Fundamental Data**: Integrated `pe_ttm`, `pb`, `total_mv`, etc., into the 166-dimensional feature tensor.
+- `qlib` runtime code has been removed from the active project
+- `pyqlib` has been removed from project dependencies
+- The main runnable workflows are:
+  - `main.py`
+  - `run_native_rolling.py`
+  - `src/gen_feature.py`
+- Native feature caches are built from Parquet source data
+- Training-time feature subset selection is supported through `features.selected_columns`
+- Local experiment storage is enabled through `results/experiments/`
 
-### V1.0 - The Pearson Breakthrough
-*   **Loss Function**: Replaced MSE with Pearson Correlation Loss (optimizing directly for IC).
+## Current Recommended Workflow
 
----
+1. Update or refresh Parquet data with `src/collector_akshare.py`
+2. Generate a cache with the desired feature profile
+3. Train `lgbm` on rolling windows with `run_native_rolling.py`
+4. Compare experiments through `results/experiments/experiment_index.csv`
 
-## 2. Immediate TODO List (Phase 5: Strategy Mastery)
+## Immediate TODO
 
-### Portfolio Engineering
-- [ ] **Risk Parity & Confidence Weighting**: Optimize the Top 30 weights based on prediction strength.
-- [ ] **Sector Neutralization**: Prevent the LSTM from over-concentrating in specific industry themes.
-- [ ] **Transaction Cost Sensitivity Analysis**: Test the strategy's survivability with higher slippage (e.g., 20bps).
+### 1. LightGBM Feature Research
 
-### Model Evolution
-- [ ] **Transformer Rolling**: Run the 2022-2025 pipeline with the Transformer model using the new AdamW/Open-Open configuration.
-- [ ] **GNN Phase**: Incorporate industry relationship graphs to capture sector rotation Alpha.
+- [ ] Add a native `lgbm_purified_v1` feature profile inspired by the strongest old-project factors
+- [ ] Add native support for valuation/style factors such as `ep_ttm`, `bp`, `log_mcap`, `is_loss`
+- [ ] Add liquidity and microstructure factors such as `amihud_20`, `turnover_20`, `vwap_ratio`
+- [ ] Compare `alpha158_compact_v1` vs `alpha158_full` vs `lgbm_purified_v1`
 
-### Infrastructure
-- [ ] **Automated PIT (Point-in-Time) Universe**: Dynamically load index constituents based on the date to fully eliminate survivorship bias.
+### 2. Training-Time Transforms
 
----
+- [ ] Add optional daily cross-sectional rank transform before model training
+- [ ] Add optional feature winsorization / clipping transform in the training path
+- [ ] Add optional label de-meaning for LightGBM experiments
+- [ ] Record applied transforms in experiment manifests
 
-## 3. De-Qlib Migration Path (Execution Plan)
+### 3. Native Data Quality
 
-### Phase A - Data Layer (Parquet as Source, NPY/Memmap as Training Cache)
-- [ ] Keep `data/processed/combined/*.parquet` as source of truth.
-- [ ] Add `src/gen_feature.py` to load per-symbol parquet and build panel data `(date, instrument)`.
-- [ ] Generate labels with current realistic definition: `open_{t+2}/open_{t+1} - 1`.
-- [ ] Export model-ready cache to `data/cache/{split}/X.memmap`, `y.memmap`, `meta.parquet`.
+- [ ] Add a feature coverage report during cache generation
+- [ ] Add per-feature NaN / inf diagnostics to `meta.json`
+- [ ] Add a cache validation command for shape, names, coverage, and label sanity
+- [ ] Review whether valuation fields are complete enough across the full sample
 
-### Phase B - Feature Layer (No qlib Runtime)
-- [ ] Use `src/alpha_definitions.py` as canonical Alpha158/Alpha360 expression definitions.
-- [ ] Implement pandas-based operators required by Alpha set (`Ref/Mean/Std/Rank/IdxMax/...`).
-- [ ] Add feature validity checks: NaN ratio, inf ratio, and per-feature coverage report.
-- [ ] Freeze feature list + order in `configs/feature_schema.yaml` for reproducibility.
+### 4. Backtest Realism
 
-### Phase C - Dataset & Training Layer
-- [ ] Replace `TSDatasetH/DatasetH` with local dataset loaders reading memmap directly.
-- [ ] Connect `src/models/pure_pytorch_lstm.py` into `main.py` as `model.name: pure_lstm`.
-- [ ] Add train/valid/test split before normalization to avoid leakage.
-- [ ] Save checkpoints and prediction outputs in the same format as current pipeline.
+- [ ] Add explicit tradability flags for suspension / invalid rows where possible
+- [ ] Evaluate whether limit-up / limit-down blocking should be modeled in native backtest
+- [ ] Add higher-slippage sensitivity experiments
+- [ ] Add risk control experiments for lower turnover and lower drawdown
 
-### Phase D - Evaluation & Backtest Layer
-- [ ] Replace `qlib.contrib.evaluate.risk_analysis` with local metrics (`ann_ret`, `vol`, `sharpe`, `max_drawdown`).
-- [ ] Implement local `TopK + n_drop` simulator with open-price execution and transaction costs.
-- [ ] Validate parity vs current qlib path on same period (`2024-01-01` to `2025-12-31`).
-- [ ] Add tolerance gates: IC diff, turnover diff, annual return diff.
+### 5. Strategy Layer
 
-### Phase E - Switch & Cleanup
-- [ ] Add config switch `pipeline.backend: qlib | native`.
-- [ ] Make `native` default after parity tests pass.
-- [ ] Move qlib-specific modules behind optional import guards.
-- [ ] Remove hard dependency `pyqlib` from default install profile.
+- [ ] Add score-weighted portfolio construction instead of pure equal weight
+- [ ] Add sector / style exposure diagnostics
+- [ ] Add market-regime comparison for rebalance frequency
+- [ ] Compare `topk` / `n_drop` combinations systematically
 
-### Exit Criteria
-- [ ] End-to-end run (`download/update -> feature gen -> train -> eval -> backtest`) succeeds without importing `qlib`.
-- [ ] Rolling pipeline (`run_rolling.py`) has native backend implementation.
-- [ ] Performance regression within agreed tolerance on key metrics.
+### 6. Native Model Roadmap
+
+- [ ] Decide whether native LSTM should remain supported as a secondary path
+- [ ] If sequence models remain in scope, build a real native Transformer implementation
+- [ ] Add a unified save/load contract shared by all native models
+
+### 7. Tooling And UX
+
+- [ ] Add a script to compare runs directly from `experiment_index.csv`
+- [ ] Add a script to summarize the best run per model/profile/tag
+- [ ] Add richer manifest metadata for selected features and transforms
+- [ ] Improve README with a short native quickstart
+
+## Research Priority Recommendation
+
+If only one direction should be pursued next, it should be:
+
+1. native LightGBM
+2. better factor set
+3. training-time cross-sectional transforms
+
+This is more likely to improve results than adding another deep model right now.

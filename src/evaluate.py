@@ -95,11 +95,28 @@ def compute_signal_metrics(predictions: pd.Series, labels: pd.Series) -> dict:
 
 
 def compute_portfolio_metrics(portfolio_metric) -> dict:
-    """Extract portfolio-level metrics and apply sanity checks natively."""
+    """Extract portfolio metrics with a consistent net-return interpretation.
+
+    Qlib's daily report stores ``return`` before trading cost, while the native
+    engine already reports net return. Normalize both to net return here so
+    downstream metrics and plots operate on the same semantic series.
+    """
     report, _ = portfolio_metric
     report = report.copy()
-    
-    returns = report["return"]
+
+    # Qlib report columns: account/value/cash/... and ``return`` is gross of cost.
+    is_qlib_style_report = {
+        "account",
+        "cash",
+        "value",
+        "cost",
+        "turnover",
+    }.issubset(report.columns) and "account_value" not in report.columns
+    if is_qlib_style_report:
+        report["gross_return"] = report["return"].astype(float)
+        report["return"] = report["gross_return"] - report["cost"].astype(float)
+
+    returns = report["return"].astype(float)
     ann_factor = 242  # A-share average trading days per year
     
     # Calculate native metrics

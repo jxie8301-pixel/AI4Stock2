@@ -1,12 +1,11 @@
-qlib:
-  provider_uri: ./data/qlib_data_cn
-  region: cn
-
-backend: native
 alpha_version: 158
 
 native:
   universe_dir: ./data/universes
+
+artifacts:
+  enable_local_store: true
+  store_dir: ./results/experiments
 
 universe: csi300_real
 
@@ -16,12 +15,18 @@ time:
   test:  ["2024-01-01", "2025-12-31"]
 
 features:
+  alpha: 158
+  profile: alpha158_compact_v1
+  # selected_columns:
+  #   - KMID
+  #   - MA20
+  #   - RSV20
   handler: Alpha158
   lookback: 20
   use_valuation: True
 
 model:
-  name: lstm
+  name: lgbm
   hidden_size: 64
   num_layers: 2
   dropout: 0.2

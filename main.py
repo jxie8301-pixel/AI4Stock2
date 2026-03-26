@@ -1,4 +1,4 @@
-"""AI4Stock2 - Quantitative investment pipeline with dual backend routing."""
+"""AI4Stock2 native quantitative investment pipeline."""
 
 import argparse
 from pathlib import Path
@@ -6,8 +6,13 @@ import json
 import pickle
 import yaml
 
+from src.experiment_store import finalize_run_store, prepare_run_store
+from src.feature_selection import compute_finite_feature_mask, resolve_selected_features
+from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
+from src.feature_profiles import get_native_cache_dir
 from src.label_utils import sanitize_label_array
 from src.model_config import get_lgbm_config
+
 
 def load_config(config_path: str = "configs/config.yaml") -> dict:
     with open(config_path) as f:
@@ -50,151 +55,36 @@ def _load_native_model(model_name: str, load_path: str, model_obj, device: str |
     print(f"Model loaded: {path}")
     return model_obj
 
-def run_qlib_pipeline(cfg, args, results_dir, model_name):
-    """Original Qlib-dependent pipeline."""
-    # ── Step 1: Data setup ────────────────────────────────────────────
-    print("\n[Step 1/6] Data Setup")
-    from src.data_setup import download_data, init_qlib
 
-    if args.download_only:
-        download_data(
-            target_dir=cfg["qlib"]["provider_uri"],
-            region=cfg["qlib"]["region"],
-        )
-        print("Data download complete. Exiting.")
+def _maybe_export_backtest_trace(
+    *,
+    args,
+    results_dir: Path,
+    prefix: str,
+    report_for_selection,
+    rerun_fn,
+):
+    manual_dates = parse_trace_dates_arg(getattr(args, "trace_dates", None))
+    auto_dates = set()
+    if getattr(args, "trace_backtest", False):
+        auto_dates = set(select_trace_dates(report_for_selection, top_n=getattr(args, "trace_top_days", 5)))
+
+    selected_dates = sorted(manual_dates | auto_dates)
+    if not selected_dates:
         return
 
-    init_qlib(
-        provider_uri=cfg["qlib"]["provider_uri"],
-        region=cfg["qlib"]["region"],
+    trace_df = rerun_fn(set(selected_dates))
+    trace_path, dates_path = save_trace_artifacts(
+        trace_df=trace_df,
+        trace_dates=selected_dates,
+        results_dir=results_dir,
+        prefix=prefix,
     )
-
-    # ── Step 2: Feature engineering ───────────────────────────────────
-    print("\n[Step 2/6] Feature Engineering")
-    from src.features import build_alpha158_handler
-
-    handler = build_alpha158_handler(
-        instruments=cfg["universe"],
-        start_time=cfg["time"]["train"][0],
-        end_time=cfg["time"]["test"][1],
-        fit_start_time=cfg["time"]["train"][0],
-        fit_end_time=cfg["time"]["train"][1],
-        use_valuation=cfg["features"].get("use_valuation", True),
-    )
-
-    # ── Step 3: Dataset construction ──────────────────────────────────
-    print("\n[Step 3/6] Dataset Construction")
-    from src.dataset import build_ts_dataset, build_tabular_dataset
-
-    segments = {
-        "train": tuple(cfg["time"]["train"]),
-        "valid": tuple(cfg["time"]["valid"]),
-        "test": tuple(cfg["time"]["test"]),
-    }
-    
-    if model_name == "lgbm":
-        dataset = build_tabular_dataset(
-            handler=handler,
-            segments=segments,
-        )
-    else:
-        dataset = build_ts_dataset(
-            handler=handler,
-            segments=segments,
-            step_len=cfg["features"]["lookback"],
-        )
-
-    # ── Step 4: Model training ────────────────────────────────────────
-    if args.load_model:
-        print(f"\n[Step 4/6] Loading Pre-trained Model from {args.load_model}")
-        import pickle
-        with open(args.load_model, "rb") as f:
-            model = pickle.load(f)
-        print("Model loaded successfully. Skipping training.")
-    else:
-        print(f"\n[Step 4/6] Model Training ({model_name})")
-        model = _build_model(cfg, args.gpu)
-        model.fit(dataset)
-        print("Training complete.")
-        
-        if args.save_model:
-            print(f"Saving model to {args.save_model}...")
-            model.to_pickle(args.save_model)
-            print("Model saved.")
-
-    # ── Step 5: Prediction & signal evaluation ────────────────────────
-    print("\n[Step 5/6] Prediction & Signal Evaluation")
-    from src.evaluate import (
-        build_cross_section_benchmark,
-        compute_signal_metrics,
-        plot_ic_series,
-        print_metrics,
-    )
-
-    predictions = model.predict(dataset)
-
-    # Get test labels for IC calculation
-    test_label = dataset.handler.fetch(col_set="label")
-    test_start = cfg["time"]["test"][0]
-    test_end = cfg["time"]["test"][1]
-    test_label = test_label.loc[(slice(test_start, test_end), slice(None)), :]
-    
-    if hasattr(test_label, "iloc"):
-        test_label = test_label.iloc[:, 0]
-
-    test_preds = predictions.loc[predictions.index.get_level_values(0) >= test_start]
-
-    common_idx = test_preds.index.intersection(test_label.index)
-    aligned_preds = test_preds.loc[common_idx]
-    aligned_labels = test_label.loc[common_idx]
-
-    signal_metrics, daily_ic = compute_signal_metrics(aligned_preds, aligned_labels)
-
-    plot_ic_series(daily_ic, save_path=str(results_dir / "ic_series.png"))
-    
-    if args.skip_backtest:
-        print_metrics(signal_metrics)
-        print(f"\n[Step 6/6] Backtest skipped.\n\nAll results saved to: {results_dir}/")
-        return
-
-    # ── Step 6: Backtest ──────────────────────────────────────────────
-    print("\n[Step 6/6] Backtest")
-    from src.backtest import run_backtest
-    from src.evaluate import (
-        compute_portfolio_metrics,
-        plot_cumulative_return,
-        plot_drawdown,
-        plot_monthly_heatmap,
-        save_monthly_report,
-    )
-
-    portfolio_metric = run_backtest(
-        predictions=test_preds,
-        topk=cfg["strategy"]["topk"],
-        n_drop=cfg["strategy"]["n_drop"],
-        cost_buy=cfg["backtest"]["cost"]["buy"],
-        cost_sell=cfg["backtest"]["cost"]["sell"],
-    )
-
-    portfolio_results, report = compute_portfolio_metrics(portfolio_metric)
-    bench_series = build_cross_section_benchmark(aligned_labels)
-    report["bench"] = bench_series.reindex(pd.to_datetime(report.index)).fillna(0.0).to_numpy()
-
-    plot_cumulative_return(report, save_path=str(results_dir / "cumulative_return.png"))
-    plot_drawdown(report, save_path=str(results_dir / "drawdown.png"))
-    plot_monthly_heatmap(report, save_path=str(results_dir / "monthly_heatmap.png"))
-    save_monthly_report(report, save_path=str(results_dir / "monthly_report.csv"))
-
-    print_metrics(signal_metrics, portfolio_results)
-
-    with open(results_dir / "portfolio_metrics.json", "w") as f:
-        json.dump(portfolio_results, f, indent=2, default=str)
-
-    print(f"\nAll results saved to: {results_dir}/")
-    print("Done!")
+    print(f"Backtest trace saved: {trace_path}")
+    print(f"Trace date manifest saved: {dates_path}")
 
 def run_native_pipeline(cfg, args, results_dir, model_name):
-    """Pure PyTorch pipeline independent of Qlib."""
+    """Native training, evaluation, and backtest pipeline."""
     import pandas as pd
     import numpy as np
     import torch
@@ -208,18 +98,23 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         plot_ic_series,
     )
     
-    alpha = cfg.get("alpha_version", 158)
-    cache_dir = f"data/cache/alpha{alpha}_panel"
+    cache_dir = get_native_cache_dir(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
     
     print("\n[Step 1/6] Loading Native Memmap Data")
     meta_path = Path(cache_dir) / "meta.json"
     if not meta_path.exists():
-        raise FileNotFoundError(f"Native cache missing. Please run `python src/gen_feature.py --alpha {alpha}` first.")
+        raise FileNotFoundError(
+            f"Native cache missing: {cache_dir}. "
+            "Please run `uv run python src/gen_feature.py --config configs/config.yaml` first."
+        )
         
     with open(meta_path, "r", encoding="utf-8") as f:
         meta = json.load(f)
+
+    selected_feature_idx, selected_feature_names = resolve_selected_features(meta, cfg)
+    print(f"Selected features: {len(selected_feature_names)} / {len(meta['feature_names'])}")
         
     shape = tuple(meta["shape"])
     num_rows = meta["num_rows"]
@@ -259,7 +154,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1])) & uni_mask
     
     print("\n[Step 3/6] Initializing Native Datasets / Models")
-    finite_feature_mask = ~np.isinf(X).any(axis=1)
+    finite_feature_mask = compute_finite_feature_mask(X, selected_feature_idx, num_rows)
     
     if model_name == "lgbm":
         from src.models.pure_lightgbm import NativeLGBM
@@ -273,9 +168,9 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         if not np.any(valid_valid_mask):
             raise ValueError("No valid native LightGBM validation rows after filtering labels.")
         
-        X_train_df = pd.DataFrame(X[valid_train_mask])
+        X_train_df = pd.DataFrame(X[valid_train_mask][:, selected_feature_idx], columns=selected_feature_names)
         y_train_series = pd.Series(y[valid_train_mask])
-        X_valid_df = pd.DataFrame(X[valid_valid_mask])
+        X_valid_df = pd.DataFrame(X[valid_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
         y_valid_series = pd.Series(y[valid_valid_mask])
         valid_dates = pd.to_datetime(dates[valid_valid_mask])
         
@@ -292,7 +187,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         test_valid_mask = test_mask & finite_feature_mask
         if not np.any(test_valid_mask):
             raise ValueError("No valid native LightGBM test rows after filtering invalid features.")
-        X_test_df = pd.DataFrame(X[test_valid_mask])
+        X_test_df = pd.DataFrame(X[test_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
         preds_arr = model.predict(X_test_df)
         
         # We need the indices to align dates and symbols
@@ -300,9 +195,33 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     else:
         from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
         from torch.utils.data import DataLoader
-        train_dataset = NativeStockDataset(X, y, symbols, train_mask, lookback=lookback, full_dates=dates)
-        valid_dataset = NativeStockDataset(X, y, symbols, valid_mask, lookback=lookback, full_dates=dates)
-        test_dataset = NativeStockDataset(X, y, symbols, test_mask, lookback=lookback, full_dates=dates)
+        train_dataset = NativeStockDataset(
+            X,
+            y,
+            symbols,
+            train_mask,
+            lookback=lookback,
+            full_dates=dates,
+            feature_indices=np.asarray(selected_feature_idx),
+        )
+        valid_dataset = NativeStockDataset(
+            X,
+            y,
+            symbols,
+            valid_mask,
+            lookback=lookback,
+            full_dates=dates,
+            feature_indices=np.asarray(selected_feature_idx),
+        )
+        test_dataset = NativeStockDataset(
+            X,
+            y,
+            symbols,
+            test_mask,
+            lookback=lookback,
+            full_dates=dates,
+            feature_indices=np.asarray(selected_feature_idx),
+        )
 
         if len(train_dataset) == 0:
             raise ValueError("Native LSTM training dataset is empty for the configured train split.")
@@ -325,7 +244,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         print(f"\n[Step 4/6] Native Model Training ({model_name})")
         device = f"cuda:{args.gpu}" if args.gpu >= 0 and torch.cuda.is_available() else "cpu"
         trainer = NativeLSTMTrainer(
-            d_feat=meta["num_features"],
+            d_feat=len(selected_feature_names),
             hidden_size=cfg["model"]["hidden_size"],
             num_layers=cfg["model"]["num_layers"],
             dropout=cfg["model"]["dropout"],
@@ -375,7 +294,11 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     if args.skip_backtest:
         print_metrics(signal_metrics)
         print(f"\n[Step 6/6] Backtest skipped.\n\nAll native results saved to: {results_dir}/")
-        return
+        return {
+            "signal_metrics": signal_metrics,
+            "portfolio_metrics": None,
+            "selected_features": selected_feature_names,
+        }
         
     # --- Step 6: Native Backtest ---
     print("\n[Step 6/6] Native Vectorized Backtest")
@@ -407,7 +330,6 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     # Rename for compatibility with plot functions
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
     
-    # Pass a tuple (report, indicator) to match Qlib's expected format in evaluate.py
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     bench_series = build_cross_section_benchmark(label_series)
     metric_report["bench"] = bench_series.reindex(metric_report.index).fillna(0.0).to_numpy()
@@ -417,6 +339,28 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     plot_drawdown(metric_report, save_path=str(results_dir / "native_drawdown.png"))
     plot_monthly_heatmap(metric_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
     save_monthly_report(metric_report, save_path=str(results_dir / "native_monthly_report.csv"))
+
+    _maybe_export_backtest_trace(
+        args=args,
+        results_dir=results_dir,
+        prefix="native",
+        report_for_selection=plot_report,
+        rerun_fn=lambda trace_dates: run_native_backtest(
+            preds=pred_series,
+            labels=label_series,
+            topk=cfg["strategy"]["topk"],
+            n_drop=cfg["strategy"]["n_drop"],
+            cost_buy=cfg["backtest"]["cost"]["buy"],
+            cost_sell=cfg["backtest"]["cost"]["sell"],
+            min_cost=cfg["backtest"].get("min_cost", 5.0),
+            account=cfg["backtest"].get("account", 100_000_000),
+            risk_degree=cfg["backtest"].get("risk_degree", 0.95),
+            slippage=cfg["backtest"].get("slippage", 0.0005),
+            rebalance_freq=rebalance_freq,
+            return_trace=True,
+            trace_dates=trace_dates,
+        )[1],
+    )
     
     print_metrics(signal_metrics, portfolio_results)
     
@@ -433,80 +377,77 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         
     print(f"\nAll native results saved to: {results_dir}/")
     print("Done!")
-
-def _build_model(cfg: dict, gpu: int):
-    """Build model based on config."""
-    model_name = cfg["model"]["name"]
-    model_cfg = cfg["model"]
-    
-    d_feat = 158
-    if cfg["features"].get("use_valuation", True):
-        d_feat += 8
-
-    if model_name == "lstm":
-        from src.models.lstm_model import build_lstm_model
-        return build_lstm_model(
-            d_feat=d_feat,
-            hidden_size=model_cfg["hidden_size"],
-            num_layers=model_cfg["num_layers"],
-            dropout=model_cfg["dropout"],
-            n_epochs=model_cfg["epochs"],
-            lr=model_cfg["lr"],
-            early_stop=model_cfg["early_stop"],
-            batch_size=model_cfg["batch_size"],
-            loss=model_cfg.get("loss", "mse"),
-            GPU=gpu,
-            n_jobs=model_cfg.get("n_jobs", 12),
-        )
-    elif model_name == "transformer":
-        from src.models.transformer_model import build_transformer_model
-        return build_transformer_model(
-            d_feat=d_feat,
-            hidden_size=model_cfg["hidden_size"],
-            num_layers=model_cfg["num_layers"],
-            dropout=model_cfg["dropout"],
-            n_epochs=model_cfg["epochs"],
-            lr=model_cfg["lr"],
-            early_stop=model_cfg["early_stop"],
-            batch_size=model_cfg["batch_size"],
-            loss=model_cfg.get("loss", "mse"),
-            GPU=gpu,
-        )
-    elif model_name == "lgbm":
-        from src.models.lgbm_model import build_lgbm_model
-        return build_lgbm_model()
-    else:
-        raise ValueError(f"Unknown model: {model_name}. Choose from: lstm, transformer, lgbm")
+    return {
+        "signal_metrics": signal_metrics,
+        "portfolio_metrics": safe_portfolio_results,
+        "selected_features": selected_feature_names,
+    }
 
 def main():
-    parser = argparse.ArgumentParser(description="AI4Stock2 Quantitative Pipeline")
+    parser = argparse.ArgumentParser(description="AI4Stock2 Native Quantitative Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default=None, help="Model name: lstm / transformer / lgbm")
-    parser.add_argument("--backend", default=None, help="Force backend: qlib or native (overrides config)")
-    parser.add_argument("--download-only", action="store_true", help="Only download data")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
     parser.add_argument("--save-model", help="Path to save the trained model (e.g. results/lstm/model.pkl)")
+    parser.add_argument("--topk", type=int, help="Override strategy top-k holdings")
+    parser.add_argument("--n-drop", dest="n_drop", type=int, help="Override strategy daily replacement count")
+    parser.add_argument("--run-tag", help="Short label for local experiment storage/comparison")
+    parser.add_argument("--store-dir", help="Override local experiment store root")
+    parser.add_argument("--disable-local-store", action="store_true", help="Disable automatic local experiment/model storage")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id (-1 for CPU)")
     parser.add_argument("--rebalance-freq", type=int, default=None, help="Backtest rebalance frequency in days (default: from config or 1)")
+    parser.add_argument("--trace-backtest", action="store_true", help="Export detailed trace for selected backtest dates")
+    parser.add_argument("--trace-top-days", type=int, default=5, help="Auto-select this many high-return/turnover/cost dates for trace export")
+    parser.add_argument("--trace-dates", help="Comma-separated YYYY-MM-DD dates to include in backtest trace export")
     args = parser.parse_args()
 
     cfg = load_config(args.config)
     if args.model:
         cfg["model"]["name"] = args.model
-    if args.backend:
-        cfg["backend"] = args.backend
+    if args.topk is not None:
+        cfg["strategy"]["topk"] = args.topk
+    if args.n_drop is not None:
+        cfg["strategy"]["n_drop"] = args.n_drop
 
-    backend = cfg.get("backend", "qlib")
+    backend = "native"
     model_name = cfg["model"]["name"]
     results_dir = Path("results") / backend / model_name
     results_dir.mkdir(parents=True, exist_ok=True)
+    model_ext = ".pt" if backend == "native" and model_name != "lgbm" else ".pkl"
+    run_store = prepare_run_store(
+        cfg,
+        args,
+        backend=backend,
+        pipeline="single",
+        model_name=model_name,
+        model_ext=model_ext,
+    )
+    if run_store.enabled and not args.save_model and not args.load_model:
+        args.save_model = str(run_store.default_model_path)
+        print(f"Local model store path: {args.save_model}")
     print(f"\n>>> Running Pipeline with Backend: {backend.upper()} <<<")
-    
-    if backend == "native":
-        run_native_pipeline(cfg, args, results_dir, model_name)
-    else:
-        run_qlib_pipeline(cfg, args, results_dir, model_name)
+
+    run_summary = run_native_pipeline(cfg, args, results_dir, model_name)
+
+    manifest_path = finalize_run_store(
+        run_store,
+        cfg=cfg,
+        args=args,
+        backend=backend,
+        pipeline="single",
+        model_name=model_name,
+        results_dir=results_dir,
+        signal_metrics=(run_summary or {}).get("signal_metrics"),
+        portfolio_metrics=(run_summary or {}).get("portfolio_metrics"),
+        model_path=args.save_model,
+        load_model_path=args.load_model,
+        extra_context={
+            "selected_features": (run_summary or {}).get("selected_features", []),
+        },
+    )
+    if manifest_path:
+        print(f"Local experiment manifest saved: {manifest_path}")
 
 if __name__ == "__main__":
     main()

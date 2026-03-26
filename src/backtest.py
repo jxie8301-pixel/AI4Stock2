@@ -1,24 +1,39 @@
-"""Backtest wrapper using Qlib's built-in backtest engine."""
+"""Project-owned backtest wrapper with a legacy-compatible return shape."""
 
 import pandas as pd
-from qlib.contrib.evaluate import backtest_daily
-from qlib.contrib.strategy.signal_strategy import TopkDropoutStrategy
+
+from src.native_backtest import (
+    DEFAULT_ACCOUNT,
+    DEFAULT_MIN_COST,
+    DEFAULT_RISK_DEGREE,
+    DEFAULT_SLIPPAGE,
+    run_native_backtest,
+)
 
 
 def run_backtest(
     predictions: pd.Series,
+    labels: pd.Series,
     topk: int = 30,
     n_drop: int = 5,
     cost_buy: float = 0.0003,
     cost_sell: float = 0.0013,
-    benchmark: str = "000001",
-) -> tuple[pd.DataFrame, dict]:
-    """Run daily backtest on model predictions.
+    min_cost: float = DEFAULT_MIN_COST,
+    account: float = DEFAULT_ACCOUNT,
+    risk_degree: float = DEFAULT_RISK_DEGREE,
+    slippage: float = DEFAULT_SLIPPAGE,
+    rebalance_freq: int = 1,
+    return_trace: bool = False,
+    trace_dates: set[pd.Timestamp] | None = None,
+) -> tuple[pd.DataFrame, None] | tuple[tuple[pd.DataFrame, None], pd.DataFrame]:
+    """Run the project-owned daily backtest on model predictions.
 
     Parameters
     ----------
     predictions : pd.Series
         Model prediction scores with MultiIndex (datetime, instrument).
+    labels : pd.Series
+        Realized open-to-open returns with the same MultiIndex.
     topk : int
         Number of stocks to hold in portfolio.
     n_drop : int
@@ -27,45 +42,35 @@ def run_backtest(
         Buy transaction cost rate (commission).
     cost_sell : float
         Sell transaction cost rate (commission + stamp duty).
-    benchmark : str
-        Benchmark index code for comparison.
-
     Returns
     -------
-    portfolio_metric : pd.DataFrame
-        Daily portfolio metrics (return, turnover, etc.).
-    indicator : dict
-        Summary indicators.
+    tuple[pd.DataFrame, None]
+        Legacy-compatible ``(report, indicator)`` tuple expected by downstream code.
     """
-    strategy_config = {
-        "class": "TopkDropoutStrategy",
-        "module_path": "qlib.contrib.strategy.signal_strategy",
-        "kwargs": {
-            "signal": predictions,
-            "topk": topk,
-            "n_drop": n_drop,
-        },
-    }
-
-    backtest_config = {
-        "start_time": predictions.index.get_level_values(0).min(),
-        "end_time": predictions.index.get_level_values(0).max(),
-        "account": 100_000_000,
-        "benchmark": benchmark,
-        "exchange_kwargs": {
-            "freq": "day",
-            "limit_threshold": 0.095, # 10% Limit Rules
-            "deal_price": "open",      # MORE REALISTIC: Trade at Next Day Open
-            "open_cost": cost_buy + 0.0005,  # Adding 5bps slippage
-            "close_cost": cost_sell + 0.0005, # Adding 5bps slippage
-            "min_cost": 5,
-        },
-    }
-
-    portfolio_metric = backtest_daily(
-        strategy=strategy_config,
-        **backtest_config,
+    native_result = run_native_backtest(
+        preds=predictions,
+        labels=labels,
+        topk=topk,
+        n_drop=n_drop,
+        cost_buy=cost_buy,
+        cost_sell=cost_sell,
+        min_cost=min_cost,
+        account=account,
+        risk_degree=risk_degree,
+        slippage=slippage,
+        rebalance_freq=rebalance_freq,
+        return_trace=return_trace,
+        trace_dates=trace_dates,
     )
-
-    print(f"Backtest complete: {backtest_config['start_time']} ~ {backtest_config['end_time']}")
-    return portfolio_metric
+    if return_trace:
+        report, trace_df = native_result
+    else:
+        report = native_result
+    report = report.rename(columns={"net_return": "return"})
+    print(
+        "Backtest complete: "
+        f"{report.index.min()} ~ {report.index.max()} (native engine)"
+    )
+    if not return_trace:
+        return report, None
+    return (report, None), trace_df

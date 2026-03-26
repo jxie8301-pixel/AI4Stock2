@@ -100,6 +100,30 @@ class NativeModelMetricsTest(unittest.TestCase):
             places=8,
         )
 
+    def test_compute_portfolio_metrics_converts_qlib_gross_return_to_net(self):
+        report = pd.DataFrame(
+            {
+                "account": [100.0, 101.0],
+                "return": [0.02, 0.01],
+                "turnover": [0.1, 0.2],
+                "cost": [0.005, 0.002],
+                "value": [95.0, 96.0],
+                "cash": [5.0, 5.0],
+                "bench": [0.0, 0.0],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
+        )
+
+        portfolio_metrics, metric_report = compute_portfolio_metrics((report, None))
+
+        self.assertEqual(metric_report["return"].tolist(), [0.015, 0.008])
+        self.assertEqual(metric_report["gross_return"].tolist(), [0.02, 0.01])
+        self.assertAlmostEqual(
+            portfolio_metrics["annualized_return"]["risk"],
+            np.mean([0.015, 0.008]) * 242,
+            places=8,
+        )
+
     def test_train_epoch_returns_zero_for_empty_loader(self):
         trainer = NativeLSTMTrainer(d_feat=3, hidden_size=4, num_layers=1, device="cpu")
         dataset = TensorDataset(

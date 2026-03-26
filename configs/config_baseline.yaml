@@ -24,30 +24,7 @@ features:
   use_valuation: True
 
 model:
-  name: lgbm
-  hidden_size: 64
-  num_layers: 2
-  dropout: 0.2
-  lr: 0.0005
-  epochs: 200
-  early_stop: 10
-  batch_size: 4096
-  n_jobs: 8
-  loss: pearson
-
-lgbm:
-  loss: huber
-  learning_rate: 0.05
-  colsample_bytree: 0.8879
-  subsample: 0.8789
-  subsample_freq: 1
-  lambda_l1: 1.0
-  lambda_l2: 1.0
-  max_depth: 8
-  num_leaves: 63
-  min_data_in_leaf: 100
-  num_threads: 8
-  early_stop: 10
+  preset: lgbm_default
 
 strategy:
   topk: 30

@@ -18,6 +18,7 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertEqual(profile["alpha"], "158")
         self.assertEqual(profile["cache_dir"], "data/cache/alpha158_panel")
         self.assertIsNone(profile["alpha158_config"])
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/alpha158_full.yaml"))
 
     def test_compact_profile_reduces_feature_count(self):
         profile = resolve_feature_profile(
@@ -34,6 +35,7 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertEqual(profile["cache_dir"], "data/cache/alpha158_compact_v1_panel")
         self.assertLess(compact_count, full_count)
         self.assertEqual(compact_count, 82)
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/alpha158_compact_v1.yaml"))
 
 
 if __name__ == "__main__":

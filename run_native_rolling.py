@@ -2,22 +2,18 @@
 
 import argparse
 import json
-import yaml
 import pandas as pd
 from pathlib import Path
 import datetime
 import torch
 import numpy as np
 
+from src.config_loader import load_config
 from src.experiment_store import finalize_run_store, prepare_run_store
 from src.feature_profiles import get_native_cache_dir
 from src.feature_selection import compute_finite_feature_mask, resolve_selected_features
 from src.label_utils import sanitize_label_array
 from src.model_config import get_lgbm_config
-
-def load_config(config_path: str = "configs/config.yaml") -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
 
 def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
@@ -46,9 +42,12 @@ def run_rolling_pipeline():
     
     results_dir = Path("results") / f"native_rolling_{args.model}"
     models_dir = results_dir / "models"
+    importance_dir = results_dir / "feature_importance"
     results_dir.mkdir(parents=True, exist_ok=True)
     if args.save_models or args.load_models:
         models_dir.mkdir(parents=True, exist_ok=True)
+    if args.model == "lgbm":
+        importance_dir.mkdir(parents=True, exist_ok=True)
     run_store = prepare_run_store(
         cfg,
         args,
@@ -121,6 +120,7 @@ def run_rolling_pipeline():
     # ── 2. Setup Rolling Windows ────────────────────────
     rolling_steps = range(0, len(test_calendar), args.horizon)
     all_predictions = []
+    feature_importance_frames = []
     finite_feature_mask = compute_finite_feature_mask(X, selected_feature_idx, num_rows)
     
     print(f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} with {args.horizon}-day steps.")
@@ -193,6 +193,12 @@ def run_rolling_pipeline():
                 if args.save_models:
                     with open(model_path, "wb") as f:
                         pickle.dump(model, f)
+
+            importance_path = importance_dir / f"feature_importance_{current_test_start.strftime('%Y-%m-%d')}.csv"
+            model.save_feature_importance(importance_path)
+            importance_df = model.get_feature_importance_frame("gain").rename(columns={"gain": "importance_gain"})
+            importance_df["window_start"] = current_test_start.strftime("%Y-%m-%d")
+            feature_importance_frames.append(importance_df)
             
             test_valid_mask = test_mask & finite_feature_mask
             if not np.any(test_valid_mask):
@@ -358,6 +364,19 @@ def run_rolling_pipeline():
     plot_drawdown(metric_report, save_path=str(results_dir / "native_drawdown.png"))
     plot_monthly_heatmap(metric_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
     save_monthly_report(metric_report, save_path=str(results_dir / "native_monthly_report.csv"))
+
+    aggregated_importance_path = None
+    if feature_importance_frames:
+        feature_importance_all = pd.concat(feature_importance_frames, ignore_index=True)
+        aggregated_importance = (
+            feature_importance_all.groupby("feature", as_index=False)["importance_gain"]
+            .mean()
+            .sort_values("importance_gain", ascending=False)
+            .reset_index(drop=True)
+        )
+        aggregated_importance_path = results_dir / "feature_importance_gain_mean.csv"
+        aggregated_importance.to_csv(aggregated_importance_path, index=False)
+        print(f"Aggregated feature importance saved: {aggregated_importance_path}")
     
     print_metrics(signal_metrics, portfolio_results)
     
@@ -386,6 +405,7 @@ def run_rolling_pipeline():
             "test_start": str(test_start.date()),
             "test_end": str(test_end.date()),
             "selected_features": selected_feature_names,
+            "feature_importance_path": str(aggregated_importance_path) if aggregated_importance_path else "",
         },
     )
     if manifest_path:

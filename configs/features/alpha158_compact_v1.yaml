@@ -1,0 +1,24 @@
+alpha: 158
+cache_name: alpha158_compact_v1_panel
+alpha158:
+  kbar: {}
+  price:
+    windows: [0, 1, 2, 3, 4]
+    feature: ["OPEN", "HIGH", "LOW", "VWAP"]
+  volume:
+    windows: [0, 1, 2, 3, 4]
+  rolling:
+    windows: [5, 10, 20, 30]
+    include:
+      - ROC
+      - MA
+      - STD
+      - RSV
+      - CORR
+      - CORD
+      - CNTD
+      - SUMP
+      - SUMD
+      - VMA
+      - VSTD
+      - WVMA

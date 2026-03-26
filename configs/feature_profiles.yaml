@@ -2,35 +2,10 @@ default_profile: alpha158_full
 
 profiles:
   alpha158_full:
-    alpha: 158
-    cache_name: alpha158_panel
+    path: configs/features/alpha158_full.yaml
 
   alpha158_compact_v1:
-    alpha: 158
-    cache_name: alpha158_compact_v1_panel
-    alpha158:
-      kbar: {}
-      price:
-        windows: [0, 1, 2, 3, 4]
-        feature: ["OPEN", "HIGH", "LOW", "VWAP"]
-      volume:
-        windows: [0, 1, 2, 3, 4]
-      rolling:
-        windows: [5, 10, 20, 30]
-        include:
-          - ROC
-          - MA
-          - STD
-          - RSV
-          - CORR
-          - CORD
-          - CNTD
-          - SUMP
-          - SUMD
-          - VMA
-          - VSTD
-          - WVMA
+    path: configs/features/alpha158_compact_v1.yaml
 
   alpha360_full:
-    alpha: 360
-    cache_name: alpha360_panel
+    path: configs/features/alpha360_full.yaml

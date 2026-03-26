@@ -68,6 +68,11 @@ What is true now:
 
 ### 7. Tooling And UX
 
+- [x] Split feature-set definitions into dedicated files under `configs/features/`
+- [ ] Split model hyperparameters into dedicated files under `configs/models/`
+- [ ] Add experiment-level config composition so a run can reference named feature/model presets
+- [x] Add automatic LightGBM feature-importance export for single and rolling runs
+- [ ] Make native model saving opt-out rather than opt-in where practical
 - [ ] Add a script to compare runs directly from `experiment_index.csv`
 - [ ] Add a script to summarize the best run per model/profile/tag
 - [ ] Add richer manifest metadata for selected features and transforms

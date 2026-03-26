@@ -49,6 +49,7 @@ SUMMARY_FIELDS = [
     "models_source_dir",
     "archived_models_dir",
     "load_model_path",
+    "feature_importance_path",
 ]
 
 
@@ -223,6 +224,7 @@ def finalize_run_store(
         "models_source_dir": str(models_dir) if models_dir else "",
         "archived_models_dir": str(archived_models_dir) if archived_models_dir else "",
         "load_model_path": str(load_model_path) if load_model_path else "",
+        "feature_importance_path": str(extra_context.get("feature_importance_path", "")),
         **flat_metrics,
     }
 

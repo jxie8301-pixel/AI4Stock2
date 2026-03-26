@@ -1,4 +1,6 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import lightgbm as lgb
 import numpy as np
@@ -52,6 +54,21 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(huber_model.params["metric"], "rmse")
         self.assertEqual(huber_model.params["objective"], "huber")
         self.assertEqual(custom_model.params["metric"], "rmse")
+
+    def test_native_lgbm_can_export_feature_importance_csv(self):
+        model = NativeLGBM(loss="mse", early_stop=0, num_threads=1)
+        X_train = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [1.0, 1.0, 0.0, 0.0]})
+        y_train = pd.Series([0.0, 0.1, 0.2, 0.3])
+
+        model.fit(X_train, y_train)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            save_path = Path(tmpdir) / "importance.csv"
+            model.save_feature_importance(save_path)
+            exported = pd.read_csv(save_path)
+
+        self.assertEqual(exported.columns.tolist(), ["feature", "gain"])
+        self.assertEqual(set(exported["feature"]), {"f1", "f2"})
 
     def test_get_lgbm_config_uses_dedicated_block(self):
         cfg = {

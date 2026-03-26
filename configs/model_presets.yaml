@@ -1,0 +1,8 @@
+default_preset: lgbm_default
+
+presets:
+  lgbm_default:
+    path: configs/models/lgbm_default.yaml
+
+  lstm_baseline:
+    path: configs/models/lstm_baseline.yaml

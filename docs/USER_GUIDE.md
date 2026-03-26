@@ -73,7 +73,8 @@ uv run python main.py --model lgbm --disable-local-store
 
 - **股票池** (`universe`): 强烈建议使用 `csi300_real`（纯净版沪深300）。
 - **回看天数** (`lookback`): 建议设为 `20`（抓取短期时序特征）。
-- **特征 Profile** (`features.profile`): 默认使用 `alpha158_compact_v1`，保留 `config_baseline.yaml` 的 `alpha158_full` 作为对照。
+- **特征 Profile** (`features.profile`): 默认使用 `alpha158_compact_v1`，保留 `config_baseline.yaml` 的 `alpha158_full` 作为对照。具体定义保存在 `configs/features/*.yaml`。
+- **模型 Preset** (`model.preset`): 主配置只引用模型预设，具体超参保存在 `configs/models/*.yaml`。
 - **训练期选列** (`features.selected_columns`): 可以在不重建 cache 的前提下，只挑选全集中的部分因子参与训练。
 - **训练历史**: 建议从 `2016-01-01` 开始，以适应当前的机构化行情。
 - **交易约束**: 在 `src/backtest.py` 中已默认开启“涨跌停禁止交易”和“开盘价成交”。
@@ -89,6 +90,10 @@ features:
 ```
 
 改完 `selected_columns` 后，不需要重新执行 `gen_feature.py`；直接重新训练即可。
+
+LightGBM 训练会自动输出特征重要性：
+- 单次实验：`results/native/lgbm/feature_importance_gain.csv`
+- 滚动实验：`results/native_rolling_lgbm/feature_importance_gain_mean.csv`
 
 ## 6. 结果分析 (Analysis)
 

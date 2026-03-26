@@ -27,7 +27,8 @@ The default research path is:
 
 ### Feature Layer
 
-- Feature profiles: `configs/feature_profiles.yaml`
+- Feature profile index: `configs/feature_profiles.yaml`
+- Feature profile definitions: `configs/features/*.yaml`
 - Profile resolver: `src/feature_profiles.py`
 - Training-time feature subset selection: `src/feature_selection.py`
 
@@ -38,6 +39,8 @@ The intended workflow is:
 
 ### Model Layer
 
+- Model preset index: `configs/model_presets.yaml`
+- Model preset definitions: `configs/models/*.yaml`
 - Native LightGBM: `src/models/pure_lightgbm.py`
 - Native LSTM: `src/models/pure_pytorch_lstm.py`
 
@@ -63,6 +66,9 @@ AI4Stock2/
 │   ├── config.yaml
 │   ├── config_baseline.yaml
 │   └── feature_profiles.yaml
+│   └── features/
+│   └── model_presets.yaml
+│   └── models/
 ├── data/
 │   ├── processed/combined/
 │   └── cache/

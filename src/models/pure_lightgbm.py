@@ -1,5 +1,7 @@
 """Pure LightGBM Native Implementation."""
 
+from pathlib import Path
+
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -97,14 +99,15 @@ class NativeLGBM:
         valid_dates: np.ndarray | None = None,
     ):
         """Fit the LightGBM model."""
-        dtrain = lgb.Dataset(X_train.values, label=y_train.values)
+        feature_names = X_train.columns.tolist()
+        dtrain = lgb.Dataset(X_train.values, label=y_train.values, feature_name=feature_names)
         
         valid_sets = [dtrain]
         valid_names = ["train"]
         feval = None
         
         if X_valid is not None and y_valid is not None:
-            dvalid = lgb.Dataset(X_valid.values, label=y_valid.values, reference=dtrain)
+            dvalid = lgb.Dataset(X_valid.values, label=y_valid.values, reference=dtrain, feature_name=feature_names)
             valid_sets = [dvalid]
             valid_names = ["valid"]
             if valid_dates is not None:
@@ -144,3 +147,22 @@ class NativeLGBM:
         if self.model is None:
             raise ValueError("Model is not fitted yet.")
         return self.model.feature_importance(importance_type=importance_type)
+
+    def get_feature_importance_frame(self, importance_type: str = "gain") -> pd.DataFrame:
+        """Return feature importance as a sorted dataframe."""
+        if self.model is None:
+            raise ValueError("Model is not fitted yet.")
+        feature_names = self.model.feature_name()
+        importance = self.model.feature_importance(importance_type=importance_type)
+        return (
+            pd.DataFrame({"feature": feature_names, importance_type: importance})
+            .sort_values(importance_type, ascending=False)
+            .reset_index(drop=True)
+        )
+
+    def save_feature_importance(self, save_path: str | Path, importance_type: str = "gain") -> Path:
+        """Persist feature importance to CSV."""
+        path = Path(save_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.get_feature_importance_frame(importance_type=importance_type).to_csv(path, index=False)
+        return path

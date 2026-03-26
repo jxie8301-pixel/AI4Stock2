@@ -4,19 +4,14 @@ import argparse
 from pathlib import Path
 import json
 import pickle
-import yaml
 
+from src.config_loader import load_config
 from src.experiment_store import finalize_run_store, prepare_run_store
 from src.feature_selection import compute_finite_feature_mask, resolve_selected_features
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
 from src.feature_profiles import get_native_cache_dir
 from src.label_utils import sanitize_label_array
 from src.model_config import get_lgbm_config
-
-
-def load_config(config_path: str = "configs/config.yaml") -> dict:
-    with open(config_path) as f:
-        return yaml.safe_load(f)
 
 
 def _ensure_parent_dir(path_str: str) -> Path:
@@ -182,6 +177,9 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
             if args.save_model:
                 _save_native_model(model_name, model, args.save_model)
+        feature_importance_path = results_dir / "feature_importance_gain.csv"
+        model.save_feature_importance(feature_importance_path)
+        print(f"Feature importance saved: {feature_importance_path}")
         
         print("\n[Step 5/6] Native Prediction & Signal Evaluation")
         test_valid_mask = test_mask & finite_feature_mask
@@ -298,6 +296,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             "signal_metrics": signal_metrics,
             "portfolio_metrics": None,
             "selected_features": selected_feature_names,
+            "feature_importance_path": str(feature_importance_path) if model_name == "lgbm" else None,
         }
         
     # --- Step 6: Native Backtest ---
@@ -381,6 +380,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         "signal_metrics": signal_metrics,
         "portfolio_metrics": safe_portfolio_results,
         "selected_features": selected_feature_names,
+        "feature_importance_path": str(feature_importance_path) if model_name == "lgbm" else None,
     }
 
 def main():
@@ -444,6 +444,7 @@ def main():
         load_model_path=args.load_model,
         extra_context={
             "selected_features": (run_summary or {}).get("selected_features", []),
+            "feature_importance_path": (run_summary or {}).get("feature_importance_path"),
         },
     )
     if manifest_path:

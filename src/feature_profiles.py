@@ -21,6 +21,31 @@ def load_feature_profiles(config_path: str = DEFAULT_PROFILE_CONFIG_PATH) -> dic
     return data
 
 
+def _load_yaml_file(path: str | Path) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def _resolve_profile_definition(
+    profile_name: str,
+    profile_entry: dict[str, Any],
+    *,
+    profile_config_path: str,
+) -> dict[str, Any]:
+    if "path" not in profile_entry:
+        return deepcopy(profile_entry)
+
+    repo_root = Path(profile_config_path).resolve().parent.parent
+    feature_path = Path(profile_entry["path"])
+    if not feature_path.is_absolute():
+        feature_path = repo_root / feature_path
+
+    profile = _load_yaml_file(feature_path)
+    profile["path"] = str(feature_path)
+    profile["name"] = profile_name
+    return profile
+
+
 def resolve_feature_profile(
     cfg: dict | None = None,
     *,
@@ -39,7 +64,11 @@ def resolve_feature_profile(
             f"Available: {', '.join(sorted(profiles))}"
         )
 
-    profile = deepcopy(profiles[resolved_profile_name])
+    profile = _resolve_profile_definition(
+        resolved_profile_name,
+        deepcopy(profiles[resolved_profile_name]),
+        profile_config_path=profile_config_path,
+    )
     alpha = str(profile.get("alpha", features_cfg.get("alpha", cfg.get("alpha_version", 158))))
     cache_name = profile.get("cache_name")
     if not cache_name:
@@ -52,6 +81,7 @@ def resolve_feature_profile(
         "alpha158_config": deepcopy(profile.get("alpha158")),
         "raw": profile,
         "profile_config_path": profile_config_path,
+        "profile_path": profile.get("path"),
     }
 
 

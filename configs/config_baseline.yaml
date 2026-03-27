@@ -13,12 +13,14 @@ time:
   test:  ["2024-01-01", "2025-12-31"]
 
 features:
-  alpha: 158
-  profile: alpha158_full
+  alpha: all_factors
+  profile: all_factors_full
   # selected_columns:
   #   - KMID
   #   - MA20
   #   - RSV20
+  # transforms:
+  #   cross_sectional_rank: true
   handler: Alpha158
   lookback: 20
   use_valuation: True

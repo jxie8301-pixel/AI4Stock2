@@ -19,8 +19,42 @@ Native 训练前，建议先按当前配置生成本地特征缓存：
 uv run python src/gen_feature.py --config configs/config.yaml --workers 8
 ```
 
-如果要保留全量 Alpha158 作为对照组：
+现在默认就是先生成一个足够大的全集 cache，然后训练时按需选列：
 ```bash
+uv run python src/gen_feature.py --workers 8
+```
+
+如果只是更新了部分 Parquet，希望尽量少重算特征，可以使用增量模式：
+```bash
+uv run python src/gen_feature.py --workers 8 --incremental
+```
+
+当前增量模式的语义是：
+- 未变化的股票 Parquet 复用已有 shard，不重复计算因子
+- 变化过的股票 Parquet 才重算因子
+- 最后仍会重组一次总的 `X.npy / y.npy / date.npy / symbol.npy`
+
+这意味着它减少的是“因子计算量”，不是完全跳过最终总 cache 的写盘。
+
+默认输出目录为 `data/cache/all_factors_panel`，其中包含：
+- Alpha158 全量因子，保留原始列名
+- Alpha360 全量因子，列名前缀为 `A360_`
+- LightGBM 净化因子，列名前缀为 `LGBM_`
+
+之后无论是单次训练还是 rolling，都可以只在训练阶段通过 `features.selected_columns` 挑选子集，不需要重复生成 cache。
+`features.profile` 现在更适合理解为“默认选列模板”：
+- `all_factors_full`: 使用全集
+- `alpha158_full`: 默认只用 Alpha158 子集
+- `alpha158_compact_v1`: 默认只用紧凑版 Alpha158 子集
+- `alpha360_full`: 默认只用 Alpha360 子集
+- `lgbm_purified_v1`: 默认只用 LightGBM 净化子集
+
+如果你显式传 `--profile alpha158_full` 或 `--profile lgbm_purified_v1` 给 `gen_feature.py`，现在也仍然会生成同一个全集 cache，而不是单独的小 cache。
+也就是说，profile 主要用于训练侧默认选列，不再建议把它理解成不同 cache 类型。
+
+如果你确实只想手工生成非默认族，也仍然支持：
+```bash
+uv run python src/gen_feature.py --alpha 158 --output-dir data/cache/alpha158_panel --workers 8
 uv run python src/gen_feature.py --config configs/config_baseline.yaml --workers 8
 ```
 
@@ -30,6 +64,12 @@ uv run python src/gen_feature.py --config configs/config_baseline.yaml --workers
 当前推荐优先使用 native + LightGBM，先做稳健基线：
 ```bash
 uv run python run_native_rolling.py --model lgbm --horizon 20 --run-tag compact_lgbm
+```
+
+如果要直接从命令行切换因子 profile，不必改 `config.yaml`：
+```bash
+uv run python run_native_rolling.py --model lgbm --profile alpha158_full --horizon 20 --run-tag alpha158_full
+uv run python run_native_rolling.py --model lgbm --profile lgbm_purified_v1 --horizon 20 --run-tag purified_v1
 ```
 
 同一模型做不同策略对比时，建议直接从命令行覆写策略参数，并加上一个 `run tag`：
@@ -42,6 +82,11 @@ uv run python run_native_rolling.py --model lgbm --horizon 20 --topk 30 --n-drop
 用于快速验证想法：
 ```bash
 uv run python main.py --model lgbm --save-model results/lgbm/model.pkl
+```
+
+同样支持命令行覆写 profile：
+```bash
+uv run python main.py --model lgbm --profile alpha158_full --run-tag alpha158_full_single
 ```
 
 也可以让系统自动把模型和实验元数据归档到本地实验库：
@@ -73,7 +118,9 @@ uv run python main.py --model lgbm --disable-local-store
 
 - **股票池** (`universe`): 强烈建议使用 `csi300_real`（纯净版沪深300）。
 - **回看天数** (`lookback`): 建议设为 `20`（抓取短期时序特征）。
-- **特征 Profile** (`features.profile`): 默认使用 `alpha158_compact_v1`，保留 `config_baseline.yaml` 的 `alpha158_full` 作为对照。具体定义保存在 `configs/features/*.yaml`。
+- **特征 Profile** (`features.profile`): 默认使用 `all_factors_full`。这里的 profile 主要表示“从全集 cache 中默认选择哪些列”，不再表示单独的 cache 家族。具体定义保存在 `configs/features/*.yaml`。
+- **推荐候选**: `alpha158_compact_v1` 适合作为技术面基线，`lgbm_purified_v1` 适合作为 LightGBM 研究起点。
+- **命令行覆写**: `main.py` 和 `run_native_rolling.py` 都支持 `--profile`，适合做 profile 对照实验。
 - **模型 Preset** (`model.preset`): 主配置只引用模型预设，具体超参保存在 `configs/models/*.yaml`。
 - **训练期选列** (`features.selected_columns`): 可以在不重建 cache 的前提下，只挑选全集中的部分因子参与训练。
 - **训练历史**: 建议从 `2016-01-01` 开始，以适应当前的机构化行情。
@@ -82,14 +129,24 @@ uv run python main.py --model lgbm --disable-local-store
 示例：
 ```yaml
 features:
-  profile: alpha158_full
+  profile: all_factors_full
   selected_columns:
     - KMID
     - MA20
     - RSV20
+    - LGBM_ret_20
+    - A360_CLOSE0
 ```
 
 改完 `selected_columns` 后，不需要重新执行 `gen_feature.py`；直接重新训练即可。
+如果启用 `features.transforms.cross_sectional_rank: true`，同样不需要重建 cache；这是训练期动态变换。
+
+为什么 `gen_feature.py` 仍然独立存在，而不是在主训练脚本里隐式生成：
+- cache 生成是一个重 I/O、重 CPU 的预处理步骤，耗时和训练完全不是一个量级。
+- 训练入口保持“只消费已有 cache”，复现性更强，也更容易比较不同模型、不同选列、不同策略。
+- 同一个全量 cache 可以被很多次训练复用，这正好符合“先生成最全，再按需挑选”的研究方式。
+
+如果后续要进一步提效，推荐新增一个显式模式，例如 `main.py --build-cache-if-missing`，而不是让训练脚本默认偷偷重建 cache。
 
 LightGBM 训练会自动输出特征重要性：
 - 单次实验：`results/native/lgbm/feature_importance_gain.csv`

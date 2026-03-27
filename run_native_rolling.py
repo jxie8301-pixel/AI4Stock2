@@ -11,7 +11,7 @@ import numpy as np
 from src.config_loader import load_config
 from src.experiment_store import finalize_run_store, prepare_run_store
 from src.feature_profiles import get_native_cache_dir
-from src.feature_selection import compute_finite_feature_mask, resolve_selected_features
+from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask, resolve_selected_features
 from src.label_utils import sanitize_label_array
 from src.model_config import get_lgbm_config
 
@@ -19,6 +19,7 @@ def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default="lgbm", help="Model name")
+    parser.add_argument("--profile", help="Override features.profile and use the corresponding cache/profile")
     parser.add_argument("--horizon", type=int, default=10, help="Rolling horizon in trading days")
     parser.add_argument("--train-days", type=int, default=242, help="Training window length in trading days")
     parser.add_argument("--valid-days", type=int, default=10, help="Validation window length in trading days")
@@ -35,6 +36,9 @@ def run_rolling_pipeline():
 
     cfg = load_config(args.config)
     cfg["model"]["name"] = args.model
+    if args.profile:
+        cfg.setdefault("features", {})
+        cfg["features"]["profile"] = args.profile
     if args.topk is not None:
         cfg["strategy"]["topk"] = args.topk
     if args.n_drop is not None:
@@ -178,7 +182,10 @@ def run_rolling_pipeline():
             y_train_series = pd.Series(y[valid_train_mask])
             X_valid_df = pd.DataFrame(X[valid_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
             y_valid_series = pd.Series(y[valid_valid_mask])
+            train_dates = pd.to_datetime(dates[valid_train_mask])
             valid_dates = pd.to_datetime(dates[valid_valid_mask])
+            X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
+            X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
             
             model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
             model = NativeLGBM(**get_lgbm_config(cfg))
@@ -205,6 +212,8 @@ def run_rolling_pipeline():
                 print("    Skipping window: no valid LightGBM test rows.")
                 continue
             X_test_df = pd.DataFrame(X[test_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
+            test_dates = pd.to_datetime(dates[test_valid_mask])
+            X_test_df = apply_feature_transforms(X_test_df, test_dates, cfg)
             
             preds_arr = model.predict(X_test_df)
             end_indices = np.where(test_valid_mask)[0]

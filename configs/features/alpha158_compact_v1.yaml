@@ -1,5 +1,6 @@
 alpha: 158
-cache_name: alpha158_compact_v1_panel
+generation_alpha: all_factors
+cache_name: all_factors_panel
 alpha158:
   kbar: {}
   price:

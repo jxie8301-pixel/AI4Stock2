@@ -43,6 +43,23 @@ DEFAULT_ALPHA158_CONFIG: dict[str, Any] = {
 }
 
 
+DEFAULT_LGBM_PURIFIED_CONFIG: dict[str, Any] = {
+    "momentum_windows": [20, 60],
+    "ma_windows": [20, 60, 120],
+    "vol_window": 60,
+    "atr_window": 14,
+    "amihud_window": 20,
+    "volume_window": 20,
+    "corr_window": 20,
+    "turnover_window": 20,
+    "extreme_window": 20,
+}
+
+ALL_FACTORS_ALPHA360_PREFIX = "A360_"
+ALL_FACTORS_LGBM_PREFIX = "LGBM_"
+SHARD_DIRNAME = "_shards"
+
+
 def get_alpha158_feature_config(config: dict[str, Any] | None = None) -> tuple[list[str], list[str]]:
     """Return Alpha158 expression fields and names (qlib-compatible)."""
     cfg = deepcopy(DEFAULT_ALPHA158_CONFIG)
@@ -243,6 +260,30 @@ def get_alpha360_feature_config() -> tuple[list[str], list[str]]:
     names.append("VOLUME0")
 
     return fields, names
+
+
+def get_all_factor_feature_names(
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+) -> list[str]:
+    """Return the comprehensive feature-space names used by the unified cache."""
+    alpha158_names = get_alpha158_feature_config(alpha158_config)[1]
+    alpha360_names = [f"{ALL_FACTORS_ALPHA360_PREFIX}{name}" for name in get_alpha360_feature_config()[1]]
+    lgbm_names = [f"{ALL_FACTORS_LGBM_PREFIX}{name}" for name in get_lgbm_purified_feature_names(lgbm_purified_config)]
+    return alpha158_names + alpha360_names + lgbm_names
+
+
+def get_lgbm_purified_feature_names(config: dict[str, Any] | None = None) -> list[str]:
+    cfg = deepcopy(DEFAULT_LGBM_PURIFIED_CONFIG)
+    if config is not None:
+        cfg.update(config)
+
+    names: list[str] = []
+    names += [f"ret_{d}" for d in cfg["momentum_windows"]]
+    names += [f"dist_ma{d}" for d in cfg["ma_windows"]]
+    names += ["std_60", "atr_14", "amihud_20", "vol_ratio_20", "corr_cv_20", "vwap_ratio"]
+    names += ["log_mcap", "ep_ttm", "is_loss", "bp", "turnover_20", "dist_high_20", "dist_low_20"]
+    return names
 
 
 def _prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
@@ -554,6 +595,108 @@ def compute_alpha158(df: pd.DataFrame, config: dict[str, Any] | None = None) -> 
     return feat
 
 
+def _calculate_atr(base: pd.DataFrame, period: int) -> pd.Series:
+    high_low = base["high"] - base["low"]
+    high_close = (base["high"] - base["close"].shift()).abs()
+    low_close = (base["low"] - base["close"].shift()).abs()
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = ranges.max(axis=1)
+    atr = true_range.rolling(window=period, min_periods=1).mean()
+    return atr / base["close"].replace(0, np.nan)
+
+
+def compute_lgbm_purified_features(df: pd.DataFrame, config: dict[str, Any] | None = None) -> pd.DataFrame:
+    """Compute a compact LightGBM-oriented factor set."""
+    cfg = deepcopy(DEFAULT_LGBM_PURIFIED_CONFIG)
+    if config is not None:
+        cfg.update(config)
+
+    base = _prepare_ohlcv(df)
+    close = base["close"].replace(0, np.nan)
+    volume = base["volume"].replace(0, np.nan)
+    amount = base["amount"] if "amount" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    out: dict[str, pd.Series] = {}
+    close_ret = close.pct_change(fill_method=None)
+
+    for window in cfg["momentum_windows"]:
+        out[f"ret_{window}"] = close.pct_change(window, fill_method=None)
+
+    for window in cfg["ma_windows"]:
+        ma = close.rolling(window, min_periods=1).mean().replace(0, np.nan)
+        out[f"dist_ma{window}"] = close / ma - 1.0
+
+    vol_window = int(cfg["vol_window"])
+    out["std_60"] = close_ret.rolling(vol_window, min_periods=1).std()
+
+    atr_window = int(cfg["atr_window"])
+    out["atr_14"] = _calculate_atr(base, atr_window)
+
+    amihud_window = int(cfg["amihud_window"])
+    daily_ret_abs = close_ret.abs()
+    out["amihud_20"] = (daily_ret_abs / (amount.abs() + EPS)).rolling(amihud_window, min_periods=1).mean()
+
+    volume_window = int(cfg["volume_window"])
+    vol_ma = volume.rolling(volume_window, min_periods=1).mean().replace(0, np.nan)
+    out["vol_ratio_20"] = volume / vol_ma
+
+    corr_window = int(cfg["corr_window"])
+    out["corr_cv_20"] = close.rolling(corr_window, min_periods=1).corr(base["volume"])
+
+    vwap = base["vwap"].replace(0, np.nan)
+    out["vwap_ratio"] = close / vwap - 1.0
+
+    if "circ_mv" in base.columns:
+        out["log_mcap"] = np.log1p(base["circ_mv"].clip(lower=0))
+    else:
+        out["log_mcap"] = pd.Series(np.nan, index=base.index)
+
+    if "pe_ttm" in base.columns:
+        out["ep_ttm"] = np.where(base["pe_ttm"] > 0, 1.0 / base["pe_ttm"], -1.0)
+        out["is_loss"] = (base["pe_ttm"] <= 0).astype(float)
+    else:
+        out["ep_ttm"] = pd.Series(np.nan, index=base.index)
+        out["is_loss"] = pd.Series(np.nan, index=base.index)
+
+    if "pb" in base.columns:
+        out["bp"] = np.where(base["pb"] > 0, 1.0 / base["pb"], -1.0)
+    else:
+        out["bp"] = pd.Series(np.nan, index=base.index)
+
+    turnover_window = int(cfg["turnover_window"])
+    if "turnover" in base.columns:
+        out["turnover_20"] = base["turnover"].rolling(turnover_window, min_periods=1).mean()
+    else:
+        out["turnover_20"] = pd.Series(np.nan, index=base.index)
+
+    extreme_window = int(cfg["extreme_window"])
+    rolling_high = base["high"].rolling(extreme_window, min_periods=1).max().replace(0, np.nan)
+    rolling_low = base["low"].rolling(extreme_window, min_periods=1).min().replace(0, np.nan)
+    out["dist_high_20"] = close / rolling_high - 1.0
+    out["dist_low_20"] = close / rolling_low - 1.0
+
+    feat = pd.DataFrame(out, index=base.index)
+    ordered_names = get_lgbm_purified_feature_names(cfg)
+    feat = feat.reindex(columns=ordered_names)
+    return feat
+
+
+def compute_all_factor_features(
+    df: pd.DataFrame,
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+) -> pd.DataFrame:
+    """Compute a single comprehensive factor frame for training-time sub-selection."""
+    alpha158_feat = compute_alpha158(df, config=alpha158_config)
+    alpha360_feat = compute_alpha360(df).rename(columns=lambda name: f"{ALL_FACTORS_ALPHA360_PREFIX}{name}")
+    lgbm_feat = compute_lgbm_purified_features(df, config=lgbm_purified_config).rename(
+        columns=lambda name: f"{ALL_FACTORS_LGBM_PREFIX}{name}"
+    )
+    feat = pd.concat([alpha158_feat, alpha360_feat, lgbm_feat], axis=1)
+    ordered_names = get_all_factor_feature_names(alpha158_config, lgbm_purified_config)
+    feat = feat.reindex(columns=ordered_names)
+    return feat
+
+
 def build_open_to_open_label(df: pd.DataFrame) -> pd.Series:
     """Label: open_{t+2}/open_{t+1} - 1."""
     base = _prepare_ohlcv(df)
@@ -596,11 +739,19 @@ def _to_panel_arrays(feat: pd.DataFrame, label: pd.Series) -> tuple[np.ndarray, 
     return x2d, y1d, date_ns
 
 
-def _alpha_feature_count(alpha: str, alpha158_config: dict[str, Any] | None = None) -> int:
+def _alpha_feature_count(
+    alpha: str,
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+) -> int:
     if alpha == "158":
         return len(get_alpha158_feature_config(alpha158_config)[1])
     if alpha == "360":
         return 360
+    if alpha == "lgbm_purified":
+        return len(get_lgbm_purified_feature_names(lgbm_purified_config))
+    if alpha == "all_factors":
+        return len(get_all_factor_feature_names(alpha158_config, lgbm_purified_config))
     raise ValueError(f"Unknown alpha: {alpha}")
 
 
@@ -608,11 +759,25 @@ def _compute_symbol_feat_label(
     file_path: str,
     alpha: str,
     alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
 ) -> tuple[str, pd.DataFrame, pd.Series]:
     """Load one parquet and compute features + label."""
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
-    feat = compute_alpha158(df, config=alpha158_config) if alpha == "158" else compute_alpha360(df)
+    if alpha == "158":
+        feat = compute_alpha158(df, config=alpha158_config)
+    elif alpha == "360":
+        feat = compute_alpha360(df)
+    elif alpha == "lgbm_purified":
+        feat = compute_lgbm_purified_features(df, config=lgbm_purified_config)
+    elif alpha == "all_factors":
+        feat = compute_all_factor_features(
+            df,
+            alpha158_config=alpha158_config,
+            lgbm_purified_config=lgbm_purified_config,
+        )
+    else:
+        raise ValueError(f"Unknown alpha: {alpha}")
     label = build_open_to_open_label(df)
     return symbol, feat, label
 
@@ -621,6 +786,7 @@ def _count_file_worker(
     file_path: str,
     alpha: str,
     alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
 ) -> tuple[str, int, int]:
     """Worker for panel-cache counting pass (fast metadata path)."""
     symbol = Path(file_path).stem
@@ -630,16 +796,17 @@ def _count_file_worker(
     except Exception:
         # Fallback for corrupted/unusual parquet metadata.
         n_rows = int(len(pd.read_parquet(file_path, columns=["date"])))
-    return file_path, symbol, _alpha_feature_count(alpha, alpha158_config), n_rows
+    return file_path, symbol, _alpha_feature_count(alpha, alpha158_config, lgbm_purified_config), n_rows
 
 
 def _build_file_payload_worker(
     file_path: str,
     alpha: str,
     alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
 ) -> tuple[str, int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Worker for panel-cache payload pass."""
-    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha, alpha158_config)
+    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha, alpha158_config, lgbm_purified_config)
     payload = _to_panel_arrays(feat, label)
     return symbol, feat.shape[1], payload
 
@@ -648,6 +815,7 @@ def _write_panel_file_slice_process(
     file_path: str,
     alpha: str,
     alpha158_config: dict[str, Any] | None,
+    lgbm_purified_config: dict[str, Any] | None,
     start: int,
     count: int,
     symbol_id: int,
@@ -659,7 +827,7 @@ def _write_panel_file_slice_process(
     n_feat: int,
 ) -> int:
     """Process worker: compute one file and write to fixed memmap slice."""
-    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha, alpha158_config)
+    symbol, feat, label = _compute_symbol_feat_label(file_path, alpha, alpha158_config, lgbm_purified_config)
     x_arr, y_arr, d_arr = _to_panel_arrays(feat, label)
     if x_arr.shape[0] != count:
         raise RuntimeError(
@@ -679,15 +847,311 @@ def _write_panel_file_slice_process(
     return count
 
 
+def _json_dumps_canonical(data: Any) -> str:
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def _source_file_signature(file_path: str | Path) -> dict[str, Any]:
+    path = Path(file_path)
+    stat = path.stat()
+    return {
+        "path": str(path.resolve()),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _expected_feature_names_for_alpha(
+    alpha: str,
+    alpha158_config: dict[str, Any] | None,
+    lgbm_purified_config: dict[str, Any] | None,
+) -> list[str]:
+    if alpha == "158":
+        return get_alpha158_feature_config(alpha158_config)[1]
+    if alpha == "360":
+        return get_alpha360_feature_config()[1]
+    if alpha == "lgbm_purified":
+        return get_lgbm_purified_feature_names(lgbm_purified_config)
+    if alpha == "all_factors":
+        return get_all_factor_feature_names(alpha158_config, lgbm_purified_config)
+    raise ValueError(f"Unknown alpha: {alpha}")
+
+
+def _shard_base_name(file_path: str | Path) -> str:
+    return Path(file_path).stem
+
+
+def _shard_paths(shard_root: Path, file_path: str | Path) -> tuple[Path, Path]:
+    base = _shard_base_name(file_path)
+    return shard_root / f"{base}.npz", shard_root / f"{base}.json"
+
+
+def _load_json(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _load_reusable_shard_meta(
+    *,
+    shard_root: Path,
+    file_path: str | Path,
+    alpha: str,
+    alpha158_config: dict[str, Any] | None,
+    lgbm_purified_config: dict[str, Any] | None,
+    feature_names: list[str],
+) -> dict[str, Any] | None:
+    npz_path, meta_path = _shard_paths(shard_root, file_path)
+    shard_meta = _load_json(meta_path)
+    if shard_meta is None or not npz_path.exists():
+        return None
+    source_sig = _source_file_signature(file_path)
+    if shard_meta.get("source") != source_sig:
+        return None
+    if shard_meta.get("alpha") != alpha:
+        return None
+    if shard_meta.get("feature_names") != feature_names:
+        return None
+    if shard_meta.get("alpha158_config_json") != _json_dumps_canonical(alpha158_config):
+        return None
+    if shard_meta.get("lgbm_purified_config_json") != _json_dumps_canonical(lgbm_purified_config):
+        return None
+    row_count = shard_meta.get("row_count")
+    if not isinstance(row_count, int) or row_count < 0:
+        return None
+    return shard_meta
+
+
+def _save_shard(
+    *,
+    shard_root: Path,
+    file_path: str | Path,
+    symbol: str,
+    alpha: str,
+    alpha158_config: dict[str, Any] | None,
+    lgbm_purified_config: dict[str, Any] | None,
+    feature_names: list[str],
+    x_arr: np.ndarray,
+    y_arr: np.ndarray,
+    d_arr: np.ndarray,
+) -> dict[str, Any]:
+    shard_root.mkdir(parents=True, exist_ok=True)
+    npz_path, meta_path = _shard_paths(shard_root, file_path)
+    np.savez(npz_path, X=x_arr, y=y_arr, date=d_arr)
+    shard_meta = {
+        "symbol": symbol,
+        "row_count": int(x_arr.shape[0]),
+        "num_features": int(x_arr.shape[1]),
+        "alpha": alpha,
+        "source": _source_file_signature(file_path),
+        "feature_names": feature_names,
+        "alpha158_config_json": _json_dumps_canonical(alpha158_config),
+        "lgbm_purified_config_json": _json_dumps_canonical(lgbm_purified_config),
+    }
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(shard_meta, f, ensure_ascii=False, indent=2)
+    return shard_meta
+
+
+def _generate_panel_cache_incremental(
+    *,
+    parquet_dir: str,
+    output_dir: str,
+    alpha: str,
+    alpha158_config: dict[str, Any] | None,
+    lgbm_purified_config: dict[str, Any] | None,
+    profile_name: str | None,
+    workers: int,
+) -> dict[str, Any]:
+    pdir = Path(parquet_dir)
+    out_root = Path(output_dir)
+    out_root.mkdir(parents=True, exist_ok=True)
+    shard_root = out_root / SHARD_DIRNAME
+
+    files = sorted(pdir.glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"No parquet files found in {pdir}")
+
+    feature_names = _expected_feature_names_for_alpha(alpha, alpha158_config, lgbm_purified_config)
+    n_feat = len(feature_names)
+    workers = max(1, int(workers))
+
+    print(f"[1/3] Resolving incremental plan from {len(files)} parquet files (workers={workers})...")
+    file_layout: list[dict[str, Any]] = []
+    total_count = 0
+    reused_files = 0
+    recompute_files: list[Path] = []
+    symbols: set[str] = set()
+    t0 = time.perf_counter()
+    pbar = tqdm(files, desc="planning", total=len(files), unit="file")
+    for idx, fp in enumerate(pbar, start=1):
+        shard_meta = _load_reusable_shard_meta(
+            shard_root=shard_root,
+            file_path=fp,
+            alpha=alpha,
+            alpha158_config=alpha158_config,
+            lgbm_purified_config=lgbm_purified_config,
+            feature_names=feature_names,
+        )
+        if shard_meta is not None:
+            symbol = str(shard_meta["symbol"])
+            cnt = int(shard_meta["row_count"])
+            reusable = True
+            reused_files += 1
+        else:
+            _, symbol, file_n_feat, cnt = _count_file_worker(str(fp), alpha, alpha158_config, lgbm_purified_config)
+            if file_n_feat != n_feat:
+                raise RuntimeError(f"Feature dim mismatch: expected {n_feat}, got {file_n_feat} for {fp.name}")
+            reusable = False
+            recompute_files.append(fp)
+        symbols.add(symbol)
+        file_layout.append(
+            {
+                "file_path": str(fp),
+                "symbol": symbol,
+                "count": cnt,
+                "reusable": reusable,
+                "start": total_count,
+            }
+        )
+        total_count += cnt
+        elapsed = time.perf_counter() - t0
+        speed = idx / elapsed if elapsed > 0 else 0.0
+        eta = (len(files) - idx) / speed if speed > 0 else float("inf")
+        pbar.set_postfix(reused=reused_files, rebuild=len(recompute_files), eta_m=f"{eta/60:.1f}")
+    pbar.close()
+
+    print(f"Panel row count: {total_count}")
+    print(f"Incremental reuse: {reused_files} reused, {len(recompute_files)} recomputed")
+    symbol_to_id = {s: i for i, s in enumerate(sorted(symbols))}
+
+    x_store = np.lib.format.open_memmap(
+        out_root / "X.npy", mode="w+", dtype=np.float32, shape=(total_count, n_feat)
+    )
+    y_store = np.lib.format.open_memmap(
+        out_root / "y.npy", mode="w+", dtype=np.float32, shape=(total_count,)
+    )
+    date_store = np.lib.format.open_memmap(
+        out_root / "date.npy", mode="w+", dtype=np.int64, shape=(total_count,)
+    )
+    symbol_store = np.lib.format.open_memmap(
+        out_root / "symbol.npy", mode="w+", dtype=np.int32, shape=(total_count,)
+    )
+
+    print(f"[2/3] Materializing panel arrays with shard reuse (workers={workers})...")
+    t1 = time.perf_counter()
+    pbar = tqdm(file_layout, desc="processing", total=len(file_layout), unit="file")
+    for idx, entry in enumerate(pbar, start=1):
+        file_path = entry["file_path"]
+        symbol = entry["symbol"]
+        start = entry["start"]
+        cnt = entry["count"]
+        end = start + cnt
+        if entry["reusable"]:
+            npz_path, _ = _shard_paths(shard_root, file_path)
+            with np.load(npz_path) as shard_data:
+                x_arr = shard_data["X"]
+                y_arr = shard_data["y"]
+                d_arr = shard_data["date"]
+        else:
+            symbol2, file_n_feat, payload = _build_file_payload_worker(
+                file_path, alpha, alpha158_config, lgbm_purified_config
+            )
+            if file_n_feat != n_feat:
+                raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
+            if symbol2 != symbol:
+                raise RuntimeError(f"Symbol mismatch in pass2: layout={symbol}, computed={symbol2}, file={file_path}")
+            x_arr, y_arr, d_arr = payload
+            _save_shard(
+                shard_root=shard_root,
+                file_path=file_path,
+                symbol=symbol,
+                alpha=alpha,
+                alpha158_config=alpha158_config,
+                lgbm_purified_config=lgbm_purified_config,
+                feature_names=feature_names,
+                x_arr=x_arr,
+                y_arr=y_arr,
+                d_arr=d_arr,
+            )
+
+        if x_arr.shape != (cnt, n_feat):
+            raise RuntimeError(f"Shard shape mismatch for {file_path}: expected {(cnt, n_feat)}, got {x_arr.shape}")
+        if y_arr.shape[0] != cnt or d_arr.shape[0] != cnt:
+            raise RuntimeError(f"Shard row count mismatch for {file_path}: expected {cnt}")
+
+        x_store[start:end] = x_arr
+        y_store[start:end] = y_arr
+        date_store[start:end] = d_arr
+        symbol_store[start:end] = symbol_to_id[symbol]
+
+        elapsed = time.perf_counter() - t1
+        speed = idx / elapsed if elapsed > 0 else 0.0
+        eta = (len(file_layout) - idx) / speed if speed > 0 else float("inf")
+        pbar.set_postfix(reused=reused_files, rebuild=len(recompute_files), eta_m=f"{eta/60:.1f}")
+    pbar.close()
+
+    metadata = {
+        "cache_mode": "panel_2d",
+        "alpha": alpha,
+        "profile_name": profile_name or ("alpha158_custom" if alpha == "158" and alpha158_config else f"alpha{alpha}"),
+        "date_unit": "ns",
+        "num_features": n_feat,
+        "num_rows": total_count,
+        "shape": [total_count, n_feat],
+        "feature_names": feature_names,
+        "label": "open_t+2 / open_t+1 - 1",
+        "alpha158_config": alpha158_config if alpha in {"158", "all_factors"} else None,
+        "lgbm_purified_config": lgbm_purified_config if alpha in {"lgbm_purified", "all_factors"} else None,
+        "symbol_to_id": symbol_to_id,
+        "row_order": "symbol-major (input file order), date ascending within symbol",
+        "incremental": {
+            "enabled": True,
+            "shard_dir": str(shard_root),
+            "reused_files": reused_files,
+            "recomputed_files": len(recompute_files),
+        },
+        "source_files": [
+            {
+                "file_path": entry["file_path"],
+                "symbol": entry["symbol"],
+                "row_count": entry["count"],
+                "source": _source_file_signature(entry["file_path"]),
+                "reused_shard": entry["reusable"],
+            }
+            for entry in file_layout
+        ],
+    }
+    with open(out_root / "meta.json", "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    print(f"[3/3] Done. Panel cache saved to: {out_root}")
+    return metadata
+
+
 def generate_panel_cache(
     parquet_dir: str = "data/processed/combined",
     output_dir: str = "data/cache/alpha158_panel",
     alpha: str = "158",
     alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
     profile_name: str | None = None,
     workers: int = 1,
+    incremental: bool = False,
 ) -> dict[str, Any]:
     """Generate 2D panel cache arrays with no lookback/split."""
+    if incremental:
+        return _generate_panel_cache_incremental(
+            parquet_dir=parquet_dir,
+            output_dir=output_dir,
+            alpha=alpha,
+            alpha158_config=alpha158_config,
+            lgbm_purified_config=lgbm_purified_config,
+            profile_name=profile_name,
+            workers=workers,
+        )
+
     pdir = Path(parquet_dir)
     out_root = Path(output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -708,7 +1172,9 @@ def generate_panel_cache(
     if workers == 1:
         pbar = tqdm(files, desc="counting", total=total_files, unit="file")
         for idx, fp in enumerate(pbar, start=1):
-            file_path, symbol, file_n_feat, cnt = _count_file_worker(str(fp), alpha, alpha158_config)
+            file_path, symbol, file_n_feat, cnt = _count_file_worker(
+                str(fp), alpha, alpha158_config, lgbm_purified_config
+            )
             symbols.add(symbol)
             n_feat = file_n_feat if n_feat is None else n_feat
             if n_feat != file_n_feat:
@@ -722,7 +1188,10 @@ def generate_panel_cache(
     else:
         def _run_parallel_count(executor) -> None:
             nonlocal n_feat, total_count
-            futures = [executor.submit(_count_file_worker, str(fp), alpha, alpha158_config) for fp in files]
+            futures = [
+                executor.submit(_count_file_worker, str(fp), alpha, alpha158_config, lgbm_purified_config)
+                for fp in files
+            ]
             pbar = tqdm(total=total_files, desc="counting", unit="file")
             for idx, fut in enumerate(as_completed(futures), start=1):
                 file_path, symbol, file_n_feat, cnt = fut.result()
@@ -783,7 +1252,9 @@ def generate_panel_cache(
     if workers == 1:
         pbar = tqdm(file_layout, desc="processing", total=total_files, unit="file")
         for idx, (file_path, symbol, start, cnt) in enumerate(pbar, start=1):
-            symbol2, file_n_feat, payload = _build_file_payload_worker(file_path, alpha, alpha158_config)
+            symbol2, file_n_feat, payload = _build_file_payload_worker(
+                file_path, alpha, alpha158_config, lgbm_purified_config
+            )
             if file_n_feat != n_feat:
                 raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
             if symbol2 != symbol:
@@ -806,7 +1277,9 @@ def generate_panel_cache(
     else:
         def _run_thread_write() -> None:
             def _thread_job(file_path: str, symbol: str, start: int, cnt: int) -> int:
-                symbol2, file_n_feat, payload = _build_file_payload_worker(file_path, alpha, alpha158_config)
+                symbol2, file_n_feat, payload = _build_file_payload_worker(
+                    file_path, alpha, alpha158_config, lgbm_purified_config
+                )
                 if file_n_feat != n_feat:
                     raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
                 if symbol2 != symbol:
@@ -857,6 +1330,7 @@ def generate_panel_cache(
                             file_path,
                             alpha,
                             alpha158_config,
+                            lgbm_purified_config,
                             start,
                             cnt,
                             sid,
@@ -890,11 +1364,36 @@ def generate_panel_cache(
         "num_features": n_feat,
         "num_rows": total_count,
         "shape": [total_count, n_feat],
-        "feature_names": get_alpha158_feature_config(alpha158_config)[1] if alpha == "158" else get_alpha360_feature_config()[1],
+        "feature_names": (
+            get_alpha158_feature_config(alpha158_config)[1]
+            if alpha == "158"
+            else get_alpha360_feature_config()[1]
+            if alpha == "360"
+            else get_lgbm_purified_feature_names(lgbm_purified_config)
+            if alpha == "lgbm_purified"
+            else get_all_factor_feature_names(alpha158_config, lgbm_purified_config)
+        ),
         "label": "open_t+2 / open_t+1 - 1",
-        "alpha158_config": alpha158_config if alpha == "158" else None,
+        "alpha158_config": alpha158_config if alpha in {"158", "all_factors"} else None,
+        "lgbm_purified_config": lgbm_purified_config if alpha in {"lgbm_purified", "all_factors"} else None,
         "symbol_to_id": symbol_to_id,
         "row_order": "symbol-major (input file order), date ascending within symbol",
+        "incremental": {
+            "enabled": False,
+            "shard_dir": str(out_root / SHARD_DIRNAME),
+            "reused_files": 0,
+            "recomputed_files": total_files,
+        },
+        "source_files": [
+            {
+                "file_path": key,
+                "symbol": symbol,
+                "row_count": cnt,
+                "source": _source_file_signature(key),
+                "reused_shard": False,
+            }
+            for key, (symbol, cnt) in file_rows.items()
+        ],
     }
     with open(out_root / "meta.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
@@ -919,8 +1418,9 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet-dir", default="data/processed/combined", help="Input parquet directory.")
     parser.add_argument("--output-dir", default=None, help="Output cache directory.")
     parser.add_argument("--profile", default=None, help="Feature profile name defined in configs/feature_profiles.yaml.")
-    parser.add_argument("--alpha", choices=["158", "360"], default="158", help="Alpha feature set.")
+    parser.add_argument("--alpha", choices=["158", "360", "all_factors"], default="all_factors", help="Feature family when no profile is used.")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for counting/writing.")
+    parser.add_argument("--incremental", action="store_true", help="Reuse unchanged per-symbol feature shards and only recompute changed parquet files.")
     return parser.parse_args()
 
 
@@ -935,24 +1435,29 @@ def main() -> None:
     use_profile = args.profile is not None or "features" in cfg
     if use_profile:
         profile = resolve_feature_profile(cfg, profile_name=args.profile)
-        alpha = profile["alpha"]
-        alpha158_config = profile["alpha158_config"] if alpha == "158" else None
+        alpha = profile["generation_alpha"]
+        alpha158_config = profile["alpha158_config"] if alpha in {"158", "all_factors"} else None
+        lgbm_purified_config = profile["raw"].get("lgbm_purified") if alpha in {"lgbm_purified", "all_factors"} else None
         out_dir = args.output_dir or profile["cache_dir"]
-        profile_name = profile["name"]
+        profile_name = "all_factors_full" if alpha == "all_factors" else profile["name"]
     else:
         alpha = args.alpha
         alpha158_config = None
-        out_dir = args.output_dir or f"data/cache/alpha{alpha}_panel"
-        profile_name = f"alpha{alpha}_full"
+        lgbm_purified_config = None
+        default_out_dir = "data/cache/all_factors_panel" if alpha == "all_factors" else f"data/cache/alpha{alpha}_panel"
+        out_dir = args.output_dir or default_out_dir
+        profile_name = "all_factors_full" if alpha == "all_factors" else f"alpha{alpha}_full"
 
-    print(f"cache_mode=panel_2d, alpha={alpha}, profile={profile_name}, output={out_dir}")
+    print(f"cache_mode=panel_2d, alpha={alpha}, profile={profile_name}, output={out_dir}, incremental={args.incremental}")
     generate_panel_cache(
         parquet_dir=args.parquet_dir,
         output_dir=out_dir,
         alpha=alpha,
         alpha158_config=alpha158_config,
+        lgbm_purified_config=lgbm_purified_config,
         profile_name=profile_name,
         workers=max(1, int(args.workers)),
+        incremental=args.incremental,
     )
 
 

@@ -7,7 +7,7 @@ import pickle
 
 from src.config_loader import load_config
 from src.experiment_store import finalize_run_store, prepare_run_store
-from src.feature_selection import compute_finite_feature_mask, resolve_selected_features
+from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask, resolve_selected_features
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
 from src.feature_profiles import get_native_cache_dir
 from src.label_utils import sanitize_label_array
@@ -167,7 +167,10 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         y_train_series = pd.Series(y[valid_train_mask])
         X_valid_df = pd.DataFrame(X[valid_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
         y_valid_series = pd.Series(y[valid_valid_mask])
+        train_dates = pd.to_datetime(dates[valid_train_mask])
         valid_dates = pd.to_datetime(dates[valid_valid_mask])
+        X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
+        X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
         
         model = NativeLGBM(**get_lgbm_config(cfg))
         if args.load_model:
@@ -186,6 +189,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         if not np.any(test_valid_mask):
             raise ValueError("No valid native LightGBM test rows after filtering invalid features.")
         X_test_df = pd.DataFrame(X[test_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
+        test_dates = pd.to_datetime(dates[test_valid_mask])
+        X_test_df = apply_feature_transforms(X_test_df, test_dates, cfg)
         preds_arr = model.predict(X_test_df)
         
         # We need the indices to align dates and symbols
@@ -387,6 +392,7 @@ def main():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Quantitative Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default=None, help="Model name: lstm / transformer / lgbm")
+    parser.add_argument("--profile", help="Override features.profile and use the corresponding cache/profile")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
     parser.add_argument("--save-model", help="Path to save the trained model (e.g. results/lstm/model.pkl)")
@@ -405,6 +411,9 @@ def main():
     cfg = load_config(args.config)
     if args.model:
         cfg["model"]["name"] = args.model
+    if args.profile:
+        cfg.setdefault("features", {})
+        cfg["features"]["profile"] = args.profile
     if args.topk is not None:
         cfg["strategy"]["topk"] = args.topk
     if args.n_drop is not None:

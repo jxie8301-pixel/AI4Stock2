@@ -1,6 +1,9 @@
-default_profile: alpha158_full
+default_profile: all_factors_full
 
 profiles:
+  all_factors_full:
+    path: configs/features/all_factors_full.yaml
+
   alpha158_full:
     path: configs/features/alpha158_full.yaml
 
@@ -9,3 +12,6 @@ profiles:
 
   alpha360_full:
     path: configs/features/alpha360_full.yaml
+
+  lgbm_purified_v1:
+    path: configs/features/lgbm_purified_v1.yaml

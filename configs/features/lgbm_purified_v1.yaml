@@ -1,0 +1,13 @@
+alpha: lgbm_purified
+generation_alpha: all_factors
+cache_name: all_factors_panel
+lgbm_purified:
+  momentum_windows: [20, 60]
+  ma_windows: [20, 60, 120]
+  vol_window: 60
+  atr_window: 14
+  amihud_window: 20
+  volume_window: 20
+  corr_window: 20
+  turnover_window: 20
+  extreme_window: 20

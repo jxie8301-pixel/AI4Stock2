@@ -13,13 +13,15 @@ What is true now:
   - `run_native_rolling.py`
   - `src/gen_feature.py`
 - Native feature caches are built from Parquet source data
+- `gen_feature.py` now defaults to a unified all-factor cache
+- Feature profiles are now treated as subset presets over the unified cache
 - Training-time feature subset selection is supported through `features.selected_columns`
 - Local experiment storage is enabled through `results/experiments/`
 
 ## Current Recommended Workflow
 
 1. Update or refresh Parquet data with `src/collector_akshare.py`
-2. Generate a cache with the desired feature profile
+2. Generate the unified all-factor cache once
 3. Train `lgbm` on rolling windows with `run_native_rolling.py`
 4. Compare experiments through `results/experiments/experiment_index.csv`
 
@@ -27,14 +29,14 @@ What is true now:
 
 ### 1. LightGBM Feature Research
 
-- [ ] Add a native `lgbm_purified_v1` feature profile inspired by the strongest old-project factors
-- [ ] Add native support for valuation/style factors such as `ep_ttm`, `bp`, `log_mcap`, `is_loss`
-- [ ] Add liquidity and microstructure factors such as `amihud_20`, `turnover_20`, `vwap_ratio`
+- [x] Add a native `lgbm_purified_v1` feature profile inspired by the strongest old-project factors
+- [x] Add native support for valuation/style factors such as `ep_ttm`, `bp`, `log_mcap`, `is_loss`
+- [x] Add liquidity and microstructure factors such as `amihud_20`, `turnover_20`, `vwap_ratio`
 - [ ] Compare `alpha158_compact_v1` vs `alpha158_full` vs `lgbm_purified_v1`
 
 ### 2. Training-Time Transforms
 
-- [ ] Add optional daily cross-sectional rank transform before model training
+- [x] Add optional daily cross-sectional rank transform before model training for LightGBM
 - [ ] Add optional feature winsorization / clipping transform in the training path
 - [ ] Add optional label de-meaning for LightGBM experiments
 - [ ] Record applied transforms in experiment manifests

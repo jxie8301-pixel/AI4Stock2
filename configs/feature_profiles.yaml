@@ -1,6 +1,9 @@
-default_profile: all_factors_full
+default_profile: core_v1
 
 profiles:
+  core_v1:
+    path: configs/features/core_v1.yaml
+
   all_factors_full:
     path: configs/features/all_factors_full.yaml
 

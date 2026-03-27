@@ -96,7 +96,8 @@ AI4Stock2/
 - Backend: native only
 - Default model: `lgbm`
 - Default profile: `alpha158_compact_v1`
-- Default universe: `csi300_real`
+- Default universe: `csi300`
+- Supported generated universes: `csi300`, `csi500`, `zz1000`
 - Default label: `open_{t+2} / open_{t+1} - 1`
 
 ## Practical Notes

@@ -5,7 +5,7 @@ artifacts:
   enable_local_store: true
   store_dir: ./results/experiments
 
-universe: csi300_real
+universe: csi300
 
 time:
   train: ["2016-01-01", "2022-12-31"]

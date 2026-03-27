@@ -11,14 +11,16 @@ from src.gen_feature import (
 
 
 class FeatureProfilesTest(unittest.TestCase):
-    def test_default_profile_is_all_factors_full(self):
+    def test_default_profile_is_core_v1(self):
         profile = resolve_feature_profile({})
 
         self.assertEqual(profile["alpha"], "all_factors")
         self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
-        self.assertIsNone(profile["selected_columns"])
-        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/all_factors_full.yaml"))
+        self.assertEqual(len(profile["selected_columns"]), 41)
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v1.yaml"))
+        self.assertEqual(profile["selected_columns"][0], "KMID")
+        self.assertEqual(profile["selected_columns"][-1], "TEMP_corr_cv_20")
         self.assertEqual(len(get_all_factor_feature_names()), 253)
         self.assertIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", get_all_factor_feature_names())
 

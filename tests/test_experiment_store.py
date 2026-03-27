@@ -16,7 +16,7 @@ class ExperimentStoreTest(unittest.TestCase):
                 "enable_local_store": True,
                 "store_dir": store_dir,
             },
-            "universe": "csi300_real",
+            "universe": "csi300",
             "strategy": {
                 "topk": 30,
                 "n_drop": 5,

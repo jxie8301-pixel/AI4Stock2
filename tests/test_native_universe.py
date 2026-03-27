@@ -41,10 +41,10 @@ class NativeUniverseTest(unittest.TestCase):
 
     def test_resolve_universe_path_prefers_native_dir(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
-            universe_path = Path(tmp_dir) / "csi300_real.txt"
+            universe_path = Path(tmp_dir) / "csi300.txt"
             universe_path.write_text("000001\n", encoding="utf-8")
 
-            resolved = resolve_universe_path("csi300_real", universe_dir=tmp_dir)
+            resolved = resolve_universe_path("csi300", universe_dir=tmp_dir)
 
             self.assertEqual(resolved, universe_path)
 

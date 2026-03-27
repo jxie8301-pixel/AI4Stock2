@@ -14,6 +14,16 @@
 python src/collector_akshare.py --update --workers 8
 ```
 
+如需构建或刷新常用股票池文件：
+```bash
+uv run python src/build_universes.py
+```
+
+当前脚本默认生成：
+- `csi300`
+- `csi500`
+- `zz1000`
+
 Native 训练前，建议先按当前配置生成本地特征缓存：
 ```bash
 uv run python src/gen_feature.py --workers 8
@@ -59,6 +69,7 @@ uv run python src/gen_feature.py --workers 8 --incremental
 
 之后无论是单次训练还是 rolling，都可以只在训练阶段通过 `features.selected_columns` 挑选子集，不需要重复生成 cache。
 `features.profile` 现在更适合理解为“默认选列模板”：
+- `core_v1`: 默认核心策略因子集
 - `all_factors_full`: 使用全集
 - `alpha158_full`: 默认只用 Alpha158 子集
 - `alpha158_compact_v1`: 默认只用紧凑版 Alpha158 子集
@@ -72,7 +83,7 @@ uv run python src/gen_feature.py --workers 8 --incremental
 ### 滚动训练与回测 (推荐实战模式)
 当前推荐优先使用 native + LightGBM，先做稳健基线：
 ```bash
-uv run python run_native_rolling.py --model lgbm --horizon 20 --run-tag compact_lgbm
+uv run python run_native_rolling.py --model lgbm --horizon 20 --run-tag core_v1
 ```
 
 如果要直接从命令行切换因子 profile，不必改 `config.yaml`：
@@ -125,9 +136,9 @@ uv run python main.py --model lgbm --disable-local-store
 
 ## 5. 关键参数微调 (`configs/config.yaml`)
 
-- **股票池** (`universe`): 强烈建议使用 `csi300_real`（纯净版沪深300）。
+- **股票池** (`universe`): 强烈建议使用 `csi300`（沪深300）。
 - **回看天数** (`lookback`): 建议设为 `20`（抓取短期时序特征）。
-- **特征 Profile** (`features.profile`): 默认使用 `all_factors_full`。这里的 profile 主要表示“从全集 cache 中默认选择哪些列”，不再表示单独的 cache 家族。具体定义保存在 `configs/features/*.yaml`。
+- **特征 Profile** (`features.profile`): 默认使用 `core_v1`。这里的 profile 主要表示“从全集 cache 中默认选择哪些列”，不再表示单独的 cache 家族。具体定义保存在 `configs/features/*.yaml`。
 - **推荐候选**: `alpha158_compact_v1` 适合作为技术面基线，`lgbm_purified_v1` 适合作为 LightGBM 研究起点。
 - **命令行覆写**: `main.py` 和 `run_native_rolling.py` 都支持 `--profile`，适合做 profile 对照实验。
 - **模型 Preset** (`model.preset`): 主配置只引用模型预设，具体超参保存在 `configs/models/*.yaml`。
@@ -138,7 +149,7 @@ uv run python main.py --model lgbm --disable-local-store
 示例：
 ```yaml
 features:
-  profile: all_factors_full
+  profile: core_v1
   selected_columns:
     - KMID
     - MA20

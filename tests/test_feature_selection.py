@@ -10,7 +10,7 @@ from src.feature_selection import apply_cross_sectional_rank, apply_feature_tran
 class FeatureSelectionTest(unittest.TestCase):
     def test_resolve_selected_features_returns_all_when_omitted(self):
         meta = {"feature_names": ["A", "B", "C"]}
-        cfg = {"features": {}}
+        cfg = {"features": {"profile": "all_factors_full"}}
 
         idx, names = resolve_selected_features(meta, cfg)
 

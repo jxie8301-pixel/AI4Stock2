@@ -47,7 +47,7 @@ class FeatureSelectionTest(unittest.TestCase):
             "dist_high_20",
             "dist_low_20",
         ]]
-        meta = {"feature_names": ["KMID", "MA5", "A360_CLOSE0", *lgbm_cols]}
+        meta = {"feature_names": ["KMID", "MA5", "TEMP_ret_20", *lgbm_cols]}
         cfg = {"features": {"profile": "lgbm_purified_v1"}}
 
         idx, names = resolve_selected_features(meta, cfg)
@@ -98,8 +98,8 @@ class FeatureSelectionTest(unittest.TestCase):
 
         self.assertEqual(len(feature_names), len(set(feature_names)))
         self.assertIn("KMID", feature_names)
-        self.assertIn("A360_CLOSE0", feature_names)
         self.assertIn("LGBM_ret_20", feature_names)
+        self.assertIn("TEMP_ret_120", feature_names)
 
 
 if __name__ == "__main__":

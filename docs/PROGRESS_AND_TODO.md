@@ -15,6 +15,8 @@ What is true now:
 - Native feature caches are built from Parquet source data
 - `gen_feature.py` now defaults to a unified all-factor cache
 - Feature profiles are now treated as subset presets over the unified cache
+- The unified cache now includes a systematic temporal factor family with shared windows
+- Alpha360 has been removed from the default full-factor space
 - Training-time feature subset selection is supported through `features.selected_columns`
 - Local experiment storage is enabled through `results/experiments/`
 
@@ -32,7 +34,9 @@ What is true now:
 - [x] Add a native `lgbm_purified_v1` feature profile inspired by the strongest old-project factors
 - [x] Add native support for valuation/style factors such as `ep_ttm`, `bp`, `log_mcap`, `is_loss`
 - [x] Add liquidity and microstructure factors such as `amihud_20`, `turnover_20`, `vwap_ratio`
+- [x] Add a first-pass unified temporal factor family with systematic windows
 - [ ] Compare `alpha158_compact_v1` vs `alpha158_full` vs `lgbm_purified_v1`
+- [x] Remove `A360_*` from the default full-factor space
 
 ### 2. Training-Time Transforms
 
@@ -47,6 +51,7 @@ What is true now:
 - [ ] Add per-feature NaN / inf diagnostics to `meta.json`
 - [ ] Add a cache validation command for shape, names, coverage, and label sanity
 - [ ] Review whether valuation fields are complete enough across the full sample
+- [ ] Reduce full-factor cache footprint without changing the current training read path
 
 ### 4. Backtest Realism
 

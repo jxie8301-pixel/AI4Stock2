@@ -1,5 +1,5 @@
 alpha: lgbm_purified
-generation_alpha: all_factors
+generation_space: full_factor_space
 cache_name: all_factors_panel
 lgbm_purified:
   momentum_windows: [20, 60]

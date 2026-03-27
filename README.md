@@ -7,7 +7,7 @@ Native A-share research pipeline built around Parquet data, local feature caches
 Generate the cache for the active config:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python src/gen_feature.py --config configs/config.yaml --workers 8
+UV_CACHE_DIR=/tmp/uv-cache uv run python src/gen_feature.py --workers 8
 ```
 
 Run the default rolling LightGBM experiment:

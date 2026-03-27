@@ -16,7 +16,7 @@ python src/collector_akshare.py --update --workers 8
 
 Native 训练前，建议先按当前配置生成本地特征缓存：
 ```bash
-uv run python src/gen_feature.py --config configs/config.yaml --workers 8
+uv run python src/gen_feature.py --workers 8
 ```
 
 现在默认就是先生成一个足够大的全集 cache，然后训练时按需选列：
@@ -38,25 +38,34 @@ uv run python src/gen_feature.py --workers 8 --incremental
 
 默认输出目录为 `data/cache/all_factors_panel`，其中包含：
 - Alpha158 全量因子，保留原始列名
-- Alpha360 全量因子，列名前缀为 `A360_`
 - LightGBM 净化因子，列名前缀为 `LGBM_`
+- 统一时间窗口因子，列名前缀为 `TEMP_`
+
+当前统一时间窗口因子默认按这些窗口展开：
+- `1, 5, 10, 20, 30, 60, 120`
+
+当前默认展开的时间算子包括：
+- `ret`
+- `ma_gap`
+- `std`
+- `rsv`
+- `price_rank`
+- `volume_ratio`
+- `turnover_mean`
+- `amihud`
+- `high_gap`
+- `low_gap`
+- `corr_cv`
 
 之后无论是单次训练还是 rolling，都可以只在训练阶段通过 `features.selected_columns` 挑选子集，不需要重复生成 cache。
 `features.profile` 现在更适合理解为“默认选列模板”：
 - `all_factors_full`: 使用全集
 - `alpha158_full`: 默认只用 Alpha158 子集
 - `alpha158_compact_v1`: 默认只用紧凑版 Alpha158 子集
-- `alpha360_full`: 默认只用 Alpha360 子集
 - `lgbm_purified_v1`: 默认只用 LightGBM 净化子集
 
-如果你显式传 `--profile alpha158_full` 或 `--profile lgbm_purified_v1` 给 `gen_feature.py`，现在也仍然会生成同一个全集 cache，而不是单独的小 cache。
-也就是说，profile 主要用于训练侧默认选列，不再建议把它理解成不同 cache 类型。
-
-如果你确实只想手工生成非默认族，也仍然支持：
-```bash
-uv run python src/gen_feature.py --alpha 158 --output-dir data/cache/alpha158_panel --workers 8
-uv run python src/gen_feature.py --config configs/config_baseline.yaml --workers 8
-```
+`gen_feature.py` 现在只负责生成统一全集 cache，不再暴露 `alpha158/alpha360` 这类历史因子库名字。
+这些名字只保留在训练侧 profile 中，用来表达“从全集中默认选择哪些列”。
 
 ## 2. 核心运行模式 (Core Workflow)
 
@@ -135,7 +144,7 @@ features:
     - MA20
     - RSV20
     - LGBM_ret_20
-    - A360_CLOSE0
+    - TEMP_ret_20
 ```
 
 改完 `selected_columns` 后，不需要重新执行 `gen_feature.py`；直接重新训练即可。

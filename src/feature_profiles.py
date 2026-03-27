@@ -54,18 +54,14 @@ def resolve_feature_profile(
 ) -> dict[str, Any]:
     try:
         from src.gen_feature import (
-            ALL_FACTORS_ALPHA360_PREFIX,
             ALL_FACTORS_LGBM_PREFIX,
             get_alpha158_feature_config,
-            get_alpha360_feature_config,
             get_lgbm_purified_feature_names,
         )
     except ModuleNotFoundError:
         from gen_feature import (  # type: ignore
-            ALL_FACTORS_ALPHA360_PREFIX,
             ALL_FACTORS_LGBM_PREFIX,
             get_alpha158_feature_config,
-            get_alpha360_feature_config,
             get_lgbm_purified_feature_names,
         )
 
@@ -87,16 +83,12 @@ def resolve_feature_profile(
         profile_config_path=profile_config_path,
     )
     alpha = str(profile.get("alpha", features_cfg.get("alpha", cfg.get("alpha_version", 158))))
-    generation_alpha = str(profile.get("generation_alpha", "all_factors"))
+    generation_space = str(profile.get("generation_space", profile.get("generation_alpha", "full_factor_space")))
     cache_name = profile.get("cache_name") or "all_factors_panel"
     if "selected_columns" in profile:
         profile_selected_columns = list(profile["selected_columns"])
     elif alpha == "158":
         profile_selected_columns = get_alpha158_feature_config(profile.get("alpha158"))[1]
-    elif alpha == "360":
-        profile_selected_columns = [
-            f"{ALL_FACTORS_ALPHA360_PREFIX}{name}" for name in get_alpha360_feature_config()[1]
-        ]
     elif alpha == "lgbm_purified":
         profile_selected_columns = [
             f"{ALL_FACTORS_LGBM_PREFIX}{name}"
@@ -108,7 +100,7 @@ def resolve_feature_profile(
     return {
         "name": resolved_profile_name,
         "alpha": alpha,
-        "generation_alpha": generation_alpha,
+        "generation_space": generation_space,
         "cache_dir": features_cfg.get("cache_dir") or str(Path("data/cache") / cache_name),
         "alpha158_config": deepcopy(profile.get("alpha158")),
         "selected_columns": deepcopy(profile_selected_columns),

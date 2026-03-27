@@ -1,5 +1,5 @@
 alpha: 158
-generation_alpha: all_factors
+generation_space: full_factor_space
 cache_name: all_factors_panel
 alpha158:
   kbar: {}

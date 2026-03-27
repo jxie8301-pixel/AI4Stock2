@@ -1,7 +1,13 @@
 import unittest
 
 from src.feature_profiles import resolve_feature_profile
-from src.gen_feature import get_all_factor_feature_names, get_alpha158_feature_config, get_lgbm_purified_feature_names
+from src.gen_feature import (
+    TEMPORAL_FACTOR_PREFIX,
+    get_all_factor_feature_names,
+    get_alpha158_feature_config,
+    get_lgbm_purified_feature_names,
+    get_temporal_factor_feature_names,
+)
 
 
 class FeatureProfilesTest(unittest.TestCase):
@@ -9,11 +15,12 @@ class FeatureProfilesTest(unittest.TestCase):
         profile = resolve_feature_profile({})
 
         self.assertEqual(profile["alpha"], "all_factors")
-        self.assertEqual(profile["generation_alpha"], "all_factors")
+        self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
         self.assertIsNone(profile["selected_columns"])
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/all_factors_full.yaml"))
-        self.assertEqual(len(get_all_factor_feature_names()), 536)
+        self.assertEqual(len(get_all_factor_feature_names()), 253)
+        self.assertIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", get_all_factor_feature_names())
 
     def test_full_profile_preserves_legacy_cache_dir(self):
         cfg = {
@@ -26,7 +33,7 @@ class FeatureProfilesTest(unittest.TestCase):
         profile = resolve_feature_profile(cfg)
 
         self.assertEqual(profile["alpha"], "158")
-        self.assertEqual(profile["generation_alpha"], "all_factors")
+        self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
         self.assertIsNone(profile["alpha158_config"])
         self.assertEqual(len(profile["selected_columns"]), 158)
@@ -63,7 +70,7 @@ class FeatureProfilesTest(unittest.TestCase):
         feature_names = get_lgbm_purified_feature_names(profile["raw"].get("lgbm_purified"))
 
         self.assertEqual(profile["alpha"], "lgbm_purified")
-        self.assertEqual(profile["generation_alpha"], "all_factors")
+        self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/lgbm_purified_v1.yaml"))
         self.assertEqual(len(feature_names), 18)
@@ -92,15 +99,17 @@ class FeatureProfilesTest(unittest.TestCase):
             ],
         )
 
-    def test_alpha360_profile_maps_to_prefixed_all_factor_columns(self):
-        profile = resolve_feature_profile({"features": {"profile": "alpha360_full"}})
+    def test_temporal_factor_family_has_systematic_windows(self):
+        names = get_temporal_factor_feature_names()
 
-        self.assertEqual(profile["alpha"], "360")
-        self.assertEqual(profile["generation_alpha"], "all_factors")
-        self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
-        self.assertEqual(len(profile["selected_columns"]), 360)
-        self.assertEqual(profile["selected_columns"][0], "A360_CLOSE59")
-        self.assertEqual(profile["selected_columns"][-1], "A360_VOLUME0")
+        self.assertEqual(len(names), 77)
+        self.assertIn("ret_1", names)
+        self.assertIn("ma_gap_120", names)
+        self.assertIn("corr_cv_60", names)
+
+    def test_removed_alpha360_profile_is_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_feature_profile({"features": {"profile": "alpha360_full"}})
 
 
 if __name__ == "__main__":

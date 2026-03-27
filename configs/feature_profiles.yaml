@@ -10,8 +10,5 @@ profiles:
   alpha158_compact_v1:
     path: configs/features/alpha158_compact_v1.yaml
 
-  alpha360_full:
-    path: configs/features/alpha360_full.yaml
-
   lgbm_purified_v1:
     path: configs/features/lgbm_purified_v1.yaml

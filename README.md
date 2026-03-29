@@ -4,7 +4,7 @@ Native A-share research pipeline built around Parquet data, local feature caches
 
 ## Quickstart
 
-Generate the cache for the active config:
+Generate the factor store for the active config:
 
 ```bash
 UV_CACHE_DIR=/tmp/uv-cache uv run python src/gen_feature.py --workers 8
@@ -13,7 +13,7 @@ UV_CACHE_DIR=/tmp/uv-cache uv run python src/gen_feature.py --workers 8
 Run the default rolling LightGBM experiment:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python run_native_rolling.py --config configs/config.yaml --model lgbm --horizon 20 --run-tag compact_lgbm
+UV_CACHE_DIR=/tmp/uv-cache uv run python run_native_rolling.py --config configs/config.yaml --model lgbm --horizon 20 --run-tag core_v1
 ```
 
 Run a single native experiment:

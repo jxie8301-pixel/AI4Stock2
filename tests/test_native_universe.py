@@ -3,8 +3,9 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
-from src.native_universe import build_universe_mask, resolve_universe_path
+from src.native_universe import build_universe_frame_mask, build_universe_mask, resolve_universe_path
 
 
 class NativeUniverseTest(unittest.TestCase):
@@ -47,6 +48,20 @@ class NativeUniverseTest(unittest.TestCase):
             resolved = resolve_universe_path("csi300", universe_dir=tmp_dir)
 
             self.assertEqual(resolved, universe_path)
+
+    def test_build_universe_frame_mask_respects_dates(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            universe_path = Path(tmp_dir) / "demo.txt"
+            universe_path.write_text("000001\t2024-01-01\t2024-01-31\n", encoding="utf-8")
+
+            mask = build_universe_frame_mask(
+                dates=pd.to_datetime(["2024-01-15", "2024-02-01"]),
+                symbols=["000001", "000001"],
+                universe_name="demo",
+                universe_dir=tmp_dir,
+            )
+
+            self.assertEqual(mask.tolist(), [True, False])
 
 
 if __name__ == "__main__":

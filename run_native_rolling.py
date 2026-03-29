@@ -10,16 +10,16 @@ import numpy as np
 
 from src.config_loader import load_config
 from src.experiment_store import finalize_run_store, prepare_run_store
-from src.feature_profiles import get_native_cache_dir
-from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask, resolve_selected_features
-from src.label_utils import sanitize_label_array
+from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
+from src.feature_profiles import get_native_factor_store_dir
+from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask_frame, resolve_selected_features
 from src.model_config import get_lgbm_config
 
 def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default="lgbm", help="Model name")
-    parser.add_argument("--profile", help="Override features.profile and use the corresponding cache/profile")
+    parser.add_argument("--profile", help="Override features.profile and use the corresponding factor-store/profile")
     parser.add_argument("--horizon", type=int, default=10, help="Rolling horizon in trading days")
     parser.add_argument("--train-days", type=int, default=242, help="Training window length in trading days")
     parser.add_argument("--valid-days", type=int, default=10, help="Validation window length in trading days")
@@ -64,37 +64,23 @@ def run_rolling_pipeline():
     print(f"\n>>> Running Native Rolling Pipeline (Backend: NATIVE) <<<")
     
     # ── 1. Load Global Native Data ────────────────────────
-    cache_dir = get_native_cache_dir(cfg)
+    factor_store_dir = get_native_factor_store_dir(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
     
-    print("\n[Step 1] Loading Global Native Memmap Data")
-    meta_path = Path(cache_dir) / "meta.json"
-    if not meta_path.exists():
-        raise FileNotFoundError(
-            f"Native cache missing: {cache_dir}. "
-            "Please run `uv run python src/gen_feature.py --config configs/config.yaml` first."
-        )
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
+    print("\n[Step 1] Loading Parquet Factor Store Metadata")
+    meta = load_factor_store_metadata(factor_store_dir)
 
     selected_feature_idx, selected_feature_names = resolve_selected_features(meta, cfg)
     print(f"Selected features: {len(selected_feature_names)} / {len(meta['feature_names'])}")
-        
-    shape = tuple(meta["shape"])
-    num_rows = meta["num_rows"]
-    
-    X = np.lib.format.open_memmap(Path(cache_dir) / "X.npy", mode="r", dtype=np.float32, shape=shape)
-    y_memmap = np.lib.format.open_memmap(Path(cache_dir) / "y.npy", mode="r", dtype=np.float32, shape=(num_rows,))
-    y = sanitize_label_array(y_memmap)
-    dates = np.lib.format.open_memmap(Path(cache_dir) / "date.npy", mode="r", dtype=np.int64, shape=(num_rows,))
-    symbols = np.lib.format.open_memmap(Path(cache_dir) / "symbol.npy", mode="r", dtype=np.int32, shape=(num_rows,))
-    
-    id_to_symbol = {v: k for k, v in meta["symbol_to_id"].items()}
-    dt_index = pd.to_datetime(dates)
-    
-    # Extract unique trading dates from the dataset
-    all_trading_dates = sorted(dt_index.unique())
+    universe_name = cfg.get("universe", "all")
+    universe_dir = cfg.get("native", {}).get("universe_dir", "data/universes")
+    all_trading_dates = load_available_dates(
+        store_dir=factor_store_dir,
+        universe_name=universe_name,
+        universe_dir=universe_dir,
+        progress_desc="scanning trading dates",
+    )
     full_calendar = pd.Series(all_trading_dates)
     
     # Filter global calendar to our test period
@@ -102,30 +88,33 @@ def run_rolling_pipeline():
     test_end = pd.Timestamp(cfg["time"]["test"][1])
     
     test_calendar = full_calendar[(full_calendar >= test_start) & (full_calendar <= test_end)].reset_index(drop=True)
-    
-    # Universe Filtering
-    universe_name = cfg.get("universe", "all")
-    if universe_name == "all":
-        uni_mask = np.ones(num_rows, dtype=bool)
-    else:
-        from src.native_universe import build_universe_mask, resolve_universe_path
+    if test_calendar.empty:
+        raise ValueError("No trading dates available for the configured test range.")
 
-        universe_dir = cfg.get("native", {}).get("universe_dir", "data/universes")
-        universe_path = resolve_universe_path(universe_name, universe_dir=universe_dir)
-        uni_mask = build_universe_mask(
-            dates_ns=dates,
-            symbol_ids=symbols,
-            symbol_to_id=meta["symbol_to_id"],
-            universe_name=universe_name,
-            universe_dir=universe_dir,
-        )
-        print(f"[*] Native universe '{universe_name}' loaded from {universe_path}. Matched rows: {int(uni_mask.sum())}.")
+    first_test_start = test_calendar.iloc[0]
+    first_test_idx = int(full_calendar.searchsorted(first_test_start))
+    earliest_idx = max(0, first_test_idx - args.train_days - args.valid_days)
+    load_start = full_calendar.iloc[earliest_idx]
+    factor_frame = load_factor_frame(
+        store_dir=factor_store_dir,
+        columns=selected_feature_names,
+        date_start=load_start,
+        date_end=test_end,
+        universe_name=universe_name,
+        universe_dir=universe_dir,
+        sort_by=("date", "symbol"),
+        progress_desc="loading factor store",
+    )
+    if factor_frame.empty:
+        raise ValueError("Parquet factor store returned no rows for the configured rolling date range.")
+    y = factor_frame["label"].to_numpy(dtype=np.float32, copy=True)
+    dt_index = pd.to_datetime(factor_frame["date"])
 
     # ── 2. Setup Rolling Windows ────────────────────────
     rolling_steps = range(0, len(test_calendar), args.horizon)
     all_predictions = []
     feature_importance_frames = []
-    finite_feature_mask = compute_finite_feature_mask(X, selected_feature_idx, num_rows)
+    finite_feature_mask = compute_finite_feature_mask_frame(factor_frame, selected_feature_names)
     
     print(f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} with {args.horizon}-day steps.")
 
@@ -159,9 +148,9 @@ def run_rolling_pipeline():
         print(f"    Train: {train_start.date()} ~ {train_end.date()} | Valid: {valid_start.date()} ~ {valid_end.date()}")
 
         # Data Slicing (Vectorized boolean masks)
-        train_mask = (dt_index >= train_start) & (dt_index <= train_end) & uni_mask
-        valid_mask = (dt_index >= valid_start) & (dt_index <= valid_end) & uni_mask
-        test_mask  = (dt_index >= current_test_start)  & (dt_index <= current_test_end) & uni_mask
+        train_mask = (dt_index >= train_start) & (dt_index <= train_end)
+        valid_mask = (dt_index >= valid_start) & (dt_index <= valid_end)
+        test_mask  = (dt_index >= current_test_start)  & (dt_index <= current_test_end)
         
         if args.model == "lgbm":
             from src.models.pure_lightgbm import NativeLGBM
@@ -178,12 +167,12 @@ def run_rolling_pipeline():
                 print("    Skipping window: no valid LightGBM validation rows.")
                 continue
             
-            X_train_df = pd.DataFrame(X[valid_train_mask][:, selected_feature_idx], columns=selected_feature_names)
+            X_train_df = factor_frame.loc[valid_train_mask, selected_feature_names].reset_index(drop=True)
             y_train_series = pd.Series(y[valid_train_mask])
-            X_valid_df = pd.DataFrame(X[valid_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
+            X_valid_df = factor_frame.loc[valid_valid_mask, selected_feature_names].reset_index(drop=True)
             y_valid_series = pd.Series(y[valid_valid_mask])
-            train_dates = pd.to_datetime(dates[valid_train_mask])
-            valid_dates = pd.to_datetime(dates[valid_valid_mask])
+            train_dates = pd.to_datetime(dt_index[valid_train_mask]).reset_index(drop=True)
+            valid_dates = pd.to_datetime(dt_index[valid_valid_mask]).reset_index(drop=True)
             X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
             X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
             
@@ -211,40 +200,51 @@ def run_rolling_pipeline():
             if not np.any(test_valid_mask):
                 print("    Skipping window: no valid LightGBM test rows.")
                 continue
-            X_test_df = pd.DataFrame(X[test_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
-            test_dates = pd.to_datetime(dates[test_valid_mask])
+            X_test_df = factor_frame.loc[test_valid_mask, selected_feature_names].reset_index(drop=True)
+            test_dates = pd.to_datetime(dt_index[test_valid_mask]).reset_index(drop=True)
             X_test_df = apply_feature_transforms(X_test_df, test_dates, cfg)
             
             preds_arr = model.predict(X_test_df)
-            end_indices = np.where(test_valid_mask)[0]
+            pred_dates = pd.to_datetime(dt_index[test_valid_mask]).reset_index(drop=True)
+            pred_symbols = factor_frame.loc[test_valid_mask, "symbol"].reset_index(drop=True)
             
         else:
-            feature_indices = np.asarray(selected_feature_idx)
+            seq_frame = factor_frame.sort_values(["symbol", "date"]).reset_index(drop=True)
+            seq_dt_index = pd.to_datetime(seq_frame["date"])
+            seq_symbols_str = seq_frame["symbol"].astype(str).to_numpy()
+            seq_symbol_ids, unique_symbols = pd.factorize(seq_symbols_str, sort=True)
+            id_to_symbol = {idx: symbol for idx, symbol in enumerate(unique_symbols)}
+            X = seq_frame[selected_feature_names].to_numpy(dtype=np.float32, copy=True)
+            y_seq = seq_frame["label"].to_numpy(dtype=np.float32, copy=True)
+            feature_indices = np.arange(len(selected_feature_names))
+            train_mask = (seq_dt_index >= train_start) & (seq_dt_index <= train_end)
+            valid_mask = (seq_dt_index >= valid_start) & (seq_dt_index <= valid_end)
+            test_mask = (seq_dt_index >= current_test_start) & (seq_dt_index <= current_test_end)
             train_dataset = NativeStockDataset(
                 X,
-                y,
-                symbols,
+                y_seq,
+                seq_symbol_ids,
                 train_mask,
                 lookback=lookback,
-                full_dates=dates,
+                full_dates=seq_dt_index.to_numpy(),
                 feature_indices=feature_indices,
             )
             valid_dataset = NativeStockDataset(
                 X,
-                y,
-                symbols,
+                y_seq,
+                seq_symbol_ids,
                 valid_mask,
                 lookback=lookback,
-                full_dates=dates,
+                full_dates=seq_dt_index.to_numpy(),
                 feature_indices=feature_indices,
             )
             test_dataset = NativeStockDataset(
                 X,
-                y,
-                symbols,
+                y_seq,
+                seq_symbol_ids,
                 test_mask,
                 lookback=lookback,
-                full_dates=dates,
+                full_dates=seq_dt_index.to_numpy(),
                 feature_indices=feature_indices,
             )
 
@@ -303,15 +303,13 @@ def run_rolling_pipeline():
                 preds_arr = np.concatenate(step_preds)
             else:
                 preds_arr = np.array([])
-            end_indices = test_dataset.valid_end_indices
+            pred_dates = pd.to_datetime(seq_dt_index.iloc[test_dataset.valid_end_indices]).reset_index(drop=True)
+            pred_symbols = pd.Series([id_to_symbol[sym] for sym in seq_symbol_ids[test_dataset.valid_end_indices]])
             
         if len(preds_arr) > 0:
-            aligned_dates = dt_index[end_indices]
-            aligned_symbols = [id_to_symbol[sym] for sym in symbols[end_indices]]
-            
             pred_series = pd.Series(
                 preds_arr, 
-                index=pd.MultiIndex.from_arrays([aligned_dates, aligned_symbols], names=['datetime', 'instrument'])
+                index=pd.MultiIndex.from_arrays([pred_dates, pred_symbols], names=['datetime', 'instrument'])
             ).sort_index()
             all_predictions.append(pred_series)
         
@@ -328,9 +326,9 @@ def run_rolling_pipeline():
     print("="*50)
     
     # Get all global labels for test period based on the universe
-    global_test_mask = (dt_index >= test_start) & (dt_index <= test_end) & uni_mask
+    global_test_mask = (dt_index >= test_start) & (dt_index <= test_end)
     global_dates = dt_index[global_test_mask]
-    global_symbols = [id_to_symbol[sym] for sym in symbols[global_test_mask]]
+    global_symbols = factor_frame.loc[global_test_mask, "symbol"]
     
     label_series = pd.Series(
         y[global_test_mask],

@@ -1,0 +1,145 @@
+"""Parquet-backed factor store loading helpers."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+import pyarrow as pa
+import pyarrow.dataset as ds
+from tqdm import tqdm
+
+from src.label_utils import sanitize_label_series
+from src.native_universe import build_universe_frame_mask
+
+
+DEFAULT_FACTOR_STORE_DIR = Path("data/factor_store/full_factor_space")
+
+
+def load_factor_store_metadata(store_dir: str | Path) -> dict[str, Any]:
+    meta_path = Path(store_dir) / "meta.json"
+    if not meta_path.exists():
+        raise FileNotFoundError(
+            f"Parquet factor store metadata missing: {meta_path}. "
+            "Please run `uv run python src/gen_feature.py --workers 24` first."
+        )
+    with open(meta_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _get_shards_dir(store_dir: str | Path) -> Path:
+    shards_dir = Path(store_dir) / "shards"
+    if not shards_dir.exists():
+        raise FileNotFoundError(
+            f"Parquet factor store shard directory missing: {shards_dir}. "
+            "Please run `uv run python src/gen_feature.py --workers 24` first."
+        )
+    return shards_dir
+
+
+def _load_dataset_frame(
+    *,
+    shards_dir: Path,
+    selected_columns: list[str],
+    scan_filter,
+    progress_desc: str | None,
+) -> pd.DataFrame:
+    dataset = ds.dataset(shards_dir, format="parquet")
+    fragments = list(dataset.get_fragments(filter=scan_filter))
+    if not fragments:
+        return pd.DataFrame(columns=selected_columns)
+
+    tables: list[pa.Table] = []
+    iterator = fragments
+    if progress_desc:
+        iterator = tqdm(fragments, desc=progress_desc, total=len(fragments), unit="shard")
+
+    for fragment in iterator:
+        table = fragment.to_table(columns=selected_columns, filter=scan_filter)
+        if table.num_rows > 0:
+            tables.append(table)
+
+    if not tables:
+        return pd.DataFrame(columns=selected_columns)
+
+    return pa.concat_tables(tables).to_pandas()
+
+
+def load_factor_frame(
+    *,
+    store_dir: str | Path,
+    columns: list[str],
+    date_start: str | pd.Timestamp | None = None,
+    date_end: str | pd.Timestamp | None = None,
+    universe_name: str = "all",
+    universe_dir: str | Path = "data/universes",
+    sort_by: tuple[str, str] = ("date", "symbol"),
+    progress_desc: str | None = None,
+) -> pd.DataFrame:
+    shards_dir = _get_shards_dir(store_dir)
+    selected_columns = ["date", "symbol", "label", *columns]
+
+    filters = []
+    if date_start is not None:
+        filters.append(ds.field("date") >= pd.Timestamp(date_start))
+    if date_end is not None:
+        filters.append(ds.field("date") <= pd.Timestamp(date_end))
+
+    scan_filter = None
+    if filters:
+        scan_filter = filters[0]
+        for extra_filter in filters[1:]:
+            scan_filter = scan_filter & extra_filter
+
+    frame = _load_dataset_frame(
+        shards_dir=shards_dir,
+        selected_columns=selected_columns,
+        scan_filter=scan_filter,
+        progress_desc=progress_desc,
+    )
+    if frame.empty:
+        return frame
+
+    frame["date"] = pd.to_datetime(frame["date"])
+    frame["label"] = sanitize_label_series(frame["label"])
+
+    if universe_name != "all":
+        mask = build_universe_frame_mask(
+            dates=frame["date"],
+            symbols=frame["symbol"],
+            universe_name=universe_name,
+            universe_dir=universe_dir,
+        )
+        frame = frame.loc[mask].copy()
+
+    if frame.empty:
+        return frame
+
+    frame = frame.sort_values(list(sort_by)).reset_index(drop=True)
+    return frame
+
+
+def load_available_dates(
+    *,
+    store_dir: str | Path,
+    date_start: str | pd.Timestamp | None = None,
+    date_end: str | pd.Timestamp | None = None,
+    universe_name: str = "all",
+    universe_dir: str | Path = "data/universes",
+    progress_desc: str | None = None,
+) -> pd.DatetimeIndex:
+    frame = load_factor_frame(
+        store_dir=store_dir,
+        columns=[],
+        date_start=date_start,
+        date_end=date_end,
+        universe_name=universe_name,
+        universe_dir=universe_dir,
+        sort_by=("date", "symbol"),
+        progress_desc=progress_desc,
+    )
+    if frame.empty:
+        return pd.DatetimeIndex([])
+    return pd.DatetimeIndex(sorted(frame["date"].drop_duplicates()))

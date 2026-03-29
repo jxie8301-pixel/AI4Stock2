@@ -1,3 +1,3 @@
 alpha: 158
 generation_space: full_factor_space
-cache_name: all_factors_panel
+factor_store_name: full_factor_space

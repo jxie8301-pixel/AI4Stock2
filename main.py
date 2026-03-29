@@ -7,10 +7,14 @@ import pickle
 
 from src.config_loader import load_config
 from src.experiment_store import finalize_run_store, prepare_run_store
-from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask, resolve_selected_features
+from src.factor_store import load_factor_frame, load_factor_store_metadata
+from src.feature_selection import (
+    apply_feature_transforms,
+    compute_finite_feature_mask_frame,
+    resolve_selected_features,
+)
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
-from src.feature_profiles import get_native_cache_dir
-from src.label_utils import sanitize_label_array
+from src.feature_profiles import get_native_factor_store_dir
 from src.model_config import get_lgbm_config
 
 
@@ -93,63 +97,42 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         plot_ic_series,
     )
     
-    cache_dir = get_native_cache_dir(cfg)
+    factor_store_dir = get_native_factor_store_dir(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
     
-    print("\n[Step 1/6] Loading Native Memmap Data")
-    meta_path = Path(cache_dir) / "meta.json"
-    if not meta_path.exists():
-        raise FileNotFoundError(
-            f"Native cache missing: {cache_dir}. "
-            "Please run `uv run python src/gen_feature.py --config configs/config.yaml` first."
-        )
-        
-    with open(meta_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
+    print("\n[Step 1/6] Loading Parquet Factor Store")
+    meta = load_factor_store_metadata(factor_store_dir)
 
     selected_feature_idx, selected_feature_names = resolve_selected_features(meta, cfg)
     print(f"Selected features: {len(selected_feature_names)} / {len(meta['feature_names'])}")
-        
-    shape = tuple(meta["shape"])
-    num_rows = meta["num_rows"]
-    
-    X = np.lib.format.open_memmap(Path(cache_dir) / "X.npy", mode="r", dtype=np.float32, shape=shape)
-    y_memmap = np.lib.format.open_memmap(Path(cache_dir) / "y.npy", mode="r", dtype=np.float32, shape=(num_rows,))
-    y = sanitize_label_array(y_memmap)
-    dates = np.lib.format.open_memmap(Path(cache_dir) / "date.npy", mode="r", dtype=np.int64, shape=(num_rows,))
-    symbols = np.lib.format.open_memmap(Path(cache_dir) / "symbol.npy", mode="r", dtype=np.int32, shape=(num_rows,))
-    
-    id_to_symbol = {v: k for k, v in meta["symbol_to_id"].items()}
-    
-    print("\n[Step 2/6] Vectorized Time Splitting & Universe Filtering")
-    dt_index = pd.to_datetime(dates)
-    
-    # --- Universe Filtering ---
     universe_name = cfg.get("universe", "all")
-    if universe_name == "all":
-        uni_mask = np.ones(num_rows, dtype=bool)
-    else:
-        from src.native_universe import build_universe_mask, resolve_universe_path
+    universe_dir = cfg.get("native", {}).get("universe_dir", "data/universes")
+    load_start = min(cfg["time"]["train"][0], cfg["time"]["valid"][0], cfg["time"]["test"][0])
+    load_end = max(cfg["time"]["train"][1], cfg["time"]["valid"][1], cfg["time"]["test"][1])
+    factor_frame = load_factor_frame(
+        store_dir=factor_store_dir,
+        columns=selected_feature_names,
+        date_start=load_start,
+        date_end=load_end,
+        universe_name=universe_name,
+        universe_dir=universe_dir,
+        sort_by=("date", "symbol"),
+        progress_desc="loading factor store",
+    )
+    if factor_frame.empty:
+        raise ValueError("Parquet factor store returned no rows for the configured date range and universe.")
 
-        universe_dir = cfg.get("native", {}).get("universe_dir", "data/universes")
-        universe_path = resolve_universe_path(universe_name, universe_dir=universe_dir)
-        uni_mask = build_universe_mask(
-            dates_ns=dates,
-            symbol_ids=symbols,
-            symbol_to_id=meta["symbol_to_id"],
-            universe_name=universe_name,
-            universe_dir=universe_dir,
-        )
-        print(f"[*] Native universe '{universe_name}' loaded from {universe_path}. Matched rows: {int(uni_mask.sum())}.")
+    print("\n[Step 2/6] Time Splitting & Universe Filtering")
+    dt_index = pd.to_datetime(factor_frame["date"])
+    y = factor_frame["label"].to_numpy(dtype=np.float32, copy=True)
 
-    # --- Time Splitting (Intersection with Universe) ---
-    train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1])) & uni_mask
-    valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1])) & uni_mask
-    test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1])) & uni_mask
+    train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1]))
+    valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1]))
+    test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1]))
     
     print("\n[Step 3/6] Initializing Native Datasets / Models")
-    finite_feature_mask = compute_finite_feature_mask(X, selected_feature_idx, num_rows)
+    finite_feature_mask = compute_finite_feature_mask_frame(factor_frame, selected_feature_names)
     
     if model_name == "lgbm":
         from src.models.pure_lightgbm import NativeLGBM
@@ -163,12 +146,12 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         if not np.any(valid_valid_mask):
             raise ValueError("No valid native LightGBM validation rows after filtering labels.")
         
-        X_train_df = pd.DataFrame(X[valid_train_mask][:, selected_feature_idx], columns=selected_feature_names)
+        X_train_df = factor_frame.loc[valid_train_mask, selected_feature_names].reset_index(drop=True)
         y_train_series = pd.Series(y[valid_train_mask])
-        X_valid_df = pd.DataFrame(X[valid_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
+        X_valid_df = factor_frame.loc[valid_valid_mask, selected_feature_names].reset_index(drop=True)
         y_valid_series = pd.Series(y[valid_valid_mask])
-        train_dates = pd.to_datetime(dates[valid_train_mask])
-        valid_dates = pd.to_datetime(dates[valid_valid_mask])
+        train_dates = pd.to_datetime(dt_index[valid_train_mask]).reset_index(drop=True)
+        valid_dates = pd.to_datetime(dt_index[valid_valid_mask]).reset_index(drop=True)
         X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
         X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
         
@@ -188,42 +171,53 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         test_valid_mask = test_mask & finite_feature_mask
         if not np.any(test_valid_mask):
             raise ValueError("No valid native LightGBM test rows after filtering invalid features.")
-        X_test_df = pd.DataFrame(X[test_valid_mask][:, selected_feature_idx], columns=selected_feature_names)
-        test_dates = pd.to_datetime(dates[test_valid_mask])
+        X_test_df = factor_frame.loc[test_valid_mask, selected_feature_names].reset_index(drop=True)
+        test_dates = pd.to_datetime(dt_index[test_valid_mask]).reset_index(drop=True)
         X_test_df = apply_feature_transforms(X_test_df, test_dates, cfg)
         preds_arr = model.predict(X_test_df)
-        
-        # We need the indices to align dates and symbols
-        end_indices = np.where(test_valid_mask)[0]
+        pred_dates = pd.to_datetime(dt_index[test_valid_mask]).reset_index(drop=True)
+        pred_symbols = factor_frame.loc[test_valid_mask, "symbol"].reset_index(drop=True)
+        pred_labels = y[test_valid_mask]
     else:
         from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
         from torch.utils.data import DataLoader
+        seq_frame = factor_frame.sort_values(["symbol", "date"]).reset_index(drop=True)
+        seq_dates = pd.to_datetime(seq_frame["date"]).to_numpy()
+        seq_symbols_str = seq_frame["symbol"].astype(str).to_numpy()
+        seq_symbol_ids, unique_symbols = pd.factorize(seq_symbols_str, sort=True)
+        id_to_symbol = {idx: symbol for idx, symbol in enumerate(unique_symbols)}
+        X = seq_frame[selected_feature_names].to_numpy(dtype=np.float32, copy=True)
+        y = seq_frame["label"].to_numpy(dtype=np.float32, copy=True)
+        dt_index = pd.to_datetime(seq_frame["date"])
+        train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1]))
+        valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1]))
+        test_mask  = (dt_index >= pd.Timestamp(cfg["time"]["test"][0]))  & (dt_index <= pd.Timestamp(cfg["time"]["test"][1]))
         train_dataset = NativeStockDataset(
             X,
             y,
-            symbols,
+            seq_symbol_ids,
             train_mask,
             lookback=lookback,
-            full_dates=dates,
-            feature_indices=np.asarray(selected_feature_idx),
+            full_dates=seq_dates,
+            feature_indices=np.arange(len(selected_feature_names)),
         )
         valid_dataset = NativeStockDataset(
             X,
             y,
-            symbols,
+            seq_symbol_ids,
             valid_mask,
             lookback=lookback,
-            full_dates=dates,
-            feature_indices=np.asarray(selected_feature_idx),
+            full_dates=seq_dates,
+            feature_indices=np.arange(len(selected_feature_names)),
         )
         test_dataset = NativeStockDataset(
             X,
             y,
-            symbols,
+            seq_symbol_ids,
             test_mask,
             lookback=lookback,
-            full_dates=dates,
-            feature_indices=np.asarray(selected_feature_idx),
+            full_dates=seq_dates,
+            feature_indices=np.arange(len(selected_feature_names)),
         )
 
         if len(train_dataset) == 0:
@@ -276,20 +270,16 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         if not all_preds:
             raise ValueError("No valid test windows were generated for native LSTM inference.")
         preds_arr = np.concatenate(all_preds)
-        end_indices = test_dataset.valid_end_indices
-    
-    aligned_dates = dt_index[end_indices]
-    aligned_symbols = [id_to_symbol[sym] for sym in symbols[end_indices]]
-    
+        pred_dates = pd.to_datetime(seq_dates[test_dataset.valid_end_indices])
+        pred_symbols = pd.Series([id_to_symbol[sym] for sym in seq_symbol_ids[test_dataset.valid_end_indices]])
+        pred_labels = y[test_dataset.valid_end_indices]
+
     pred_series = pd.Series(
-        preds_arr, 
-        index=pd.MultiIndex.from_arrays([aligned_dates, aligned_symbols], names=['datetime', 'instrument'])
+        preds_arr,
+        index=pd.MultiIndex.from_arrays([pred_dates, pred_symbols], names=['datetime', 'instrument'])
     ).sort_index()
     
-    label_series = pd.Series(
-        y[end_indices],
-        index=pred_series.index
-    )
+    label_series = pd.Series(pred_labels, index=pred_series.index)
     aligned_preds, aligned_labels = align_prediction_label_pairs(pred_series, label_series)
     signal_metrics, daily_ic = compute_signal_metrics(aligned_preds, aligned_labels)
     plot_ic_series(daily_ic, save_path=str(results_dir / "native_ic_series.png"))
@@ -392,7 +382,7 @@ def main():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Quantitative Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default=None, help="Model name: lstm / transformer / lgbm")
-    parser.add_argument("--profile", help="Override features.profile and use the corresponding cache/profile")
+    parser.add_argument("--profile", help="Override features.profile and use the corresponding factor-store/profile")
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
     parser.add_argument("--save-model", help="Path to save the trained model (e.g. results/lstm/model.pkl)")

@@ -42,11 +42,12 @@ uv run python src/gen_feature.py --workers 8 --incremental
 当前增量模式的语义是：
 - 未变化的股票 Parquet 复用已有 shard，不重复计算因子
 - 变化过的股票 Parquet 才重算因子
-- 最后仍会重组一次总的 `X.npy / y.npy / date.npy / symbol.npy`
+- 因子库存储在 `data/factor_store/full_factor_space/shards/` 下
+- 会同步刷新根目录 `meta.json`
 
-这意味着它减少的是“因子计算量”，不是完全跳过最终总 cache 的写盘。
+这意味着它减少的是“因子重算量”，并让训练时可以只读取需要的列。
 
-默认输出目录为 `data/cache/all_factors_panel`，其中包含：
+默认输出目录为 `data/factor_store/full_factor_space`，其中包含：
 - Alpha158 全量因子，保留原始列名
 - LightGBM 净化因子，列名前缀为 `LGBM_`
 - 统一时间窗口因子，列名前缀为 `TEMP_`
@@ -138,7 +139,7 @@ uv run python main.py --model lgbm --disable-local-store
 
 - **股票池** (`universe`): 强烈建议使用 `csi300`（沪深300）。
 - **回看天数** (`lookback`): 建议设为 `20`（抓取短期时序特征）。
-- **特征 Profile** (`features.profile`): 默认使用 `core_v1`。这里的 profile 主要表示“从全集 cache 中默认选择哪些列”，不再表示单独的 cache 家族。具体定义保存在 `configs/features/*.yaml`。
+- **特征 Profile** (`features.profile`): 默认使用 `core_v1`。这里的 profile 主要表示“从全集 factor store 中默认选择哪些列”，不再表示单独的 cache 家族。具体定义保存在 `configs/features/*.yaml`。
 - **推荐候选**: `alpha158_compact_v1` 适合作为技术面基线，`lgbm_purified_v1` 适合作为 LightGBM 研究起点。
 - **命令行覆写**: `main.py` 和 `run_native_rolling.py` 都支持 `--profile`，适合做 profile 对照实验。
 - **模型 Preset** (`model.preset`): 主配置只引用模型预设，具体超参保存在 `configs/models/*.yaml`。
@@ -162,9 +163,9 @@ features:
 如果启用 `features.transforms.cross_sectional_rank: true`，同样不需要重建 cache；这是训练期动态变换。
 
 为什么 `gen_feature.py` 仍然独立存在，而不是在主训练脚本里隐式生成：
-- cache 生成是一个重 I/O、重 CPU 的预处理步骤，耗时和训练完全不是一个量级。
-- 训练入口保持“只消费已有 cache”，复现性更强，也更容易比较不同模型、不同选列、不同策略。
-- 同一个全量 cache 可以被很多次训练复用，这正好符合“先生成最全，再按需挑选”的研究方式。
+- factor store 生成是一个重 I/O、重 CPU 的预处理步骤，耗时和训练完全不是一个量级。
+- 训练入口保持“只消费已有 factor store”，复现性更强，也更容易比较不同模型、不同选列、不同策略。
+- 同一个全量 factor store 可以被很多次训练复用，这正好符合“先生成最全，再按需挑选”的研究方式。
 
 如果后续要进一步提效，推荐新增一个显式模式，例如 `main.py --build-cache-if-missing`，而不是让训练脚本默认偷偷重建 cache。
 

@@ -54,6 +54,16 @@ def compute_finite_feature_mask(X, selected_idx: list[int], num_rows: int) -> An
     return finite_mask
 
 
+def compute_finite_feature_mask_frame(frame, selected_columns: list[str]):
+    """Return a row mask that excludes +/-inf on any selected dataframe column."""
+    import numpy as np
+
+    if frame.empty or not selected_columns:
+        return np.ones(len(frame), dtype=bool)
+    values = frame[selected_columns].to_numpy(dtype=np.float32, copy=False)
+    return ~np.isinf(values).any(axis=1)
+
+
 def apply_cross_sectional_rank(frame, dates):
     """Apply per-date percentile rank to each feature column."""
     import pandas as pd

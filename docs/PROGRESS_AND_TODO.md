@@ -19,6 +19,7 @@ What is true now:
 - Alpha360 has been removed from the default full-factor space
 - Training-time feature subset selection is supported through `features.selected_columns`
 - Local experiment storage is enabled through `results/experiments/`
+- Parquet factor-store migration design is documented in `docs/PARQUET_FACTOR_STORE_DESIGN.md`
 
 ## Current Recommended Workflow
 

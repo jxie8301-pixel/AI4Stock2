@@ -84,7 +84,8 @@ def resolve_feature_profile(
     )
     alpha = str(profile.get("alpha", features_cfg.get("alpha", cfg.get("alpha_version", 158))))
     generation_space = str(profile.get("generation_space", profile.get("generation_alpha", "full_factor_space")))
-    cache_name = profile.get("cache_name") or "all_factors_panel"
+    factor_store_name = profile.get("factor_store_name") or "full_factor_space"
+    factor_store_dir = features_cfg.get("factor_store_dir") or str(Path("data/factor_store") / factor_store_name)
     if "selected_columns" in profile:
         profile_selected_columns = list(profile["selected_columns"])
     elif alpha == "158":
@@ -101,7 +102,8 @@ def resolve_feature_profile(
         "name": resolved_profile_name,
         "alpha": alpha,
         "generation_space": generation_space,
-        "cache_dir": features_cfg.get("cache_dir") or str(Path("data/cache") / cache_name),
+        "factor_store_dir": factor_store_dir,
+        "cache_dir": factor_store_dir,
         "alpha158_config": deepcopy(profile.get("alpha158")),
         "selected_columns": deepcopy(profile_selected_columns),
         "raw": profile,
@@ -111,4 +113,8 @@ def resolve_feature_profile(
 
 
 def get_native_cache_dir(cfg: dict) -> str:
-    return resolve_feature_profile(cfg)["cache_dir"]
+    return resolve_feature_profile(cfg)["factor_store_dir"]
+
+
+def get_native_factor_store_dir(cfg: dict) -> str:
+    return resolve_feature_profile(cfg)["factor_store_dir"]

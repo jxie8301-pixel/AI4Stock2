@@ -1,6 +1,6 @@
 alpha: lgbm_purified
 generation_space: full_factor_space
-cache_name: all_factors_panel
+factor_store_name: full_factor_space
 lgbm_purified:
   momentum_windows: [20, 60]
   ma_windows: [20, 60, 120]

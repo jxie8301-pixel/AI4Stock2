@@ -16,7 +16,7 @@ class FeatureProfilesTest(unittest.TestCase):
 
         self.assertEqual(profile["alpha"], "all_factors")
         self.assertEqual(profile["generation_space"], "full_factor_space")
-        self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
+        self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
         self.assertEqual(len(profile["selected_columns"]), 41)
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v1.yaml"))
         self.assertEqual(profile["selected_columns"][0], "KMID")
@@ -36,7 +36,7 @@ class FeatureProfilesTest(unittest.TestCase):
 
         self.assertEqual(profile["alpha"], "158")
         self.assertEqual(profile["generation_space"], "full_factor_space")
-        self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
+        self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
         self.assertIsNone(profile["alpha158_config"])
         self.assertEqual(len(profile["selected_columns"]), 158)
         self.assertEqual(profile["selected_columns"][0], "KMID")
@@ -54,7 +54,7 @@ class FeatureProfilesTest(unittest.TestCase):
         compact_count = len(get_alpha158_feature_config(profile["alpha158_config"])[1])
         full_count = len(get_alpha158_feature_config()[1])
 
-        self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
+        self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
         self.assertEqual(profile["selected_columns"], get_alpha158_feature_config(profile["alpha158_config"])[1])
         self.assertLess(compact_count, full_count)
         self.assertEqual(compact_count, 82)
@@ -73,7 +73,7 @@ class FeatureProfilesTest(unittest.TestCase):
 
         self.assertEqual(profile["alpha"], "lgbm_purified")
         self.assertEqual(profile["generation_space"], "full_factor_space")
-        self.assertEqual(profile["cache_dir"], "data/cache/all_factors_panel")
+        self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/lgbm_purified_v1.yaml"))
         self.assertEqual(len(feature_names), 18)
         self.assertEqual(profile["selected_columns"], [f"LGBM_{name}" for name in feature_names])

@@ -30,7 +30,7 @@ except ModuleNotFoundError:
 
 EPS = 1e-12
 FULL_FACTOR_SPACE_NAME = "full_factor_space"
-DEFAULT_FULL_FACTOR_CACHE_DIR = "data/cache/all_factors_panel"
+DEFAULT_FULL_FACTOR_STORE_DIR = "data/factor_store/full_factor_space"
 
 
 DEFAULT_ALPHA158_CONFIG: dict[str, Any] = {
@@ -959,9 +959,9 @@ def _shard_base_name(file_path: str | Path) -> str:
     return Path(file_path).stem
 
 
-def _shard_paths(shard_root: Path, file_path: str | Path) -> tuple[Path, Path]:
+def _shard_paths(shard_root: Path, shard_meta_root: Path, file_path: str | Path) -> tuple[Path, Path]:
     base = _shard_base_name(file_path)
-    return shard_root / f"{base}.npz", shard_root / f"{base}.json"
+    return shard_root / f"{base}.parquet", shard_meta_root / f"{base}.json"
 
 
 def _load_json(path: Path) -> dict[str, Any] | None:
@@ -974,12 +974,13 @@ def _load_json(path: Path) -> dict[str, Any] | None:
 def _load_reusable_shard_meta(
     *,
     shard_root: Path,
+    shard_meta_root: Path,
     file_path: str | Path,
     feature_names: list[str],
 ) -> dict[str, Any] | None:
-    npz_path, meta_path = _shard_paths(shard_root, file_path)
+    shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, file_path)
     shard_meta = _load_json(meta_path)
-    if shard_meta is None or not npz_path.exists():
+    if shard_meta is None or not shard_path.exists():
         return None
     source_sig = _source_file_signature(file_path)
     if shard_meta.get("source") != source_sig:
@@ -997,434 +998,229 @@ def _load_reusable_shard_meta(
 def _save_shard(
     *,
     shard_root: Path,
+    shard_meta_root: Path,
     file_path: str | Path,
     symbol: str,
     feature_names: list[str],
-    x_arr: np.ndarray,
-    y_arr: np.ndarray,
-    d_arr: np.ndarray,
+    shard_frame: pd.DataFrame,
 ) -> dict[str, Any]:
     shard_root.mkdir(parents=True, exist_ok=True)
-    npz_path, meta_path = _shard_paths(shard_root, file_path)
-    np.savez(npz_path, X=x_arr, y=y_arr, date=d_arr)
+    shard_meta_root.mkdir(parents=True, exist_ok=True)
+    shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, file_path)
+    shard_frame.to_parquet(shard_path, index=False, engine="pyarrow", compression="zstd")
     shard_meta = {
         "symbol": symbol,
-        "row_count": int(x_arr.shape[0]),
-        "num_features": int(x_arr.shape[1]),
+        "row_count": int(len(shard_frame)),
+        "num_features": len(feature_names),
         "factor_space": FULL_FACTOR_SPACE_NAME,
         "source": _source_file_signature(file_path),
         "feature_names": feature_names,
+        "min_date": str(pd.to_datetime(shard_frame["date"]).min().date()) if not shard_frame.empty else "",
+        "max_date": str(pd.to_datetime(shard_frame["date"]).max().date()) if not shard_frame.empty else "",
+        "shard_path": str(shard_path),
     }
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(shard_meta, f, ensure_ascii=False, indent=2)
     return shard_meta
 
 
-def _generate_panel_cache_incremental(
-    *,
-    parquet_dir: str,
-    output_dir: str,
-    workers: int,
+def _build_shard_frame(file_path: str | Path) -> tuple[str, pd.DataFrame]:
+    symbol, feat, label = _compute_symbol_feat_label(str(file_path))
+    frame = feat.copy()
+    frame = frame.astype(np.float32)
+    frame.insert(0, "date", pd.to_datetime(frame.index))
+    frame.insert(1, "symbol", symbol)
+    frame.insert(2, "label", label.reindex(frame.index).astype(np.float32))
+    frame = frame.reset_index(drop=True)
+    return symbol, frame
+
+
+def _write_factor_shard_worker(
+    file_path: str,
+    shard_path: str,
+    meta_path: str,
+    feature_names: list[str],
 ) -> dict[str, Any]:
+    symbol, shard_frame = _build_shard_frame(file_path)
+    shard_root = Path(shard_path).parent
+    shard_meta_root = Path(meta_path).parent
+    return _save_shard(
+        shard_root=shard_root,
+        shard_meta_root=shard_meta_root,
+        file_path=file_path,
+        symbol=symbol,
+        feature_names=feature_names,
+        shard_frame=shard_frame,
+    )
+
+
+def _remove_orphan_shards(
+    *,
+    shard_root: Path,
+    shard_meta_root: Path,
+    source_files: list[Path],
+) -> None:
+    valid_names = {_shard_base_name(path) for path in source_files}
+    for meta_path in shard_meta_root.glob("*.json"):
+        if meta_path.stem in valid_names:
+            continue
+        shard_path = shard_root / f"{meta_path.stem}.parquet"
+        if shard_path.exists():
+            shard_path.unlink()
+        meta_path.unlink()
+
+
+def _collect_shard_metas(shard_meta_root: Path) -> list[dict[str, Any]]:
+    shard_metas: list[dict[str, Any]] = []
+    for meta_path in sorted(shard_meta_root.glob("*.json")):
+        shard_meta = _load_json(meta_path)
+        if shard_meta is not None:
+            shard_metas.append(shard_meta)
+    return shard_metas
+
+
+def generate_factor_store(
+    parquet_dir: str = "data/processed/combined",
+    output_dir: str = DEFAULT_FULL_FACTOR_STORE_DIR,
+    workers: int = 1,
+    incremental: bool = False,
+) -> dict[str, Any]:
+    """Generate the unified Parquet factor store."""
     pdir = Path(parquet_dir)
     out_root = Path(output_dir)
+    shard_root = out_root / "shards"
+    shard_meta_root = out_root / "shard_meta"
     out_root.mkdir(parents=True, exist_ok=True)
-    shard_root = out_root / SHARD_DIRNAME
+    shard_root.mkdir(parents=True, exist_ok=True)
+    shard_meta_root.mkdir(parents=True, exist_ok=True)
 
     files = sorted(pdir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No parquet files found in {pdir}")
 
-    feature_names = get_full_factor_space_feature_names()
-    n_feat = len(feature_names)
-    workers = max(1, int(workers))
+    _remove_orphan_shards(shard_root=shard_root, shard_meta_root=shard_meta_root, source_files=files)
 
-    print(f"[1/3] Resolving incremental plan from {len(files)} parquet files (workers={workers})...")
-    file_layout: list[dict[str, Any]] = []
-    total_count = 0
+    feature_names = get_full_factor_space_feature_names()
+    workers = max(1, int(workers))
+    files_to_recompute: list[Path] = []
     reused_files = 0
-    recompute_files: list[Path] = []
-    symbols: set[str] = set()
+
+    print(f"[1/3] Planning factor-store build from {len(files)} parquet files (workers={workers})...")
     t0 = time.perf_counter()
     pbar = tqdm(files, desc="planning", total=len(files), unit="file")
     for idx, fp in enumerate(pbar, start=1):
-        shard_meta = _load_reusable_shard_meta(
-            shard_root=shard_root,
-            file_path=fp,
-            feature_names=feature_names,
-        )
-        if shard_meta is not None:
-            symbol = str(shard_meta["symbol"])
-            cnt = int(shard_meta["row_count"])
-            reusable = True
-            reused_files += 1
+        if incremental:
+            reusable = _load_reusable_shard_meta(
+                shard_root=shard_root,
+                shard_meta_root=shard_meta_root,
+                file_path=fp,
+                feature_names=feature_names,
+            )
         else:
-            _, symbol, file_n_feat, cnt = _count_file_worker(str(fp))
-            if file_n_feat != n_feat:
-                raise RuntimeError(f"Feature dim mismatch: expected {n_feat}, got {file_n_feat} for {fp.name}")
-            reusable = False
-            recompute_files.append(fp)
-        symbols.add(symbol)
-        file_layout.append(
-            {
-                "file_path": str(fp),
-                "symbol": symbol,
-                "count": cnt,
-                "reusable": reusable,
-                "start": total_count,
-            }
-        )
-        total_count += cnt
+            reusable = None
+        if reusable is None:
+            files_to_recompute.append(fp)
+        else:
+            reused_files += 1
         elapsed = time.perf_counter() - t0
         speed = idx / elapsed if elapsed > 0 else 0.0
         eta = (len(files) - idx) / speed if speed > 0 else float("inf")
-        pbar.set_postfix(reused=reused_files, rebuild=len(recompute_files), eta_m=f"{eta/60:.1f}")
+        pbar.set_postfix(reused=reused_files, rebuild=len(files_to_recompute), eta_m=f"{eta/60:.1f}")
     pbar.close()
 
-    print(f"Panel row count: {total_count}")
-    print(f"Incremental reuse: {reused_files} reused, {len(recompute_files)} recomputed")
-    symbol_to_id = {s: i for i, s in enumerate(sorted(symbols))}
+    print(f"Shard plan: {reused_files} reused, {len(files_to_recompute)} recomputed")
 
-    x_store = np.lib.format.open_memmap(
-        out_root / "X.npy", mode="w+", dtype=np.float32, shape=(total_count, n_feat)
-    )
-    y_store = np.lib.format.open_memmap(
-        out_root / "y.npy", mode="w+", dtype=np.float32, shape=(total_count,)
-    )
-    date_store = np.lib.format.open_memmap(
-        out_root / "date.npy", mode="w+", dtype=np.int64, shape=(total_count,)
-    )
-    symbol_store = np.lib.format.open_memmap(
-        out_root / "symbol.npy", mode="w+", dtype=np.int32, shape=(total_count,)
-    )
-
-    print(f"[2/3] Materializing panel arrays with shard reuse (workers={workers})...")
-    t1 = time.perf_counter()
-    pbar = tqdm(file_layout, desc="processing", total=len(file_layout), unit="file")
-    for idx, entry in enumerate(pbar, start=1):
-        file_path = entry["file_path"]
-        symbol = entry["symbol"]
-        start = entry["start"]
-        cnt = entry["count"]
-        end = start + cnt
-        if entry["reusable"]:
-            npz_path, _ = _shard_paths(shard_root, file_path)
-            with np.load(npz_path) as shard_data:
-                x_arr = shard_data["X"]
-                y_arr = shard_data["y"]
-                d_arr = shard_data["date"]
+    if files_to_recompute:
+        print(f"[2/3] Writing Parquet shards (workers={workers})...")
+        t1 = time.perf_counter()
+        if workers == 1:
+            pbar = tqdm(files_to_recompute, desc="shards", total=len(files_to_recompute), unit="file")
+            for idx, fp in enumerate(pbar, start=1):
+                shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, fp)
+                _write_factor_shard_worker(str(fp), str(shard_path), str(meta_path), feature_names)
+                elapsed = time.perf_counter() - t1
+                speed = idx / elapsed if elapsed > 0 else 0.0
+                eta = (len(files_to_recompute) - idx) / speed if speed > 0 else float("inf")
+                pbar.set_postfix(speed=f"{speed:.2f}/s", eta_m=f"{eta/60:.1f}")
+            pbar.close()
         else:
-            symbol2, file_n_feat, payload = _build_file_payload_worker(
-                file_path
-            )
-            if file_n_feat != n_feat:
-                raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
-            if symbol2 != symbol:
-                raise RuntimeError(f"Symbol mismatch in pass2: layout={symbol}, computed={symbol2}, file={file_path}")
-            x_arr, y_arr, d_arr = payload
-            _save_shard(
-                shard_root=shard_root,
-                file_path=file_path,
-                symbol=symbol,
-                feature_names=feature_names,
-                x_arr=x_arr,
-                y_arr=y_arr,
-                d_arr=d_arr,
-            )
+            futures = []
+            with ProcessPoolExecutor(max_workers=workers) as executor:
+                for fp in files_to_recompute:
+                    shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, fp)
+                    futures.append(
+                        executor.submit(
+                            _write_factor_shard_worker,
+                            str(fp),
+                            str(shard_path),
+                            str(meta_path),
+                            feature_names,
+                        )
+                    )
+                pbar = tqdm(total=len(files_to_recompute), desc="shards", unit="file")
+                for idx, fut in enumerate(as_completed(futures), start=1):
+                    fut.result()
+                    pbar.update(1)
+                    elapsed = time.perf_counter() - t1
+                    speed = idx / elapsed if elapsed > 0 else 0.0
+                    eta = (len(files_to_recompute) - idx) / speed if speed > 0 else float("inf")
+                    pbar.set_postfix(speed=f"{speed:.2f}/s", eta_m=f"{eta/60:.1f}")
+                pbar.close()
+    else:
+        print("[2/3] Writing Parquet shards skipped: all source files reused.")
 
-        if x_arr.shape != (cnt, n_feat):
-            raise RuntimeError(f"Shard shape mismatch for {file_path}: expected {(cnt, n_feat)}, got {x_arr.shape}")
-        if y_arr.shape[0] != cnt or d_arr.shape[0] != cnt:
-            raise RuntimeError(f"Shard row count mismatch for {file_path}: expected {cnt}")
-
-        x_store[start:end] = x_arr
-        y_store[start:end] = y_arr
-        date_store[start:end] = d_arr
-        symbol_store[start:end] = symbol_to_id[symbol]
-
-        elapsed = time.perf_counter() - t1
-        speed = idx / elapsed if elapsed > 0 else 0.0
-        eta = (len(file_layout) - idx) / speed if speed > 0 else float("inf")
-        pbar.set_postfix(reused=reused_files, rebuild=len(recompute_files), eta_m=f"{eta/60:.1f}")
-    pbar.close()
+    shard_metas = _collect_shard_metas(shard_meta_root)
+    total_rows = sum(int(item.get("row_count", 0)) for item in shard_metas)
 
     metadata = {
-        "cache_mode": "panel_2d",
+        "storage_format": "parquet",
+        "storage_layout": "symbol_shards",
         "factor_space": FULL_FACTOR_SPACE_NAME,
-        "date_unit": "ns",
-        "num_features": n_feat,
-        "num_rows": total_count,
-        "shape": [total_count, n_feat],
+        "num_features": len(feature_names),
+        "num_rows": total_rows,
+        "shape": [total_rows, len(feature_names)],
         "feature_names": feature_names,
         "label": "open_t+2 / open_t+1 - 1",
-        "symbol_to_id": symbol_to_id,
-        "row_order": "symbol-major (input file order), date ascending within symbol",
+        "factor_store_dir": str(out_root),
+        "shards_dir": str(shard_root),
         "incremental": {
-            "enabled": True,
+            "enabled": incremental,
             "shard_dir": str(shard_root),
             "reused_files": reused_files,
-            "recomputed_files": len(recompute_files),
+            "recomputed_files": len(files_to_recompute),
         },
         "source_files": [
             {
-                "file_path": entry["file_path"],
-                "symbol": entry["symbol"],
-                "row_count": entry["count"],
-                "source": _source_file_signature(entry["file_path"]),
-                "reused_shard": entry["reusable"],
+                "file_path": item.get("source", {}).get("path", ""),
+                "symbol": item.get("symbol", ""),
+                "row_count": item.get("row_count", 0),
+                "source": item.get("source", {}),
+                "reused_shard": item.get("source", {}).get("path", "") not in {str(fp.resolve()) for fp in files_to_recompute},
+                "shard_path": item.get("shard_path", ""),
             }
-            for entry in file_layout
+            for item in shard_metas
         ],
     }
     with open(out_root / "meta.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
-    print(f"[3/3] Done. Panel cache saved to: {out_root}")
+    print(f"[3/3] Done. Parquet factor store saved to: {out_root}")
     return metadata
 
 
 def generate_panel_cache(
     parquet_dir: str = "data/processed/combined",
-    output_dir: str = DEFAULT_FULL_FACTOR_CACHE_DIR,
+    output_dir: str = DEFAULT_FULL_FACTOR_STORE_DIR,
     workers: int = 1,
     incremental: bool = False,
 ) -> dict[str, Any]:
-    """Generate the unified 2D full-factor panel cache."""
-    if incremental:
-        return _generate_panel_cache_incremental(
-            parquet_dir=parquet_dir,
-            output_dir=output_dir,
-            workers=workers,
-        )
-
-    pdir = Path(parquet_dir)
-    out_root = Path(output_dir)
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    files = sorted(pdir.glob("*.parquet"))
-    if not files:
-        raise FileNotFoundError(f"No parquet files found in {pdir}")
-
-    workers = max(1, int(workers))
-    total_files = len(files)
-    symbols: set[str] = set()
-    n_feat: int | None = None
-    total_count = 0
-    file_rows: dict[str, tuple[str, int]] = {}
-
-    print(f"[1/3] Counting panel rows from {total_files} parquet files (workers={workers})...")
-    t0 = time.perf_counter()
-    if workers == 1:
-        pbar = tqdm(files, desc="counting", total=total_files, unit="file")
-        for idx, fp in enumerate(pbar, start=1):
-            file_path, symbol, file_n_feat, cnt = _count_file_worker(str(fp))
-            symbols.add(symbol)
-            n_feat = file_n_feat if n_feat is None else n_feat
-            if n_feat != file_n_feat:
-                raise RuntimeError(f"Feature dim mismatch: expected {n_feat}, got {file_n_feat} for {fp.name}")
-            total_count += cnt
-            file_rows[file_path] = (symbol, cnt)
-            elapsed = time.perf_counter() - t0
-            speed = idx / elapsed if elapsed > 0 else 0.0
-            eta = (total_files - idx) / speed if speed > 0 else float("inf")
-            pbar.set_postfix(rows=total_count, speed=f"{speed:.2f}/s", eta_m=f"{eta/60:.1f}")
-    else:
-        def _run_parallel_count(executor) -> None:
-            nonlocal n_feat, total_count
-            futures = [
-                executor.submit(_count_file_worker, str(fp))
-                for fp in files
-            ]
-            pbar = tqdm(total=total_files, desc="counting", unit="file")
-            for idx, fut in enumerate(as_completed(futures), start=1):
-                file_path, symbol, file_n_feat, cnt = fut.result()
-                symbols.add(symbol)
-                n_feat = file_n_feat if n_feat is None else n_feat
-                if n_feat != file_n_feat:
-                    raise RuntimeError(f"Feature dim mismatch: expected {n_feat}, got {file_n_feat}")
-                total_count += cnt
-                file_rows[file_path] = (symbol, cnt)
-                pbar.update(1)
-                elapsed = time.perf_counter() - t0
-                speed = idx / elapsed if elapsed > 0 else 0.0
-                eta = (total_files - idx) / speed if speed > 0 else float("inf")
-                pbar.set_postfix(rows=total_count, speed=f"{speed:.2f}/s", eta_m=f"{eta/60:.1f}")
-            pbar.close()
-
-        try:
-            with ProcessPoolExecutor(max_workers=workers) as executor:
-                print("  counting backend: process")
-                _run_parallel_count(executor)
-        except Exception as e:
-            print(f"  process backend unavailable ({type(e).__name__}: {e}), fallback to thread backend")
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                print("  counting backend: thread")
-                _run_parallel_count(executor)
-
-    if n_feat is None:
-        raise RuntimeError("Failed to infer feature count.")
-
-    print(f"Panel row count: {total_count}")
-    symbol_to_id = {s: i for i, s in enumerate(sorted(symbols))}
-
-    file_layout: list[tuple[str, str, int, int]] = []
-    cursor = 0
-    for fp in files:
-        key = str(fp)
-        symbol, cnt = file_rows[key]
-        file_layout.append((key, symbol, cursor, cnt))
-        cursor += cnt
-    if cursor != total_count:
-        raise RuntimeError(f"Layout row count mismatch: layout={cursor}, total={total_count}")
-
-    x_store = np.lib.format.open_memmap(
-        out_root / "X.npy", mode="w+", dtype=np.float32, shape=(total_count, n_feat)
+    """Backward-compatible alias for the factor-store generator."""
+    return generate_factor_store(
+        parquet_dir=parquet_dir,
+        output_dir=output_dir,
+        workers=workers,
+        incremental=incremental,
     )
-    y_store = np.lib.format.open_memmap(
-        out_root / "y.npy", mode="w+", dtype=np.float32, shape=(total_count,)
-    )
-    date_store = np.lib.format.open_memmap(
-        out_root / "date.npy", mode="w+", dtype=np.int64, shape=(total_count,)
-    )
-    symbol_store = np.lib.format.open_memmap(
-        out_root / "symbol.npy", mode="w+", dtype=np.int32, shape=(total_count,)
-    )
-
-    print(f"[2/3] Building panel arrays (workers={workers})...")
-    t1 = time.perf_counter()
-    if workers == 1:
-        pbar = tqdm(file_layout, desc="processing", total=total_files, unit="file")
-        for idx, (file_path, symbol, start, cnt) in enumerate(pbar, start=1):
-            symbol2, file_n_feat, payload = _build_file_payload_worker(file_path)
-            if file_n_feat != n_feat:
-                raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
-            if symbol2 != symbol:
-                raise RuntimeError(f"Symbol mismatch in pass2: layout={symbol}, computed={symbol2}, file={file_path}")
-            sid = symbol_to_id[symbol]
-            x_arr, y_arr, d_arr = payload
-            if y_arr.shape[0] != cnt:
-                raise RuntimeError(
-                    f"Row count mismatch for {file_path}: counted={cnt}, computed={y_arr.shape[0]}"
-                )
-            end = start + cnt
-            x_store[start:end] = x_arr
-            y_store[start:end] = y_arr
-            date_store[start:end] = d_arr
-            symbol_store[start:end] = sid
-            elapsed = time.perf_counter() - t1
-            speed = idx / elapsed if elapsed > 0 else 0.0
-            eta = (total_files - idx) / speed if speed > 0 else float("inf")
-            pbar.set_postfix(speed=f"{speed:.2f}/s", eta_m=f"{eta/60:.1f}")
-    else:
-        def _run_thread_write() -> None:
-            def _thread_job(file_path: str, symbol: str, start: int, cnt: int) -> int:
-                symbol2, file_n_feat, payload = _build_file_payload_worker(file_path)
-                if file_n_feat != n_feat:
-                    raise RuntimeError(f"Feature dim mismatch in pass2: expected {n_feat}, got {file_n_feat}")
-                if symbol2 != symbol:
-                    raise RuntimeError(f"Symbol mismatch in pass2: layout={symbol}, computed={symbol2}, file={file_path}")
-                x_arr, y_arr, d_arr = payload
-                if y_arr.shape[0] != cnt:
-                    raise RuntimeError(
-                        f"Row count mismatch for {file_path}: counted={cnt}, computed={y_arr.shape[0]}"
-                    )
-                end = start + cnt
-                x_store[start:end] = x_arr
-                y_store[start:end] = y_arr
-                date_store[start:end] = d_arr
-                symbol_store[start:end] = symbol_to_id[symbol]
-                return cnt
-
-            futures = []
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                for file_path, symbol, start, cnt in file_layout:
-                    futures.append(
-                        executor.submit(
-                            _thread_job,
-                            file_path,
-                            symbol,
-                            start,
-                            cnt,
-                        )
-                    )
-                pbar = tqdm(total=total_files, desc="processing", unit="file")
-                for idx, fut in enumerate(as_completed(futures), start=1):
-                    fut.result()
-                    pbar.update(1)
-                    elapsed = time.perf_counter() - t1
-                    speed = idx / elapsed if elapsed > 0 else 0.0
-                    eta = (total_files - idx) / speed if speed > 0 else float("inf")
-                    pbar.set_postfix(speed=f"{speed:.2f}/s", eta_m=f"{eta/60:.1f}")
-                pbar.close()
-
-        try:
-            with ProcessPoolExecutor(max_workers=workers) as executor:
-                futures = []
-                print("  processing backend: process")
-                for file_path, symbol, start, cnt in file_layout:
-                    sid = symbol_to_id[symbol]
-                    futures.append(
-                        executor.submit(
-                            _write_panel_file_slice_process,
-                            file_path,
-                            start,
-                            cnt,
-                            sid,
-                            str(out_root / "X.npy"),
-                            str(out_root / "y.npy"),
-                            str(out_root / "date.npy"),
-                            str(out_root / "symbol.npy"),
-                            total_count,
-                            n_feat,
-                        )
-                    )
-                pbar = tqdm(total=total_files, desc="processing", unit="file")
-                for idx, fut in enumerate(as_completed(futures), start=1):
-                    fut.result()
-                    pbar.update(1)
-                    elapsed = time.perf_counter() - t1
-                    speed = idx / elapsed if elapsed > 0 else 0.0
-                    eta = (total_files - idx) / speed if speed > 0 else float("inf")
-                    pbar.set_postfix(speed=f"{speed:.2f}/s", eta_m=f"{eta/60:.1f}")
-                pbar.close()
-        except Exception as e:
-            print(f"  process backend unavailable ({type(e).__name__}: {e}), fallback to thread backend")
-            print("  processing backend: thread")
-            _run_thread_write()
-
-    metadata = {
-        "cache_mode": "panel_2d",
-        "factor_space": FULL_FACTOR_SPACE_NAME,
-        "date_unit": "ns",
-        "num_features": n_feat,
-        "num_rows": total_count,
-        "shape": [total_count, n_feat],
-        "feature_names": get_full_factor_space_feature_names(),
-        "label": "open_t+2 / open_t+1 - 1",
-        "symbol_to_id": symbol_to_id,
-        "row_order": "symbol-major (input file order), date ascending within symbol",
-        "incremental": {
-            "enabled": False,
-            "shard_dir": str(out_root / SHARD_DIRNAME),
-            "reused_files": 0,
-            "recomputed_files": total_files,
-        },
-        "source_files": [
-            {
-                "file_path": key,
-                "symbol": symbol,
-                "row_count": cnt,
-                "source": _source_file_signature(key),
-                "reused_shard": False,
-            }
-            for key, (symbol, cnt) in file_rows.items()
-        ],
-    }
-    with open(out_root / "meta.json", "w", encoding="utf-8") as f:
-        json.dump(metadata, f, ensure_ascii=False, indent=2)
-
-    print(f"[3/3] Done. Panel cache saved to: {out_root}")
-    return metadata
 
 
 def validate_default_dimensions() -> dict[str, int]:
@@ -1435,10 +1231,10 @@ def validate_default_dimensions() -> dict[str, int]:
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate the unified full-factor panel cache from parquet.")
-    parser.add_argument("--config", default="configs/config.yaml", help="Experiment config path for cache/output settings.")
+    parser = argparse.ArgumentParser(description="Generate the unified full-factor Parquet store from parquet.")
+    parser.add_argument("--config", default="configs/config.yaml", help="Experiment config path for factor-store output settings.")
     parser.add_argument("--parquet-dir", default="data/processed/combined", help="Input parquet directory.")
-    parser.add_argument("--output-dir", default=None, help="Output cache directory.")
+    parser.add_argument("--output-dir", default=None, help="Output factor-store directory.")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for counting/writing.")
     parser.add_argument("--incremental", action="store_true", help="Reuse unchanged per-symbol feature shards and only recompute changed parquet files.")
     return parser.parse_args()
@@ -1451,14 +1247,14 @@ def main() -> None:
     if args.config:
         with open(args.config, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
-    out_dir = args.output_dir or cfg.get("features", {}).get("cache_dir") or DEFAULT_FULL_FACTOR_CACHE_DIR
+    out_dir = args.output_dir or cfg.get("features", {}).get("factor_store_dir") or cfg.get("features", {}).get("cache_dir") or DEFAULT_FULL_FACTOR_STORE_DIR
     feature_names = get_full_factor_space_feature_names()
     alpha158_count = len(get_alpha158_feature_config()[1])
     lgbm_count = len(get_lgbm_purified_feature_names())
     temporal_count = len(get_temporal_factor_feature_names())
 
     print(
-        "cache_mode=panel_2d, "
+        "storage_format=parquet, "
         f"factor_space={FULL_FACTOR_SPACE_NAME}, "
         f"output={out_dir}, "
         f"incremental={args.incremental}"
@@ -1470,7 +1266,7 @@ def main() -> None:
         f"temporal:{temporal_count}, "
         f"total:{len(feature_names)}"
     )
-    generate_panel_cache(
+    generate_factor_store(
         parquet_dir=args.parquet_dir,
         output_dir=out_dir,
         workers=max(1, int(args.workers)),

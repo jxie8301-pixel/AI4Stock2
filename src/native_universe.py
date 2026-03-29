@@ -90,3 +90,37 @@ def build_universe_mask(
         mask[sid_mask] = sid_valid
 
     return mask
+
+
+def build_universe_frame_mask(
+    dates: pd.Series | pd.DatetimeIndex,
+    symbols: pd.Series | list[str],
+    universe_name: str,
+    universe_dir: str | Path = DEFAULT_UNIVERSE_DIR,
+) -> np.ndarray:
+    if universe_name == "all":
+        return np.ones(len(symbols), dtype=bool)
+
+    table = load_universe_table(universe_name, universe_dir=universe_dir)
+    intervals_by_symbol: dict[str, list[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+    for _, row in table.iterrows():
+        intervals_by_symbol.setdefault(str(row["symbol"]), []).append((row["start_date"], row["end_date"]))
+
+    dates_arr = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    symbol_arr = pd.Series(symbols).astype(str).map(_normalize_symbol).reset_index(drop=True)
+    mask = np.zeros(len(symbol_arr), dtype=bool)
+
+    for symbol, intervals in intervals_by_symbol.items():
+        symbol_mask = symbol_arr == symbol
+        if not np.any(symbol_mask):
+            continue
+        symbol_dates = dates_arr[symbol_mask]
+        symbol_valid = np.zeros(symbol_dates.shape[0], dtype=bool)
+        for start_date, end_date in intervals:
+            symbol_valid |= (symbol_dates >= start_date) & (symbol_dates <= end_date)
+        mask[np.where(symbol_mask)[0]] = symbol_valid
+
+    if not np.any(mask):
+        raise ValueError(f"No rows matched universe '{universe_name}' in the loaded factor frame.")
+
+    return mask

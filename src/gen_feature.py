@@ -72,9 +72,27 @@ DEFAULT_TEMPORAL_FACTOR_CONFIG: dict[str, Any] = {
     ],
 }
 
+DEFAULT_TECHNICAL_FACTOR_CONFIG: dict[str, Any] = {
+    "macd_setups": [
+        {"fast": 12, "slow": 26, "signal": 9},
+    ],
+    "rsi_windows": [6, 14, 24],
+    "boll_windows": [20, 60],
+    "boll_num_std": 2,
+    "adx_windows": [14],
+    "mfi_windows": [14],
+    "cci_windows": [20],
+    "willr_windows": [14],
+    "aroon_windows": [25],
+    "trix_windows": [15],
+    "trix_signal": 9,
+    "obv_windows": [20, 60],
+}
+
 ALL_FACTORS_ALPHA360_PREFIX = "A360_"
 ALL_FACTORS_LGBM_PREFIX = "LGBM_"
 TEMPORAL_FACTOR_PREFIX = "TEMP_"
+TECHNICAL_FACTOR_PREFIX = "TECH_"
 SHARD_DIRNAME = "_shards"
 
 
@@ -283,12 +301,14 @@ def get_alpha360_feature_config() -> tuple[list[str], list[str]]:
 def get_all_factor_feature_names(
     alpha158_config: dict[str, Any] | None = None,
     lgbm_purified_config: dict[str, Any] | None = None,
+    technical_config: dict[str, Any] | None = None,
 ) -> list[str]:
     """Return the comprehensive feature-space names used by the unified cache."""
     alpha158_names = get_alpha158_feature_config(alpha158_config)[1]
     lgbm_names = [f"{ALL_FACTORS_LGBM_PREFIX}{name}" for name in get_lgbm_purified_feature_names(lgbm_purified_config)]
     temporal_names = [f"{TEMPORAL_FACTOR_PREFIX}{name}" for name in get_temporal_factor_feature_names()]
-    return alpha158_names + lgbm_names + temporal_names
+    technical_names = [f"{TECHNICAL_FACTOR_PREFIX}{name}" for name in get_technical_factor_feature_names(technical_config)]
+    return alpha158_names + lgbm_names + temporal_names + technical_names
 
 
 def get_lgbm_purified_feature_names(config: dict[str, Any] | None = None) -> list[str]:
@@ -335,6 +355,52 @@ def get_temporal_factor_feature_names(config: dict[str, Any] | None = None) -> l
             names.append(f"low_gap_{window}")
         if "corr_cv" in groups:
             names.append(f"corr_cv_{window}")
+    return names
+
+
+def get_technical_factor_feature_names(config: dict[str, Any] | None = None) -> list[str]:
+    cfg = deepcopy(DEFAULT_TECHNICAL_FACTOR_CONFIG)
+    if config is not None:
+        cfg.update(config)
+
+    names: list[str] = []
+    for setup in cfg["macd_setups"]:
+        fast = int(setup["fast"])
+        slow = int(setup["slow"])
+        signal = int(setup["signal"])
+        names += [
+            f"macd_line_{fast}_{slow}_{signal}",
+            f"macd_signal_{fast}_{slow}_{signal}",
+            f"macd_hist_{fast}_{slow}_{signal}",
+        ]
+    for window in cfg["rsi_windows"]:
+        names.append(f"rsi_{int(window)}")
+    num_std = int(cfg["boll_num_std"])
+    for window in cfg["boll_windows"]:
+        window = int(window)
+        names += [
+            f"boll_pos_{window}_{num_std}",
+            f"boll_width_{window}_{num_std}",
+            f"boll_zscore_{window}_{num_std}",
+        ]
+    for window in cfg["adx_windows"]:
+        window = int(window)
+        names += [f"adx_{window}", f"plus_di_{window}", f"minus_di_{window}"]
+    for window in cfg["mfi_windows"]:
+        names.append(f"mfi_{int(window)}")
+    for window in cfg["cci_windows"]:
+        names.append(f"cci_{int(window)}")
+    for window in cfg["willr_windows"]:
+        names.append(f"willr_{int(window)}")
+    for window in cfg["aroon_windows"]:
+        window = int(window)
+        names += [f"aroon_up_{window}", f"aroon_down_{window}", f"aroon_osc_{window}"]
+    trix_signal = int(cfg["trix_signal"])
+    for window in cfg["trix_windows"]:
+        window = int(window)
+        names += [f"trix_{window}", f"trix_signal_{window}_{trix_signal}", f"trix_hist_{window}_{trix_signal}"]
+    for window in cfg["obv_windows"]:
+        names.append(f"obv_flow_{int(window)}")
     return names
 
 
@@ -668,6 +734,146 @@ def _calculate_atr(base: pd.DataFrame, period: int) -> pd.Series:
     return atr / base["close"].replace(0, np.nan)
 
 
+def _wilder_smooth(series: pd.Series, period: int) -> pd.Series:
+    return series.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+
+def _calculate_macd(close: pd.Series, fast: int, slow: int, signal: int) -> tuple[pd.Series, pd.Series, pd.Series]:
+    ema_fast = close.ewm(span=fast, adjust=False, min_periods=fast).mean()
+    ema_slow = close.ewm(span=slow, adjust=False, min_periods=slow).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def _calculate_rsi(close: pd.Series, period: int) -> pd.Series:
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = (-delta).clip(lower=0.0)
+    avg_gain = _wilder_smooth(gain, period)
+    avg_loss = _wilder_smooth(loss, period)
+    rs = avg_gain / (avg_loss + EPS)
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    rsi = rsi.where(avg_loss > EPS, 100.0)
+    rsi = rsi.where((avg_gain > EPS) | (avg_loss > EPS), 50.0)
+    return rsi
+
+
+def _calculate_bollinger(close: pd.Series, window: int, num_std: float) -> tuple[pd.Series, pd.Series, pd.Series]:
+    ma = close.rolling(window, min_periods=window).mean()
+    std = close.rolling(window, min_periods=window).std()
+    pos = (close - ma) / (num_std * std + EPS)
+    width = (2.0 * num_std * std) / (ma.abs() + EPS)
+    zscore = (close - ma) / (std + EPS)
+    return pos, width, zscore
+
+
+def _calculate_adx(base: pd.DataFrame, period: int) -> tuple[pd.Series, pd.Series, pd.Series]:
+    high = base["high"]
+    low = base["low"]
+    close = base["close"]
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(
+        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+        index=base.index,
+        dtype=float,
+    )
+    minus_dm = pd.Series(
+        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+        index=base.index,
+        dtype=float,
+    )
+    prev_close = close.shift(1)
+    tr = pd.concat(
+        [
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    atr = _wilder_smooth(tr, period)
+    plus_di = 100.0 * _wilder_smooth(plus_dm, period) / (atr + EPS)
+    minus_di = 100.0 * _wilder_smooth(minus_dm, period) / (atr + EPS)
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di + EPS)
+    adx = _wilder_smooth(dx, period)
+    return adx, plus_di, minus_di
+
+
+def _calculate_mfi(base: pd.DataFrame, period: int) -> pd.Series:
+    typical_price = (base["high"] + base["low"] + base["close"]) / 3.0
+    raw_money_flow = typical_price * base["volume"].fillna(0.0)
+    tp_delta = typical_price.diff()
+    pos_flow = raw_money_flow.where(tp_delta > 0, 0.0)
+    neg_flow = raw_money_flow.where(tp_delta < 0, 0.0).abs()
+    pos_sum = pos_flow.rolling(period, min_periods=period).sum()
+    neg_sum = neg_flow.rolling(period, min_periods=period).sum()
+    money_ratio = pos_sum / (neg_sum + EPS)
+    return 100.0 - (100.0 / (1.0 + money_ratio))
+
+
+def _calculate_cci(base: pd.DataFrame, period: int) -> pd.Series:
+    typical_price = (base["high"] + base["low"] + base["close"]) / 3.0
+    tp_ma = typical_price.rolling(period, min_periods=period).mean()
+    tp_mad = typical_price.rolling(period, min_periods=period).apply(
+        lambda x: float(np.mean(np.abs(x - np.mean(x)))),
+        raw=True,
+    )
+    return (typical_price - tp_ma) / (0.015 * tp_mad + EPS)
+
+
+def _calculate_willr(base: pd.DataFrame, period: int) -> pd.Series:
+    highest_high = base["high"].rolling(period, min_periods=period).max()
+    lowest_low = base["low"].rolling(period, min_periods=period).min()
+    return -100.0 * (highest_high - base["close"]) / (highest_high - lowest_low + EPS)
+
+
+def _rolling_periods_since_extreme(series: pd.Series, window: int, mode: str) -> pd.Series:
+    def _periods_since(x: np.ndarray) -> float:
+        if len(x) == 0 or np.all(np.isnan(x)):
+            return np.nan
+        xv = np.asarray(x, dtype=float)
+        valid_idx = np.where(~np.isnan(xv))[0]
+        if valid_idx.size == 0:
+            return np.nan
+        valid_values = xv[valid_idx]
+        chosen_idx = valid_idx[np.argmax(valid_values)] if mode == "max" else valid_idx[np.argmin(valid_values)]
+        return float(len(xv) - 1 - chosen_idx)
+
+    return series.rolling(window, min_periods=window).apply(_periods_since, raw=True)
+
+
+def _calculate_aroon(base: pd.DataFrame, period: int) -> tuple[pd.Series, pd.Series, pd.Series]:
+    periods_since_high = _rolling_periods_since_extreme(base["high"], period, mode="max")
+    periods_since_low = _rolling_periods_since_extreme(base["low"], period, mode="min")
+    aroon_up = 100.0 * (period - periods_since_high) / period
+    aroon_down = 100.0 * (period - periods_since_low) / period
+    return aroon_up, aroon_down, aroon_up - aroon_down
+
+
+def _calculate_trix(close: pd.Series, period: int, signal_period: int) -> tuple[pd.Series, pd.Series, pd.Series]:
+    ema1 = close.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema2 = ema1.ewm(span=period, adjust=False, min_periods=period).mean()
+    ema3 = ema2.ewm(span=period, adjust=False, min_periods=period).mean()
+    trix = ema3.pct_change(fill_method=None) * 100.0
+    signal = trix.ewm(span=signal_period, adjust=False, min_periods=signal_period).mean()
+    hist = trix - signal
+    return trix, signal, hist
+
+
+def _calculate_obv_flow(base: pd.DataFrame, window: int) -> pd.Series:
+    close_diff = base["close"].diff().fillna(0.0)
+    signed_volume = pd.Series(
+        np.sign(close_diff) * base["volume"].fillna(0.0),
+        index=base.index,
+        dtype=float,
+    )
+    total_volume = base["volume"].fillna(0.0).rolling(window, min_periods=window).sum()
+    return signed_volume.rolling(window, min_periods=window).sum() / (total_volume + EPS)
+
+
 def compute_lgbm_purified_features(
     df: pd.DataFrame,
     config: dict[str, Any] | None = None,
@@ -747,6 +953,81 @@ def compute_lgbm_purified_features(
     return feat
 
 
+def compute_technical_factor_features(
+    df: pd.DataFrame,
+    config: dict[str, Any] | None = None,
+    _base: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Compute classic technical indicators for the unified factor space."""
+    cfg = deepcopy(DEFAULT_TECHNICAL_FACTOR_CONFIG)
+    if config is not None:
+        cfg.update(config)
+
+    base = _base if _base is not None else _prepare_ohlcv(df)
+    close = base["close"].replace(0, np.nan)
+    out: dict[str, pd.Series] = {}
+
+    for setup in cfg["macd_setups"]:
+        fast = int(setup["fast"])
+        slow = int(setup["slow"])
+        signal = int(setup["signal"])
+        macd_line, signal_line, hist = _calculate_macd(close, fast, slow, signal)
+        out[f"macd_line_{fast}_{slow}_{signal}"] = macd_line
+        out[f"macd_signal_{fast}_{slow}_{signal}"] = signal_line
+        out[f"macd_hist_{fast}_{slow}_{signal}"] = hist
+
+    for window in cfg["rsi_windows"]:
+        out[f"rsi_{int(window)}"] = _calculate_rsi(close, int(window))
+
+    num_std = float(cfg["boll_num_std"])
+    num_std_label = int(num_std)
+    for window in cfg["boll_windows"]:
+        window = int(window)
+        pos, width, zscore = _calculate_bollinger(close, window, num_std)
+        out[f"boll_pos_{window}_{num_std_label}"] = pos
+        out[f"boll_width_{window}_{num_std_label}"] = width
+        out[f"boll_zscore_{window}_{num_std_label}"] = zscore
+
+    for window in cfg["adx_windows"]:
+        window = int(window)
+        adx, plus_di, minus_di = _calculate_adx(base, window)
+        out[f"adx_{window}"] = adx
+        out[f"plus_di_{window}"] = plus_di
+        out[f"minus_di_{window}"] = minus_di
+
+    for window in cfg["mfi_windows"]:
+        out[f"mfi_{int(window)}"] = _calculate_mfi(base, int(window))
+
+    for window in cfg["cci_windows"]:
+        out[f"cci_{int(window)}"] = _calculate_cci(base, int(window))
+
+    for window in cfg["willr_windows"]:
+        out[f"willr_{int(window)}"] = _calculate_willr(base, int(window))
+
+    for window in cfg["aroon_windows"]:
+        window = int(window)
+        aroon_up, aroon_down, aroon_osc = _calculate_aroon(base, window)
+        out[f"aroon_up_{window}"] = aroon_up
+        out[f"aroon_down_{window}"] = aroon_down
+        out[f"aroon_osc_{window}"] = aroon_osc
+
+    trix_signal = int(cfg["trix_signal"])
+    for window in cfg["trix_windows"]:
+        window = int(window)
+        trix, signal, hist = _calculate_trix(close, window, trix_signal)
+        out[f"trix_{window}"] = trix
+        out[f"trix_signal_{window}_{trix_signal}"] = signal
+        out[f"trix_hist_{window}_{trix_signal}"] = hist
+
+    for window in cfg["obv_windows"]:
+        out[f"obv_flow_{int(window)}"] = _calculate_obv_flow(base, int(window))
+
+    feat = pd.DataFrame(out, index=base.index)
+    ordered_names = get_technical_factor_feature_names(cfg)
+    feat = feat.reindex(columns=ordered_names)
+    return feat
+
+
 def compute_temporal_factor_features(
     df: pd.DataFrame,
     config: dict[str, Any] | None = None,
@@ -813,6 +1094,7 @@ def compute_all_factor_features(
     df: pd.DataFrame,
     alpha158_config: dict[str, Any] | None = None,
     lgbm_purified_config: dict[str, Any] | None = None,
+    technical_config: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Compute a single comprehensive factor frame for training-time sub-selection."""
     base = _prepare_ohlcv(df)
@@ -821,8 +1103,11 @@ def compute_all_factor_features(
         columns=lambda name: f"{ALL_FACTORS_LGBM_PREFIX}{name}"
     )
     temporal_feat = compute_temporal_factor_features(df, _base=base).rename(columns=lambda name: f"{TEMPORAL_FACTOR_PREFIX}{name}")
-    feat = pd.concat([alpha158_feat, lgbm_feat, temporal_feat], axis=1)
-    ordered_names = get_all_factor_feature_names(alpha158_config, lgbm_purified_config)
+    technical_feat = compute_technical_factor_features(df, config=technical_config, _base=base).rename(
+        columns=lambda name: f"{TECHNICAL_FACTOR_PREFIX}{name}"
+    )
+    feat = pd.concat([alpha158_feat, lgbm_feat, temporal_feat, technical_feat], axis=1)
+    ordered_names = get_all_factor_feature_names(alpha158_config, lgbm_purified_config, technical_config)
     feat = feat.reindex(columns=ordered_names)
     return feat
 
@@ -1103,6 +1388,8 @@ def generate_factor_store(
     feature_names = get_full_factor_space_feature_names()
     workers = max(1, int(workers))
     files_to_recompute: list[Path] = []
+    reused_shard_metas: list[dict[str, Any]] = []
+    written_shard_metas: list[dict[str, Any]] = []
     reused_files = 0
 
     print(f"[1/3] Planning factor-store build from {len(files)} parquet files (workers={workers})...")
@@ -1122,6 +1409,7 @@ def generate_factor_store(
             files_to_recompute.append(fp)
         else:
             reused_files += 1
+            reused_shard_metas.append(reusable)
         elapsed = time.perf_counter() - t0
         speed = idx / elapsed if elapsed > 0 else 0.0
         eta = (len(files) - idx) / speed if speed > 0 else float("inf")
@@ -1137,7 +1425,8 @@ def generate_factor_store(
             pbar = tqdm(files_to_recompute, desc="shards", total=len(files_to_recompute), unit="file")
             for idx, fp in enumerate(pbar, start=1):
                 shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, fp)
-                _write_factor_shard_worker(str(fp), str(shard_path), str(meta_path), feature_names)
+                shard_meta = _write_factor_shard_worker(str(fp), str(shard_path), str(meta_path), feature_names)
+                written_shard_metas.append(shard_meta)
                 elapsed = time.perf_counter() - t1
                 speed = idx / elapsed if elapsed > 0 else 0.0
                 eta = (len(files_to_recompute) - idx) / speed if speed > 0 else float("inf")
@@ -1159,7 +1448,7 @@ def generate_factor_store(
                     )
                 pbar = tqdm(total=len(files_to_recompute), desc="shards", unit="file")
                 for idx, fut in enumerate(as_completed(futures), start=1):
-                    fut.result()
+                    written_shard_metas.append(fut.result())
                     pbar.update(1)
                     elapsed = time.perf_counter() - t1
                     speed = idx / elapsed if elapsed > 0 else 0.0
@@ -1169,8 +1458,18 @@ def generate_factor_store(
     else:
         print("[2/3] Writing Parquet shards skipped: all source files reused.")
 
-    shard_metas = _collect_shard_metas(shard_meta_root)
+    print("[3/3] Finalizing factor-store metadata...")
+    meta_by_source_path = {
+        str(item.get("source", {}).get("path", "")): item
+        for item in (reused_shard_metas + written_shard_metas)
+    }
+    source_paths = [str(fp.resolve()) for fp in files]
+    shard_metas = [meta_by_source_path[path] for path in source_paths if path in meta_by_source_path]
+    if len(shard_metas) != len(files):
+        print("Metadata finalize fallback: reloading shard meta files from disk.")
+        shard_metas = _collect_shard_metas(shard_meta_root)
     total_rows = sum(int(item.get("row_count", 0)) for item in shard_metas)
+    recomputed_source_paths = {str(fp.resolve()) for fp in files_to_recompute}
 
     metadata = {
         "storage_format": "parquet",
@@ -1195,7 +1494,7 @@ def generate_factor_store(
                 "symbol": item.get("symbol", ""),
                 "row_count": item.get("row_count", 0),
                 "source": item.get("source", {}),
-                "reused_shard": item.get("source", {}).get("path", "") not in {str(fp.resolve()) for fp in files_to_recompute},
+                "reused_shard": item.get("source", {}).get("path", "") not in recomputed_source_paths,
                 "shard_path": item.get("shard_path", ""),
             }
             for item in shard_metas
@@ -1252,6 +1551,7 @@ def main() -> None:
     alpha158_count = len(get_alpha158_feature_config()[1])
     lgbm_count = len(get_lgbm_purified_feature_names())
     temporal_count = len(get_temporal_factor_feature_names())
+    technical_count = len(get_technical_factor_feature_names())
 
     print(
         "storage_format=parquet, "
@@ -1264,6 +1564,7 @@ def main() -> None:
         f"legacy158:{alpha158_count}, "
         f"lgbm_purified:{lgbm_count}, "
         f"temporal:{temporal_count}, "
+        f"technical:{technical_count}, "
         f"total:{len(feature_names)}"
     )
     generate_factor_store(

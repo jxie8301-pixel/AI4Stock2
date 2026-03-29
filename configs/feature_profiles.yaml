@@ -4,6 +4,12 @@ profiles:
   core_v1:
     path: configs/features/core_v1.yaml
 
+  core_v2_pruned:
+    path: configs/features/core_v2_pruned.yaml
+
+  core_v2_techmix:
+    path: configs/features/core_v2_techmix.yaml
+
   all_factors_full:
     path: configs/features/all_factors_full.yaml
 
@@ -15,3 +21,6 @@ profiles:
 
   lgbm_purified_v1:
     path: configs/features/lgbm_purified_v1.yaml
+
+  technical_core_v1:
+    path: configs/features/technical_core_v1.yaml

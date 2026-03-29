@@ -2,10 +2,12 @@ import unittest
 
 from src.feature_profiles import resolve_feature_profile
 from src.gen_feature import (
+    TECHNICAL_FACTOR_PREFIX,
     TEMPORAL_FACTOR_PREFIX,
     get_all_factor_feature_names,
     get_alpha158_feature_config,
     get_lgbm_purified_feature_names,
+    get_technical_factor_feature_names,
     get_temporal_factor_feature_names,
 )
 
@@ -21,8 +23,9 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v1.yaml"))
         self.assertEqual(profile["selected_columns"][0], "KMID")
         self.assertEqual(profile["selected_columns"][-1], "TEMP_corr_cv_20")
-        self.assertEqual(len(get_all_factor_feature_names()), 253)
+        self.assertEqual(len(get_all_factor_feature_names()), 279)
         self.assertIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", get_all_factor_feature_names())
+        self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}macd_hist_12_26_9", get_all_factor_feature_names())
 
     def test_full_profile_preserves_legacy_cache_dir(self):
         cfg = {
@@ -108,6 +111,31 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn("ret_1", names)
         self.assertIn("ma_gap_120", names)
         self.assertIn("corr_cv_60", names)
+
+    def test_technical_factor_family_has_classic_indicators(self):
+        names = get_technical_factor_feature_names()
+
+        self.assertEqual(len(names), 26)
+        self.assertIn("macd_line_12_26_9", names)
+        self.assertIn("rsi_14", names)
+        self.assertIn("boll_width_20_2", names)
+        self.assertIn("adx_14", names)
+        self.assertIn("obv_flow_60", names)
+
+    def test_technical_core_profile_has_expected_feature_family(self):
+        profile = resolve_feature_profile(
+            {
+                "features": {
+                    "profile": "technical_core_v1",
+                }
+            }
+        )
+
+        self.assertEqual(profile["alpha"], "all_factors")
+        self.assertEqual(profile["generation_space"], "full_factor_space")
+        self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/technical_core_v1.yaml"))
+        self.assertEqual(profile["selected_columns"], [f"{TECHNICAL_FACTOR_PREFIX}{name}" for name in get_technical_factor_feature_names()])
 
     def test_removed_alpha360_profile_is_rejected(self):
         with self.assertRaises(ValueError):

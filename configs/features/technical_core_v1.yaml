@@ -1,0 +1,30 @@
+alpha: all_factors
+generation_space: full_factor_space
+factor_store_name: full_factor_space
+selected_columns:
+  - TECH_macd_line_12_26_9
+  - TECH_macd_signal_12_26_9
+  - TECH_macd_hist_12_26_9
+  - TECH_rsi_6
+  - TECH_rsi_14
+  - TECH_rsi_24
+  - TECH_boll_pos_20_2
+  - TECH_boll_width_20_2
+  - TECH_boll_zscore_20_2
+  - TECH_boll_pos_60_2
+  - TECH_boll_width_60_2
+  - TECH_boll_zscore_60_2
+  - TECH_adx_14
+  - TECH_plus_di_14
+  - TECH_minus_di_14
+  - TECH_mfi_14
+  - TECH_cci_20
+  - TECH_willr_14
+  - TECH_aroon_up_25
+  - TECH_aroon_down_25
+  - TECH_aroon_osc_25
+  - TECH_trix_15
+  - TECH_trix_signal_15_9
+  - TECH_trix_hist_15_9
+  - TECH_obv_flow_20
+  - TECH_obv_flow_60

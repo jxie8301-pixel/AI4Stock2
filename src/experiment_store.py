@@ -103,7 +103,7 @@ def _safe_float(value: Any) -> float | None:
 
 
 def resolve_rebalance_freq(cfg: dict, args) -> int:
-    return getattr(args, "rebalance_freq", None) or cfg.get("backtest", {}).get("rebalance_freq", 1)
+    return getattr(args, "rebalance_freq", None) or cfg.get("backtest", {}).get("rebalance_freq", 5)
 
 
 def resolve_feature_profile_name(cfg: dict, args) -> str:

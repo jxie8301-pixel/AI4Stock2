@@ -1,8 +1,14 @@
-default_profile: core_v1
+default_profile: core_v4_techlite
 
 profiles:
   core_v1:
     path: configs/features/core_v1.yaml
+
+  core_v4_techlite:
+    path: configs/features/core_v4_techlite.yaml
+
+  core_v1_no_price_rank20:
+    path: configs/features/core_v1_no_price_rank20.yaml
 
   core_v2_pruned:
     path: configs/features/core_v2_pruned.yaml
@@ -18,6 +24,18 @@ profiles:
 
   core_v3_techlite_no_price_rank20:
     path: configs/features/core_v3_techlite_no_price_rank20.yaml
+
+  core_v3_techlite_no_price_rank20_no_aroon:
+    path: configs/features/core_v3_techlite_no_price_rank20_no_aroon.yaml
+
+  core_v3_techlite_no_price_rank20_no_ret120:
+    path: configs/features/core_v3_techlite_no_price_rank20_no_ret120.yaml
+
+  core_v3_techlite_no_price_rank20_no_cntd20:
+    path: configs/features/core_v3_techlite_no_price_rank20_no_cntd20.yaml
+
+  core_v3_techlite_no_price_rank20_tailguard:
+    path: configs/features/core_v3_techlite_no_price_rank20_tailguard.yaml
 
   core_v3_techlite_pruned_no_price_rank20:
     path: configs/features/core_v3_techlite_pruned_no_price_rank20.yaml

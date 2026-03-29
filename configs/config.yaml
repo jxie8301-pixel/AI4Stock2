@@ -15,7 +15,7 @@ time:
   test:  ["2022-01-01", "2025-12-31"]
 
 features:
-  profile: core_v1
+  profile: core_v4_techlite
   transforms:
     cross_sectional_rank: true
   handler: Alpha158
@@ -30,6 +30,7 @@ strategy:
   n_drop: 5
 
 backtest:
+  rebalance_freq: 10
   cost:
     buy: 0.001
     sell: 0.001

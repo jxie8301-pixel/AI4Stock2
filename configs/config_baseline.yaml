@@ -32,6 +32,7 @@ strategy:
   n_drop: 5
 
 backtest:
+  rebalance_freq: 10
   cost:
     buy: 0.001
     sell: 0.001

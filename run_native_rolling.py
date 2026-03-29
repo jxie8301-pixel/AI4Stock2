@@ -9,7 +9,7 @@ import torch
 import numpy as np
 
 from src.config_loader import load_config
-from src.experiment_store import finalize_run_store, prepare_run_store
+from src.experiment_store import finalize_run_store, prepare_run_store, resolve_rebalance_freq
 from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask_frame, resolve_selected_features
@@ -26,7 +26,7 @@ def run_rolling_pipeline():
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id")
     parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
     parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step")
-    parser.add_argument("--rebalance-freq", type=int, default=5, help="Backtest rebalance frequency in days (default: 5 for weekly)")
+    parser.add_argument("--rebalance-freq", type=int, help="Override backtest rebalance frequency in days. If omitted, use config value.")
     parser.add_argument("--topk", type=int, help="Override strategy top-k holdings")
     parser.add_argument("--n-drop", dest="n_drop", type=int, help="Override strategy daily replacement count")
     parser.add_argument("--run-tag", help="Short label for local experiment storage/comparison")
@@ -43,6 +43,10 @@ def run_rolling_pipeline():
         cfg["strategy"]["topk"] = args.topk
     if args.n_drop is not None:
         cfg["strategy"]["n_drop"] = args.n_drop
+    if args.rebalance_freq is not None:
+        cfg.setdefault("backtest", {})
+        cfg["backtest"]["rebalance_freq"] = args.rebalance_freq
+    rebalance_freq = int(resolve_rebalance_freq(cfg, args))
     
     run_store = prepare_run_store(
         cfg,
@@ -372,7 +376,7 @@ def run_rolling_pipeline():
         "\n[Backtest] "
         f"topk={cfg['strategy']['topk']}, "
         f"n_drop={cfg['strategy']['n_drop']}, "
-        f"rebalance={args.rebalance_freq}d"
+        f"rebalance={rebalance_freq}d"
     )
     from src.native_backtest import run_native_backtest
     backtest_report = run_native_backtest(
@@ -386,7 +390,7 @@ def run_rolling_pipeline():
         account=cfg["backtest"].get("account", 100_000_000),
         risk_degree=cfg["backtest"].get("risk_degree", 0.95),
         slippage=cfg["backtest"].get("slippage", 0.0),
-        rebalance_freq=args.rebalance_freq
+        rebalance_freq=rebalance_freq
     )
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})

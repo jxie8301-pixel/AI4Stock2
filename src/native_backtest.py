@@ -11,7 +11,8 @@ from src.label_utils import sanitize_label_series
 DEFAULT_ACCOUNT = 100_000_000.0
 DEFAULT_MIN_COST = 5.0
 DEFAULT_RISK_DEGREE = 0.95
-DEFAULT_SLIPPAGE = 0.0005
+DEFAULT_SLIPPAGE = 0.0
+DEFAULT_TRANSACTION_COST = 0.001
 
 
 def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
@@ -81,8 +82,8 @@ def run_native_backtest(
     labels: pd.Series,
     topk: int = 30,
     n_drop: int = 5,
-    cost_buy: float = 0.0003,
-    cost_sell: float = 0.0013,
+    cost_buy: float = DEFAULT_TRANSACTION_COST,
+    cost_sell: float = DEFAULT_TRANSACTION_COST,
     min_cost: float = DEFAULT_MIN_COST,
     account: float = DEFAULT_ACCOUNT,
     risk_degree: float = DEFAULT_RISK_DEGREE,

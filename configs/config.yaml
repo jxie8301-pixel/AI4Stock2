@@ -10,9 +10,9 @@ artifacts:
 universe: csi300
 
 time:
-  train: ["2016-01-01", "2022-12-31"]
-  valid: ["2023-01-01", "2023-12-31"]
-  test:  ["2024-01-01", "2025-12-31"]
+  train: ["2016-01-01", "2020-12-31"]
+  valid: ["2021-01-01", "2021-12-31"]
+  test:  ["2022-01-01", "2025-12-31"]
 
 features:
   profile: core_v1
@@ -31,9 +31,9 @@ strategy:
 
 backtest:
   cost:
-    buy: 0.0003
-    sell: 0.0013
-  slippage: 0.0005
+    buy: 0.001
+    sell: 0.001
+  slippage: 0.0
   min_cost: 5
   account: 100000000
   risk_degree: 0.95

@@ -1546,7 +1546,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet-dir", default="data/processed/combined", help="Input parquet directory.")
     parser.add_argument("--output-dir", default=None, help="Output factor-store directory.")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for counting/writing.")
-    parser.add_argument("--incremental", action="store_true", help="Reuse unchanged per-symbol feature shards and only recompute changed parquet files.")
+    parser.set_defaults(incremental=True)
+    parser.add_argument(
+        "--incremental",
+        dest="incremental",
+        action="store_true",
+        help="Reuse unchanged per-symbol feature shards and only recompute changed parquet files (default).",
+    )
+    parser.add_argument(
+        "--full-rebuild",
+        dest="incremental",
+        action="store_false",
+        help="Ignore reusable shards and rebuild all per-symbol feature shards.",
+    )
     return parser.parse_args()
 
 

@@ -362,7 +362,7 @@ def run_rolling_pipeline():
         min_cost=cfg["backtest"].get("min_cost", 5.0),
         account=cfg["backtest"].get("account", 100_000_000),
         risk_degree=cfg["backtest"].get("risk_degree", 0.95),
-        slippage=cfg["backtest"].get("slippage", 0.0005),
+        slippage=cfg["backtest"].get("slippage", 0.0),
         rebalance_freq=args.rebalance_freq
     )
     

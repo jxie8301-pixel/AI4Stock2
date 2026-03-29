@@ -7,6 +7,7 @@ from src.native_backtest import (
     DEFAULT_MIN_COST,
     DEFAULT_RISK_DEGREE,
     DEFAULT_SLIPPAGE,
+    DEFAULT_TRANSACTION_COST,
     run_native_backtest,
 )
 
@@ -16,8 +17,8 @@ def run_backtest(
     labels: pd.Series,
     topk: int = 30,
     n_drop: int = 5,
-    cost_buy: float = 0.0003,
-    cost_sell: float = 0.0013,
+    cost_buy: float = DEFAULT_TRANSACTION_COST,
+    cost_sell: float = DEFAULT_TRANSACTION_COST,
     min_cost: float = DEFAULT_MIN_COST,
     account: float = DEFAULT_ACCOUNT,
     risk_degree: float = DEFAULT_RISK_DEGREE,

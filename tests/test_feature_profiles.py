@@ -137,6 +137,17 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/technical_core_v1.yaml"))
         self.assertEqual(profile["selected_columns"], [f"{TECHNICAL_FACTOR_PREFIX}{name}" for name in get_technical_factor_feature_names()])
 
+    def test_core_v3_techlite_profiles_are_registered(self):
+        techlite = resolve_feature_profile({"features": {"profile": "core_v3_techlite"}})
+        techlite_pruned = resolve_feature_profile({"features": {"profile": "core_v3_techlite_pruned"}})
+
+        self.assertTrue(str(techlite["profile_path"]).endswith("configs/features/core_v3_techlite.yaml"))
+        self.assertTrue(str(techlite_pruned["profile_path"]).endswith("configs/features/core_v3_techlite_pruned.yaml"))
+        self.assertEqual(len(techlite["selected_columns"]), 47)
+        self.assertEqual(len(techlite_pruned["selected_columns"]), 41)
+        self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}boll_pos_20_2", techlite["selected_columns"])
+        self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}macd_hist_12_26_9", techlite_pruned["selected_columns"])
+
     def test_removed_alpha360_profile_is_rejected(self):
         with self.assertRaises(ValueError):
             resolve_feature_profile({"features": {"profile": "alpha360_full"}})

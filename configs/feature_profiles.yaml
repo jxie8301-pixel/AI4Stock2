@@ -10,6 +10,12 @@ profiles:
   core_v2_techmix:
     path: configs/features/core_v2_techmix.yaml
 
+  core_v3_techlite:
+    path: configs/features/core_v3_techlite.yaml
+
+  core_v3_techlite_pruned:
+    path: configs/features/core_v3_techlite_pruned.yaml
+
   all_factors_full:
     path: configs/features/all_factors_full.yaml
 

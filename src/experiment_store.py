@@ -21,6 +21,7 @@ SUMMARY_FIELDS = [
     "pipeline",
     "model",
     "run_tag",
+    "feature_profile",
     "universe",
     "topk",
     "n_drop",
@@ -104,6 +105,11 @@ def resolve_rebalance_freq(cfg: dict, args) -> int:
     return getattr(args, "rebalance_freq", None) or cfg.get("backtest", {}).get("rebalance_freq", 1)
 
 
+def resolve_feature_profile_name(cfg: dict, args) -> str:
+    profile = getattr(args, "profile", None) or cfg.get("features", {}).get("profile")
+    return str(profile or "")
+
+
 def prepare_run_store(
     cfg: dict,
     args,
@@ -126,6 +132,7 @@ def prepare_run_store(
         f"_reb{resolve_rebalance_freq(cfg, args)}"
     )
     tag_slug = _slugify(getattr(args, "run_tag", None))
+    profile_slug = _slugify(resolve_feature_profile_name(cfg, args))
     run_id_parts = [
         created_at.strftime("%Y%m%d_%H%M%S"),
         backend,
@@ -133,6 +140,8 @@ def prepare_run_store(
         model_name,
         strategy_slug,
     ]
+    if not tag_slug and profile_slug:
+        run_id_parts.append(profile_slug)
     if tag_slug:
         run_id_parts.append(tag_slug)
     run_id = "__".join(run_id_parts)
@@ -205,6 +214,7 @@ def finalize_run_store(
         "pipeline": pipeline,
         "model": model_name,
         "run_tag": getattr(args, "run_tag", None) or "",
+        "feature_profile": resolve_feature_profile_name(cfg, args),
         "universe": cfg.get("universe", ""),
         "topk": cfg.get("strategy", {}).get("topk"),
         "n_drop": cfg.get("strategy", {}).get("n_drop"),
@@ -268,10 +278,29 @@ def flatten_metrics(signal_metrics: dict | None, portfolio_metrics: dict | None)
 
 def append_summary_row(csv_path: Path, row: dict[str, Any]) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    file_exists = csv_path.exists()
+    normalized_row = {field: row.get(field, "") for field in SUMMARY_FIELDS}
+
+    if not csv_path.exists():
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerow(normalized_row)
+        return
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        existing_fields = reader.fieldnames or []
+        existing_rows = list(reader)
+
+    if existing_fields != SUMMARY_FIELDS:
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
+            writer.writeheader()
+            for existing_row in existing_rows:
+                writer.writerow({field: existing_row.get(field, "") for field in SUMMARY_FIELDS})
+            writer.writerow(normalized_row)
+        return
+
     with open(csv_path, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDS, extrasaction="ignore")
-        if not file_exists:
-            writer.writeheader()
-        normalized_row = {field: row.get(field, "") for field in SUMMARY_FIELDS}
         writer.writerow(normalized_row)

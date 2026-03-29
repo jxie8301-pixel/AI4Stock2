@@ -23,6 +23,33 @@ def safe_cross_sectional_corr(
     return float(frame["pred"].corr(frame["label"], method=method))
 
 
+def _compute_return_distribution_metrics(returns: pd.Series) -> dict[str, float | int | None]:
+    """Summarize win/loss asymmetry for a return series."""
+    clean_returns = returns.astype(float).dropna()
+    wins = clean_returns[clean_returns > 0]
+    losses = clean_returns[clean_returns < 0]
+    flat_days = int((clean_returns == 0).sum())
+    avg_win = float(wins.mean()) if not wins.empty else None
+    avg_loss = float(losses.mean()) if not losses.empty else None
+    payoff_ratio = None
+    if avg_win is not None and avg_loss is not None and avg_loss != 0:
+        payoff_ratio = float(avg_win / abs(avg_loss))
+    gross_profit = float(wins.sum()) if not wins.empty else 0.0
+    gross_loss = float(abs(losses.sum())) if not losses.empty else 0.0
+    profit_factor = None
+    if gross_loss > 0:
+        profit_factor = float(gross_profit / gross_loss)
+    return {
+        "win_days": int(len(wins)),
+        "loss_days": int(len(losses)),
+        "flat_days": flat_days,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "payoff_ratio": payoff_ratio,
+        "profit_factor": profit_factor,
+    }
+
+
 def build_cross_section_benchmark(labels: pd.Series) -> pd.Series:
     """Compute daily cross-sectional mean return as a common reference series."""
     aligned_labels = labels.dropna()
@@ -142,6 +169,7 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     max_drawdown = ((cum_returns / cum_returns.cummax()) - 1.0).min() if not cum_returns.empty else 0.0
     
     # Mimic Qlib's risk_analysis return structure
+    distribution_metrics = _compute_return_distribution_metrics(valid_returns)
     result = {
         "mean": {"risk": mean_ret},
         "std": {"risk": std_ret},
@@ -150,6 +178,10 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         "information_ratio": {"risk": info_ratio},
         "max_drawdown": {"risk": max_drawdown},
         "daily_win_rate": {"risk": float((valid_returns > 0).mean()) if not valid_returns.empty else 0.0},
+        "avg_win": {"risk": distribution_metrics["avg_win"]},
+        "avg_loss": {"risk": distribution_metrics["avg_loss"]},
+        "payoff_ratio": {"risk": distribution_metrics["payoff_ratio"]},
+        "profit_factor": {"risk": distribution_metrics["profit_factor"]},
     }
     
     # Add monthly returns calculation
@@ -297,6 +329,7 @@ def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame
             if "bench" in period_frame.columns
             else pd.Series(dtype=float)
         )
+        distribution_metrics = _compute_return_distribution_metrics(returns)
         period_rows.append(
             {
                 "period": _format_period_label(pd.DatetimeIndex(period_frame.index), freq),
@@ -312,6 +345,13 @@ def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame
                 if "turnover" in period_frame.columns
                 else np.nan,
                 "bench_return": float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan,
+                "win_days": int(distribution_metrics["win_days"]),
+                "loss_days": int(distribution_metrics["loss_days"]),
+                "flat_days": int(distribution_metrics["flat_days"]),
+                "avg_win": distribution_metrics["avg_win"],
+                "avg_loss": distribution_metrics["avg_loss"],
+                "payoff_ratio": distribution_metrics["payoff_ratio"],
+                "profit_factor": distribution_metrics["profit_factor"],
             }
         )
 
@@ -366,15 +406,23 @@ def print_metrics(
         print("\n" + "=" * 72)
         print(f"{period_label} Summary")
         print("=" * 72)
-        print(f"  {'Period':<22} {'Return':>10} {'WinRate':>10} {'MaxDD':>10} {'Turnover':>10} {'Days':>6}")
-        print(f"  {'-' * 22} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 10} {'-' * 6}")
+        print(
+            f"  {'Period':<22} {'Return':>10} {'WinRate':>10} {'Payoff':>8} "
+            f"{'MaxDD':>10} {'Turnover':>10} {'Days':>6}"
+        )
+        print(
+            f"  {'-' * 22} {'-' * 10} {'-' * 10} {'-' * 8} "
+            f"{'-' * 10} {'-' * 10} {'-' * 6}"
+        )
         for _, row in period_summary.iterrows():
             avg_turnover = row.get("avg_turnover")
             turnover_text = _format_pct(float(avg_turnover)) if pd.notna(avg_turnover) else "n/a"
+            payoff_text = _format_number(row.get("payoff_ratio"))
             print(
                 f"  {str(row['period']):<22} "
                 f"{_format_pct(float(row['return']), signed=True):>10} "
                 f"{_format_pct(float(row['win_rate'])):>10} "
+                f"{payoff_text:>8} "
                 f"{_format_pct(float(row['max_drawdown'])):>10} "
                 f"{turnover_text:>10} "
                 f"{int(row['days']):>6d}"
@@ -404,6 +452,11 @@ def print_metrics(
         _print_metric_line("MaxDD", _format_pct(_extract_metric(portfolio_metrics, "max_drawdown")))
         _print_metric_line("Daily win", _format_pct(_extract_metric(portfolio_metrics, "daily_win_rate")))
         _print_metric_line("Monthly win", _format_pct(_extract_metric(portfolio_metrics, "monthly_win_rate")))
+        print()
+        _print_metric_line("Avg win", _format_pct(_extract_metric(portfolio_metrics, "avg_win")))
+        _print_metric_line("Avg loss", _format_pct(_extract_metric(portfolio_metrics, "avg_loss")))
+        _print_metric_line("Payoff ratio", _format_number(_extract_metric(portfolio_metrics, "payoff_ratio")))
+        _print_metric_line("Profit factor", _format_number(_extract_metric(portfolio_metrics, "profit_factor")))
         turnover_mean = _extract_metric(portfolio_metrics, "turnover_mean")
         _print_metric_line("Avg turnover", _format_pct(turnover_mean) if turnover_mean is not None else "n/a")
 

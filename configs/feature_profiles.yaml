@@ -16,6 +16,12 @@ profiles:
   core_v3_techlite_pruned:
     path: configs/features/core_v3_techlite_pruned.yaml
 
+  core_v3_techlite_no_price_rank20:
+    path: configs/features/core_v3_techlite_no_price_rank20.yaml
+
+  core_v3_techlite_pruned_no_price_rank20:
+    path: configs/features/core_v3_techlite_pruned_no_price_rank20.yaml
+
   all_factors_full:
     path: configs/features/all_factors_full.yaml
 

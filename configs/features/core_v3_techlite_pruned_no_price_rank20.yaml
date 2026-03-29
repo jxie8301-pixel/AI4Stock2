@@ -1,0 +1,44 @@
+alpha: all_factors
+generation_space: full_factor_space
+factor_store_name: full_factor_space
+selected_columns:
+  - KMID
+  - KLEN
+  - MA5
+  - MA20
+  - MA60
+  - STD20
+  - STD60
+  - RSV5
+  - RSV20
+  - RSV60
+  - CNTD20
+  - SUMD20
+  - CORR20
+  - WVMA20
+  - LGBM_ret_20
+  - LGBM_ret_60
+  - LGBM_dist_ma20
+  - LGBM_dist_ma60
+  - LGBM_std_60
+  - LGBM_amihud_20
+  - LGBM_vol_ratio_20
+  - LGBM_ep_ttm
+  - LGBM_bp
+  - LGBM_log_mcap
+  - TEMP_ret_5
+  - TEMP_ret_20
+  - TEMP_ret_60
+  - TEMP_ret_120
+  - TEMP_std_20
+  - TEMP_std_60
+  - TEMP_volume_ratio_20
+  - TEMP_turnover_mean_20
+  - TEMP_high_gap_20
+  - TEMP_low_gap_20
+  - TECH_boll_pos_20_2
+  - TECH_aroon_osc_25
+  - TECH_adx_14
+  - TECH_trix_hist_15_9
+  - TECH_macd_hist_12_26_9
+  - TECH_mfi_14

@@ -7,7 +7,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pyarrow as pa
 import pyarrow.dataset as ds
 from tqdm import tqdm
 
@@ -45,26 +44,37 @@ def _load_dataset_frame(
     selected_columns: list[str],
     scan_filter,
     progress_desc: str | None,
+    allowed_symbols: set[str] | None = None,
 ) -> pd.DataFrame:
     dataset = ds.dataset(shards_dir, format="parquet")
     fragments = list(dataset.get_fragments(filter=scan_filter))
+    if allowed_symbols is not None:
+        fragments = [
+            fragment
+            for fragment in fragments
+            if "".join(ch for ch in Path(fragment.path).stem if ch.isdigit()) in allowed_symbols
+        ]
     if not fragments:
         return pd.DataFrame(columns=selected_columns)
 
-    tables: list[pa.Table] = []
-    iterator = fragments
+    scan_dataset = dataset
+    if allowed_symbols is not None:
+        fragment_paths = [fragment.path for fragment in fragments]
+        scan_dataset = ds.dataset(fragment_paths, format="parquet")
+
     if progress_desc:
-        iterator = tqdm(fragments, desc=progress_desc, total=len(fragments), unit="shard")
+        print(f"{progress_desc}: reading {len(fragments)} shard(s) with pyarrow dataset scan...")
 
-    for fragment in iterator:
-        table = fragment.to_table(columns=selected_columns, filter=scan_filter)
-        if table.num_rows > 0:
-            tables.append(table)
-
-    if not tables:
+    table = scan_dataset.to_table(
+        columns=selected_columns,
+        filter=scan_filter,
+        use_threads=True,
+        batch_readahead=32,
+        fragment_readahead=16,
+    )
+    if table.num_rows == 0:
         return pd.DataFrame(columns=selected_columns)
-
-    return pa.concat_tables(tables).to_pandas()
+    return table.to_pandas()
 
 
 def _filter_available_dates_by_universe(
@@ -97,6 +107,10 @@ def load_factor_frame(
 ) -> pd.DataFrame:
     shards_dir = _get_shards_dir(store_dir)
     selected_columns = ["date", "symbol", "label", *columns]
+    allowed_symbols = None
+    if universe_name != "all":
+        universe_table = load_universe_table(universe_name, universe_dir=universe_dir)
+        allowed_symbols = set(universe_table["symbol"].astype(str))
 
     filters = []
     if date_start is not None:
@@ -115,6 +129,7 @@ def load_factor_frame(
         selected_columns=selected_columns,
         scan_filter=scan_filter,
         progress_desc=progress_desc,
+        allowed_symbols=allowed_symbols,
     )
     if frame.empty:
         return frame

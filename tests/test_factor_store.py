@@ -42,6 +42,46 @@ class FactorStoreTest(unittest.TestCase):
             self.assertEqual(len(loaded), 2)
             self.assertEqual(loaded["F2"].tolist(), [20.0, 30.0])
 
+    def test_load_factor_frame_filters_universe_symbols(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            shards = root / "shards"
+            universe_dir = root / "universes"
+            shards.mkdir(parents=True, exist_ok=True)
+            universe_dir.mkdir(parents=True, exist_ok=True)
+            with open(root / "meta.json", "w", encoding="utf-8") as f:
+                json.dump({"feature_names": ["F1"]}, f)
+
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02"]),
+                    "symbol": ["000001"],
+                    "label": [0.1],
+                    "F1": [1.0],
+                }
+            ).to_parquet(shards / "000001.parquet", index=False)
+
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02"]),
+                    "symbol": ["000002"],
+                    "label": [0.2],
+                    "F1": [2.0],
+                }
+            ).to_parquet(shards / "000002.parquet", index=False)
+
+            (universe_dir / "demo.txt").write_text("000001\t2024-01-01\t2024-12-31\n", encoding="utf-8")
+
+            loaded = load_factor_frame(
+                store_dir=root,
+                columns=["F1"],
+                universe_name="demo",
+                universe_dir=universe_dir,
+            )
+
+            self.assertEqual(loaded["symbol"].tolist(), ["000001"])
+            self.assertEqual(loaded["F1"].tolist(), [1.0])
+
     def test_load_available_dates_returns_unique_sorted_dates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

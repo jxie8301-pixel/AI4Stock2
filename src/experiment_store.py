@@ -138,7 +138,7 @@ def prepare_run_store(
     run_id = "__".join(run_id_parts)
 
     run_dir = root_dir / backend / pipeline / model_name / run_id
-    artifacts_dir = run_dir / "artifacts"
+    artifacts_dir = run_dir
     models_dir = run_dir / "models"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -174,7 +174,7 @@ def finalize_run_store(
         return None
 
     results_dir = Path(results_dir)
-    if results_dir.exists():
+    if results_dir.exists() and results_dir.resolve() != store.artifacts_dir.resolve():
         _copy_tree_contents(results_dir, store.artifacts_dir, exclude_names={"models"})
 
     archived_model_path = None
@@ -186,8 +186,10 @@ def finalize_run_store(
     archived_models_dir = None
     if models_dir:
         source_models_dir = Path(models_dir)
-        if source_models_dir.exists():
+        if source_models_dir.exists() and source_models_dir.resolve() != store.models_dir.resolve():
             _copy_tree_contents(source_models_dir, store.models_dir)
+            archived_models_dir = store.models_dir
+        elif source_models_dir.exists():
             archived_models_dir = store.models_dir
 
     config_snapshot_path = store.run_dir / "config_snapshot.yaml"

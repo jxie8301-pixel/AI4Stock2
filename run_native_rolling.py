@@ -44,14 +44,6 @@ def run_rolling_pipeline():
     if args.n_drop is not None:
         cfg["strategy"]["n_drop"] = args.n_drop
     
-    results_dir = Path("results") / f"native_rolling_{args.model}"
-    models_dir = results_dir / "models"
-    importance_dir = results_dir / "feature_importance"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    if args.save_models or args.load_models:
-        models_dir.mkdir(parents=True, exist_ok=True)
-    if args.model == "lgbm":
-        importance_dir.mkdir(parents=True, exist_ok=True)
     run_store = prepare_run_store(
         cfg,
         args,
@@ -60,6 +52,18 @@ def run_rolling_pipeline():
         model_name=args.model,
         model_ext=".pt" if args.model != "lgbm" else ".pkl",
     )
+    if run_store.enabled and run_store.run_dir:
+        results_dir = run_store.run_dir
+        models_dir = run_store.models_dir or (results_dir / "models")
+    else:
+        results_dir = Path("results") / f"native_rolling_{args.model}"
+        models_dir = results_dir / "models"
+    importance_dir = results_dir / "feature_importance"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    if args.save_models or args.load_models:
+        models_dir.mkdir(parents=True, exist_ok=True)
+    if args.model == "lgbm":
+        importance_dir.mkdir(parents=True, exist_ok=True)
         
     print(f"\n>>> Running Native Rolling Pipeline (Backend: NATIVE) <<<")
     
@@ -321,10 +325,6 @@ def run_rolling_pipeline():
     final_predictions = pd.concat(all_predictions).sort_index()
     
     # ── 6. Global Evaluation ────────────────────────
-    print("\n" + "="*50)
-    print("GLOBAL ROLLING EVALUATION")
-    print("="*50)
-    
     # Get all global labels for test period based on the universe
     global_test_mask = (dt_index >= test_start) & (dt_index <= test_end)
     global_dates = dt_index[global_test_mask]
@@ -343,10 +343,14 @@ def run_rolling_pipeline():
     
     from src.evaluate import compute_signal_metrics, print_metrics
     signal_metrics, daily_ic = compute_signal_metrics(aligned_preds, aligned_labels)
-    print_metrics(signal_metrics)
     
     # ── 7. Global Backtest ────────────────────────
-    print(f"\n[Global Backtest] Rebalance Freq: {args.rebalance_freq} days")
+    print(
+        "\n[Backtest] "
+        f"topk={cfg['strategy']['topk']}, "
+        f"n_drop={cfg['strategy']['n_drop']}, "
+        f"rebalance={args.rebalance_freq}d"
+    )
     from src.native_backtest import run_native_backtest
     backtest_report = run_native_backtest(
         preds=final_predictions,
@@ -364,13 +368,27 @@ def run_rolling_pipeline():
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
     
-    from src.evaluate import compute_portfolio_metrics, plot_cumulative_return, plot_drawdown, plot_monthly_heatmap, save_monthly_report
+    from src.evaluate import (
+        build_period_summary,
+        compute_portfolio_metrics,
+        plot_cumulative_return,
+        plot_drawdown,
+        plot_monthly_heatmap,
+        save_monthly_report,
+        save_period_summary,
+    )
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
+    monthly_summary = build_period_summary(metric_report, freq="ME")
+    biweekly_summary = build_period_summary(metric_report, freq="2W-FRI")
     
     plot_cumulative_return(metric_report, save_path=str(results_dir / "native_cumulative_return.png"))
     plot_drawdown(metric_report, save_path=str(results_dir / "native_drawdown.png"))
     plot_monthly_heatmap(metric_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
     save_monthly_report(metric_report, save_path=str(results_dir / "native_monthly_report.csv"))
+    metric_report.to_csv(results_dir / "native_daily_report.csv", index=True)
+    save_period_summary(monthly_summary, results_dir / "native_monthly_summary.csv")
+    save_period_summary(biweekly_summary, results_dir / "native_biweekly_summary.csv")
+    print(f"Artifacts saved under: {results_dir}")
 
     aggregated_importance_path = None
     if feature_importance_frames:
@@ -383,9 +401,9 @@ def run_rolling_pipeline():
         )
         aggregated_importance_path = results_dir / "feature_importance_gain_mean.csv"
         aggregated_importance.to_csv(aggregated_importance_path, index=False)
-        print(f"Aggregated feature importance saved: {aggregated_importance_path}")
+        print(f"Feature importance saved: {aggregated_importance_path}")
     
-    print_metrics(signal_metrics, portfolio_results)
+    print_metrics(signal_metrics, portfolio_results, period_summary=monthly_summary, period_label="Monthly")
     
     def sanitize_dict_keys(d):
         if not isinstance(d, dict): return d

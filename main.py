@@ -91,10 +91,12 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
     from src.evaluate import (
         align_prediction_label_pairs,
+        build_period_summary,
         build_cross_section_benchmark,
         compute_signal_metrics,
         print_metrics,
         plot_ic_series,
+        save_period_summary,
     )
     
     factor_store_dir = get_native_factor_store_dir(cfg)
@@ -307,6 +309,12 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     
     rebalance_freq = getattr(args, 'rebalance_freq', None) or cfg.get("backtest", {}).get("rebalance_freq", 1)
 
+    print(
+        "\n[Backtest] "
+        f"topk={cfg['strategy']['topk']}, "
+        f"n_drop={cfg['strategy']['n_drop']}, "
+        f"rebalance={rebalance_freq}d"
+    )
     backtest_report = run_native_backtest(
         preds=pred_series,
         labels=label_series,
@@ -327,12 +335,18 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     bench_series = build_cross_section_benchmark(label_series)
     metric_report["bench"] = bench_series.reindex(metric_report.index).fillna(0.0).to_numpy()
+    monthly_summary = build_period_summary(metric_report, freq="ME")
+    biweekly_summary = build_period_summary(metric_report, freq="2W-FRI")
     
     # Generate native-specific plots/reports
     plot_cumulative_return(metric_report, save_path=str(results_dir / "native_cumulative_return.png"))
     plot_drawdown(metric_report, save_path=str(results_dir / "native_drawdown.png"))
     plot_monthly_heatmap(metric_report, save_path=str(results_dir / "native_monthly_heatmap.png"))
     save_monthly_report(metric_report, save_path=str(results_dir / "native_monthly_report.csv"))
+    metric_report.to_csv(results_dir / "native_daily_report.csv", index=True)
+    save_period_summary(monthly_summary, results_dir / "native_monthly_summary.csv")
+    save_period_summary(biweekly_summary, results_dir / "native_biweekly_summary.csv")
+    print(f"Artifacts saved under: {results_dir}")
 
     _maybe_export_backtest_trace(
         args=args,
@@ -356,7 +370,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         )[1],
     )
     
-    print_metrics(signal_metrics, portfolio_results)
+    print_metrics(signal_metrics, portfolio_results, period_summary=monthly_summary, period_label="Monthly")
     
     # JSON keys must be strings, convert any Timestamp keys (e.g. from monthly returns) to strings
     def sanitize_dict_keys(d):
@@ -411,8 +425,6 @@ def main():
 
     backend = "native"
     model_name = cfg["model"]["name"]
-    results_dir = Path("results") / backend / model_name
-    results_dir.mkdir(parents=True, exist_ok=True)
     model_ext = ".pt" if backend == "native" and model_name != "lgbm" else ".pkl"
     run_store = prepare_run_store(
         cfg,
@@ -422,6 +434,11 @@ def main():
         model_name=model_name,
         model_ext=model_ext,
     )
+    if run_store.enabled and run_store.run_dir:
+        results_dir = run_store.run_dir
+    else:
+        results_dir = Path("results") / backend / model_name
+    results_dir.mkdir(parents=True, exist_ok=True)
     if run_store.enabled and not args.save_model and not args.load_model:
         args.save_model = str(run_store.default_model_path)
         print(f"Local model store path: {args.save_model}")

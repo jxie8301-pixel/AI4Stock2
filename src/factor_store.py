@@ -12,7 +12,7 @@ import pyarrow.dataset as ds
 from tqdm import tqdm
 
 from src.label_utils import sanitize_label_series
-from src.native_universe import build_universe_frame_mask
+from src.native_universe import build_universe_frame_mask, load_universe_table
 
 
 DEFAULT_FACTOR_STORE_DIR = Path("data/factor_store/full_factor_space")
@@ -65,6 +65,23 @@ def _load_dataset_frame(
         return pd.DataFrame(columns=selected_columns)
 
     return pa.concat_tables(tables).to_pandas()
+
+
+def _filter_available_dates_by_universe(
+    dates: pd.DatetimeIndex,
+    *,
+    universe_name: str,
+    universe_dir: str | Path,
+) -> pd.DatetimeIndex:
+    if universe_name == "all" or dates.empty:
+        return dates
+
+    table = load_universe_table(universe_name, universe_dir=universe_dir)
+    mask = pd.Series(False, index=pd.RangeIndex(len(dates)))
+    dates_series = pd.Series(dates)
+    for _, row in table.iterrows():
+        mask |= (dates_series >= row["start_date"]) & (dates_series <= row["end_date"])
+    return pd.DatetimeIndex(dates_series.loc[mask].drop_duplicates().sort_values())
 
 
 def load_factor_frame(
@@ -130,6 +147,20 @@ def load_available_dates(
     universe_dir: str | Path = "data/universes",
     progress_desc: str | None = None,
 ) -> pd.DatetimeIndex:
+    meta = load_factor_store_metadata(store_dir)
+    cached_dates = meta.get("available_dates")
+    if cached_dates:
+        dates = pd.DatetimeIndex(pd.to_datetime(cached_dates))
+        if date_start is not None:
+            dates = dates[dates >= pd.Timestamp(date_start)]
+        if date_end is not None:
+            dates = dates[dates <= pd.Timestamp(date_end)]
+        return _filter_available_dates_by_universe(
+            dates,
+            universe_name=universe_name,
+            universe_dir=universe_dir,
+        )
+
     frame = load_factor_frame(
         store_dir=store_dir,
         columns=[],

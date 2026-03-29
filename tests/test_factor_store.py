@@ -61,6 +61,41 @@ class FactorStoreTest(unittest.TestCase):
             dates = load_available_dates(store_dir=root)
             self.assertEqual([str(x.date()) for x in dates], ["2024-01-02", "2024-01-03"])
 
+    def test_load_available_dates_prefers_cached_meta_calendar(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            (root / "shards").mkdir(parents=True, exist_ok=True)
+            with open(root / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "feature_names": [],
+                        "available_dates": ["2024-01-02", "2024-01-03", "2024-01-04"],
+                    },
+                    f,
+                )
+
+            dates = load_available_dates(store_dir=root, date_start="2024-01-03", date_end="2024-01-04")
+            self.assertEqual([str(x.date()) for x in dates], ["2024-01-03", "2024-01-04"])
+
+    def test_load_available_dates_cached_meta_can_filter_universe_ranges(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            universe_dir = root / "universes"
+            universe_dir.mkdir(parents=True, exist_ok=True)
+            (root / "shards").mkdir(parents=True, exist_ok=True)
+            (universe_dir / "demo.txt").write_text("000001\t2024-01-03\t2024-01-03\n", encoding="utf-8")
+            with open(root / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "feature_names": [],
+                        "available_dates": ["2024-01-02", "2024-01-03", "2024-01-04"],
+                    },
+                    f,
+                )
+
+            dates = load_available_dates(store_dir=root, universe_name="demo", universe_dir=universe_dir)
+            self.assertEqual([str(x.date()) for x in dates], ["2024-01-03"])
+
     def test_load_factor_store_metadata_reads_meta_json(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -18,6 +18,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from scipy.stats import percentileofscore
 from tqdm import tqdm
@@ -1364,6 +1365,15 @@ def _collect_shard_metas(shard_meta_root: Path) -> list[dict[str, Any]]:
     return shard_metas
 
 
+def _compute_available_dates_from_shards(shard_root: Path) -> list[str]:
+    dataset = ds.dataset(shard_root, format="parquet")
+    table = dataset.to_table(columns=["date"])
+    if table.num_rows == 0:
+        return []
+    dates = pd.to_datetime(table.column("date").to_pandas()).drop_duplicates().sort_values()
+    return [str(pd.Timestamp(value).date()) for value in dates]
+
+
 def generate_factor_store(
     parquet_dir: str = "data/processed/combined",
     output_dir: str = DEFAULT_FULL_FACTOR_STORE_DIR,
@@ -1482,6 +1492,7 @@ def generate_factor_store(
         "label": "open_t+2 / open_t+1 - 1",
         "factor_store_dir": str(out_root),
         "shards_dir": str(shard_root),
+        "available_dates": _compute_available_dates_from_shards(shard_root),
         "incremental": {
             "enabled": incremental,
             "shard_dir": str(shard_root),

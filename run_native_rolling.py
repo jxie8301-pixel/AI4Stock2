@@ -59,11 +59,13 @@ def run_rolling_pipeline():
         results_dir = Path("results") / f"native_rolling_{args.model}"
         models_dir = results_dir / "models"
     importance_dir = results_dir / "feature_importance"
+    training_history_dir = results_dir / "training_history"
     results_dir.mkdir(parents=True, exist_ok=True)
     if args.save_models or args.load_models:
         models_dir.mkdir(parents=True, exist_ok=True)
     if args.model == "lgbm":
         importance_dir.mkdir(parents=True, exist_ok=True)
+        training_history_dir.mkdir(parents=True, exist_ok=True)
         
     print(f"\n>>> Running Native Rolling Pipeline (Backend: NATIVE) <<<")
     
@@ -118,6 +120,7 @@ def run_rolling_pipeline():
     rolling_steps = range(0, len(test_calendar), args.horizon)
     all_predictions = []
     feature_importance_frames = []
+    training_summary_records = []
     finite_feature_mask = compute_finite_feature_mask_frame(factor_frame, selected_feature_names)
     
     print(f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} with {args.horizon}-day steps.")
@@ -182,11 +185,13 @@ def run_rolling_pipeline():
             
             model_path = models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
             model = NativeLGBM(**get_lgbm_config(cfg))
+            loaded_model = False
             
             if args.load_models and model_path.exists():
                 print(f"    Loading pre-trained model from {model_path}...")
                 with open(model_path, "rb") as f:
                     model = pickle.load(f)
+                loaded_model = True
             else:
                 print("    Training LightGBM...")
                 model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
@@ -199,6 +204,24 @@ def run_rolling_pipeline():
             importance_df = model.get_feature_importance_frame("gain").rename(columns={"gain": "importance_gain"})
             importance_df["window_start"] = current_test_start.strftime("%Y-%m-%d")
             feature_importance_frames.append(importance_df)
+
+            history_path = training_history_dir / f"training_history_{current_test_start.strftime('%Y-%m-%d')}.csv"
+            saved_history_path = model.save_training_history(history_path)
+            training_summary = {
+                "window_start": current_test_start.strftime("%Y-%m-%d"),
+                "window_end": current_test_end.strftime("%Y-%m-%d"),
+                "train_start": train_start.strftime("%Y-%m-%d"),
+                "train_end": train_end.strftime("%Y-%m-%d"),
+                "valid_start": valid_start.strftime("%Y-%m-%d"),
+                "valid_end": valid_end.strftime("%Y-%m-%d"),
+                "train_rows": int(len(X_train_df)),
+                "valid_rows": int(len(X_valid_df)),
+                "feature_count": int(len(selected_feature_names)),
+                "loaded_model": bool(loaded_model),
+                "training_history_path": str(saved_history_path) if saved_history_path else "",
+                **model.get_training_summary(),
+            }
+            training_summary_records.append(training_summary)
             
             test_valid_mask = test_mask & finite_feature_mask
             if not np.any(test_valid_mask):
@@ -391,6 +414,7 @@ def run_rolling_pipeline():
     print(f"Artifacts saved under: {results_dir}")
 
     aggregated_importance_path = None
+    training_summary_path = None
     if feature_importance_frames:
         feature_importance_all = pd.concat(feature_importance_frames, ignore_index=True)
         aggregated_importance = (
@@ -402,6 +426,12 @@ def run_rolling_pipeline():
         aggregated_importance_path = results_dir / "feature_importance_gain_mean.csv"
         aggregated_importance.to_csv(aggregated_importance_path, index=False)
         print(f"Feature importance saved: {aggregated_importance_path}")
+
+    if training_summary_records:
+        training_summary_df = pd.DataFrame(training_summary_records)
+        training_summary_path = results_dir / "training_summary.csv"
+        training_summary_df.to_csv(training_summary_path, index=False)
+        print(f"Training summary saved: {training_summary_path}")
     
     print_metrics(signal_metrics, portfolio_results, period_summary=monthly_summary, period_label="Monthly")
     
@@ -431,6 +461,7 @@ def run_rolling_pipeline():
             "test_end": str(test_end.date()),
             "selected_features": selected_feature_names,
             "feature_importance_path": str(aggregated_importance_path) if aggregated_importance_path else "",
+            "training_summary_path": str(training_summary_path) if training_summary_path else "",
         },
     )
     if manifest_path:

@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.evaluate import align_prediction_label_pairs, compute_portfolio_metrics
+from src.evaluate import align_prediction_label_pairs, build_period_summary, compute_portfolio_metrics
 from src.label_utils import sanitize_label_array, sanitize_label_series
 from src.model_config import get_lgbm_config
 from src.models.pure_lightgbm import NativeLGBM, _daily_ic_metric
@@ -103,6 +103,7 @@ class NativeModelMetricsTest(unittest.TestCase):
         report = pd.DataFrame(
             {
                 "return": [1.0, -0.5],
+                "turnover": [0.2, 0.4],
                 "bench": [0.0, 0.0],
             },
             index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
@@ -116,6 +117,14 @@ class NativeModelMetricsTest(unittest.TestCase):
             np.mean([1.0, -0.5]) * 242,
             places=8,
         )
+        self.assertAlmostEqual(
+            portfolio_metrics["annualized_volatility"]["risk"],
+            np.std([1.0, -0.5], ddof=1) * np.sqrt(242),
+            places=8,
+        )
+        self.assertAlmostEqual(portfolio_metrics["daily_win_rate"]["risk"], 0.5, places=8)
+        self.assertAlmostEqual(portfolio_metrics["monthly_win_rate"]["risk"], 0.0, places=8)
+        self.assertAlmostEqual(portfolio_metrics["turnover_mean"]["risk"], 0.3, places=8)
 
     def test_compute_portfolio_metrics_converts_qlib_gross_return_to_net(self):
         report = pd.DataFrame(
@@ -140,6 +149,26 @@ class NativeModelMetricsTest(unittest.TestCase):
             np.mean([0.015, 0.008]) * 242,
             places=8,
         )
+        self.assertAlmostEqual(portfolio_metrics["daily_win_rate"]["risk"], 1.0, places=8)
+        self.assertAlmostEqual(portfolio_metrics["monthly_win_rate"]["risk"], 1.0, places=8)
+
+    def test_build_period_summary_includes_win_rate_and_turnover(self):
+        report = pd.DataFrame(
+            {
+                "return": [0.10, -0.05, 0.02],
+                "turnover": [0.01, 0.03, 0.02],
+                "bench": [0.00, 0.00, 0.01],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-02-01"]),
+        )
+
+        summary = build_period_summary(report, freq="ME")
+
+        self.assertEqual(summary["period"].tolist(), ["2024-01", "2024-02"])
+        self.assertAlmostEqual(summary.iloc[0]["return"], (1.10 * 0.95) - 1.0, places=8)
+        self.assertAlmostEqual(summary.iloc[0]["win_rate"], 0.5, places=8)
+        self.assertAlmostEqual(summary.iloc[0]["avg_turnover"], 0.02, places=8)
+        self.assertEqual(int(summary.iloc[0]["days"]), 2)
 
     def test_train_epoch_returns_zero_for_empty_loader(self):
         trainer = NativeLSTMTrainer(d_feat=3, hidden_size=4, num_layers=1, device="cpu")

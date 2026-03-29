@@ -103,11 +103,6 @@ def run_native_backtest(
     open_rate = float(cost_buy) + float(slippage)
     close_rate = float(cost_sell) + float(slippage)
 
-    print(
-        "[*] Starting Native Backtest "
-        f"(Top-{topk}, n_drop={n_drop}, Rebalance: {rebalance_freq} days)..."
-    )
-
     common_idx = preds.index.intersection(labels.index)
     preds = preds.loc[common_idx].sort_index()
     labels = sanitize_label_series(labels.loc[common_idx].sort_index())
@@ -252,21 +247,6 @@ def run_native_backtest(
     report = pd.DataFrame.from_records(records).set_index("datetime")
     report["cum_gross_return"] = (1.0 + report["gross_return"]).cumprod()
     report["cum_net_return"] = (1.0 + report["net_return"]).cumprod()
-
-    ann_factor = 242
-    ann_ret = report["net_return"].mean() * ann_factor
-    ann_vol = report["net_return"].std() * np.sqrt(ann_factor)
-    if pd.isna(ann_vol):
-        ann_vol = 0.0
-    sharpe = ann_ret / (ann_vol + 1e-8) if ann_vol > 0 else 0.0
-    max_drawdown = (report["cum_net_return"] / report["cum_net_return"].cummax() - 1.0).min()
-
-    print("\n[Backtest Results]")
-    print(f"Annualized Return: {ann_ret:.2%}")
-    print(f"Annualized Vol  : {ann_vol:.2%}")
-    print(f"Sharpe Ratio    : {sharpe:.4f}")
-    print(f"Max Drawdown    : {max_drawdown:.2%}")
-    print(f"Avg Daily Turnover: {report['turnover'].mean():.2%}")
 
     if not return_trace:
         return report

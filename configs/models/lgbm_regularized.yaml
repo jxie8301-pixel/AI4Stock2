@@ -6,17 +6,17 @@ model:
 lgbm:
   loss: huber
   learning_rate: 0.05
-  num_boost_round: 1000
-  early_stop: 10
+  num_boost_round: 800
+  early_stop: 20
   early_stopping_min_delta: 0.0
   log_evaluation_period: 50
-  colsample_bytree: 0.8879
-  subsample: 0.8789
+  colsample_bytree: 0.75
+  subsample: 0.75
   subsample_freq: 1
-  lambda_l1: 1.0
-  lambda_l2: 1.0
-  max_depth: 8
-  num_leaves: 63
-  min_data_in_leaf: 100
+  lambda_l1: 2.0
+  lambda_l2: 4.0
+  max_depth: 6
+  num_leaves: 31
+  min_data_in_leaf: 200
   num_threads: 8
   seed: 42

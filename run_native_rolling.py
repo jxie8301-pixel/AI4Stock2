@@ -9,6 +9,7 @@ import torch
 import numpy as np
 
 from src.config_loader import load_config
+from src.config_validation import validate_training_config
 from src.experiment_store import (
     finalize_run_store,
     prepare_run_store,
@@ -18,17 +19,21 @@ from src.experiment_store import (
 from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask_frame, resolve_selected_features
-from src.label_utils import get_label_column_name, resolve_label_horizon, sanitize_label_series
+from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
 
 def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
-    parser.add_argument("--model", default="lgbm", help="Model name")
-    parser.add_argument("--profile", help="Override features.profile and use the corresponding factor-store/profile")
+    parser.add_argument("--model", default=None, help="Override model name")
+    parser.add_argument("--experiment-profile", help="Named experiment profile under configs/experiments/")
+    parser.add_argument("--feature-profile", help="Override features.profile for this run")
+    parser.add_argument("--model-profile", help="Override model.profile for this run")
+    parser.add_argument("--profile", help=argparse.SUPPRESS)
     parser.add_argument("--retrain-step", type=int, help="Rolling retrain step in trading days. If omitted, use config value.")
-    parser.add_argument("--horizon", type=int, help="Deprecated alias for --retrain-step.")
-    parser.add_argument("--label-horizon", type=int, help="Prediction label horizon in trading days. If omitted, use config value.")
+    parser.add_argument("--horizon", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--signal-horizon", type=int, help="Prediction signal horizon in trading days. If omitted, use experiment profile.")
+    parser.add_argument("--label-horizon", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--train-days", type=int, help="Training window length in trading days. If omitted, use config value.")
     parser.add_argument("--valid-days", type=int, help="Validation window length in trading days. If omitted, use config value.")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id")
@@ -42,62 +47,76 @@ def run_rolling_pipeline():
     parser.add_argument("--disable-local-store", action="store_true", help="Disable automatic local experiment/model storage")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
-    cfg["model"]["name"] = args.model
-    if args.retrain_step is not None and args.horizon is not None and args.retrain_step != args.horizon:
-        parser.error("--retrain-step and --horizon refer to the same parameter; use one value.")
-    if args.retrain_step is None and args.horizon is not None:
-        args.retrain_step = args.horizon
-    if args.profile:
-        cfg.setdefault("features", {})
-        cfg["features"]["profile"] = args.profile
-    if args.topk is not None:
-        cfg["strategy"]["topk"] = args.topk
-    if args.n_drop is not None:
-        cfg["strategy"]["n_drop"] = args.n_drop
-    if args.rebalance_freq is not None:
-        cfg.setdefault("backtest", {})
-        cfg["backtest"]["rebalance_freq"] = args.rebalance_freq
-    if args.label_horizon is not None:
-        cfg.setdefault("label", {})
-        cfg["label"]["horizon"] = int(args.label_horizon)
-    if args.retrain_step is not None:
-        cfg.setdefault("rolling", {})
-        cfg["rolling"]["retrain_step"] = int(args.retrain_step)
-    if args.train_days is not None:
-        cfg.setdefault("rolling", {})
-        cfg["rolling"]["train_days"] = int(args.train_days)
-    if args.valid_days is not None:
-        cfg.setdefault("rolling", {})
-        cfg["rolling"]["valid_days"] = int(args.valid_days)
+    try:
+        cfg = load_config(
+            args.config,
+            experiment_profile_name=args.experiment_profile,
+            model_profile_name=args.model_profile,
+        )
+        if args.model:
+            cfg["model"]["name"] = args.model
+        if args.retrain_step is not None and args.horizon is not None and args.retrain_step != args.horizon:
+            parser.error("--retrain-step and --horizon refer to the same parameter; use one value.")
+        if args.retrain_step is None and args.horizon is not None:
+            args.retrain_step = args.horizon
+        feature_profile_override = args.feature_profile or args.profile
+        if feature_profile_override:
+            cfg.setdefault("features", {})
+            cfg["features"]["profile"] = feature_profile_override
+        if args.topk is not None:
+            cfg["strategy"]["topk"] = args.topk
+        if args.n_drop is not None:
+            cfg["strategy"]["n_drop"] = args.n_drop
+        if args.rebalance_freq is not None:
+            cfg.setdefault("backtest", {})
+            cfg["backtest"]["rebalance_freq"] = args.rebalance_freq
+        signal_horizon_override = args.signal_horizon
+        if signal_horizon_override is None:
+            signal_horizon_override = args.label_horizon
+        if signal_horizon_override is not None:
+            cfg.setdefault("label", {})
+            cfg["label"]["signal_horizon"] = int(signal_horizon_override)
+        if args.retrain_step is not None:
+            cfg.setdefault("rolling", {})
+            cfg["rolling"]["retrain_step"] = int(args.retrain_step)
+        if args.train_days is not None:
+            cfg.setdefault("rolling", {})
+            cfg["rolling"]["train_days"] = int(args.train_days)
+        if args.valid_days is not None:
+            cfg.setdefault("rolling", {})
+            cfg["rolling"]["valid_days"] = int(args.valid_days)
+        validate_training_config(cfg, check_paths=True)
+    except ValueError as exc:
+        parser.error(str(exc))
     retrain_step = int(resolve_retrain_step(cfg, args))
     train_days = int(cfg.get("rolling", {}).get("train_days", args.train_days or 242))
     valid_days = int(cfg.get("rolling", {}).get("valid_days", args.valid_days or 10))
-    label_horizon = int(resolve_label_horizon(cfg))
-    label_column = get_label_column_name(label_horizon)
+    signal_horizon = int(resolve_signal_horizon(cfg))
+    label_column = get_label_column_name(signal_horizon)
     backtest_label_column = get_label_column_name(1)
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
+    model_name = cfg["model"]["name"]
     
     run_store = prepare_run_store(
         cfg,
         args,
         backend="native",
         pipeline="rolling",
-        model_name=args.model,
-        model_ext=".pt" if args.model != "lgbm" else ".pkl",
+        model_name=model_name,
+        model_ext=".pt" if model_name != "lgbm" else ".pkl",
     )
     if run_store.enabled and run_store.run_dir:
         results_dir = run_store.run_dir
         models_dir = run_store.models_dir or (results_dir / "models")
     else:
-        results_dir = Path("results") / f"native_rolling_{args.model}"
+        results_dir = Path("results") / f"native_rolling_{model_name}"
         models_dir = results_dir / "models"
     importance_dir = results_dir / "feature_importance"
     training_history_dir = results_dir / "training_history"
     results_dir.mkdir(parents=True, exist_ok=True)
     if args.save_models or args.load_models:
         models_dir.mkdir(parents=True, exist_ok=True)
-    if args.model == "lgbm":
+    if model_name == "lgbm":
         importance_dir.mkdir(parents=True, exist_ok=True)
         training_history_dir.mkdir(parents=True, exist_ok=True)
         
@@ -164,7 +183,7 @@ def run_rolling_pipeline():
     
     print(
         f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} "
-        f"| retrain_step={retrain_step}d | label_horizon={label_horizon}d | rebalance={rebalance_freq}d"
+        f"| retrain_step={retrain_step}d | signal_horizon={signal_horizon}d | rebalance={rebalance_freq}d"
     )
 
     from torch.utils.data import DataLoader
@@ -201,7 +220,7 @@ def run_rolling_pipeline():
         valid_mask = (dt_index >= valid_start) & (dt_index <= valid_end)
         test_mask  = (dt_index >= current_test_start)  & (dt_index <= current_test_end)
         
-        if args.model == "lgbm":
+        if model_name == "lgbm":
             from src.models.pure_lightgbm import NativeLGBM
             import pickle
             
@@ -256,7 +275,7 @@ def run_rolling_pipeline():
                 "train_end": train_end.strftime("%Y-%m-%d"),
                 "valid_start": valid_start.strftime("%Y-%m-%d"),
                 "valid_end": valid_end.strftime("%Y-%m-%d"),
-                "label_horizon": int(label_horizon),
+                "signal_horizon": int(signal_horizon),
                 "train_rows": int(len(X_train_df)),
                 "valid_rows": int(len(X_valid_df)),
                 "feature_count": int(len(selected_feature_names)),
@@ -420,7 +439,7 @@ def run_rolling_pipeline():
         f"topk={cfg['strategy']['topk']}, "
         f"n_drop={cfg['strategy']['n_drop']}, "
         f"rebalance={rebalance_freq}d, "
-        f"signal_label={label_horizon}d, "
+        f"signal_label={signal_horizon}d, "
         "backtest_label=1d"
     )
     from src.native_backtest import run_native_backtest
@@ -497,15 +516,14 @@ def run_rolling_pipeline():
         args=args,
         backend="native",
         pipeline="rolling",
-        model_name=args.model,
+        model_name=model_name,
         results_dir=results_dir,
         signal_metrics=signal_metrics,
         portfolio_metrics=sanitize_dict_keys(portfolio_results),
         models_dir=models_dir if (args.save_models or args.load_models) else None,
         extra_context={
             "retrain_step": retrain_step,
-            "label_horizon": label_horizon,
-            "horizon": retrain_step,
+            "signal_horizon": signal_horizon,
             "train_days": train_days,
             "valid_days": valid_days,
             "test_start": str(test_start.date()),

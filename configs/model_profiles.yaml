@@ -1,0 +1,14 @@
+default_profile: lgbm_default
+
+profiles:
+  lgbm_default:
+    path: configs/models/lgbm_default.yaml
+
+  lgbm_fast:
+    path: configs/models/lgbm_fast.yaml
+
+  lgbm_regularized:
+    path: configs/models/lgbm_regularized.yaml
+
+  lstm_baseline:
+    path: configs/models/lstm_baseline.yaml

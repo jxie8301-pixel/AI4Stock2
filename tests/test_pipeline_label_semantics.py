@@ -69,7 +69,7 @@ class PipelineLabelSemanticsTest(unittest.TestCase):
         cfg = {
             "features": {"lookback": 2},
             "model": {"batch_size": 2},
-            "label": {"horizon": 10},
+            "label": {"signal_horizon": 10},
             "time": {
                 "train": ["2024-01-02", "2024-01-02"],
                 "valid": ["2024-01-03", "2024-01-03"],

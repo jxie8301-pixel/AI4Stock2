@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 
-from src.label_utils import DEFAULT_LABEL_HORIZON, resolve_label_horizon
+from src.label_utils import DEFAULT_SIGNAL_HORIZON, resolve_signal_horizon
 
 
 SUMMARY_FIELDS = [
@@ -22,6 +22,8 @@ SUMMARY_FIELDS = [
     "backend",
     "pipeline",
     "model",
+    "experiment_profile",
+    "model_profile",
     "run_tag",
     "feature_profile",
     "universe",
@@ -29,8 +31,7 @@ SUMMARY_FIELDS = [
     "n_drop",
     "rebalance_freq",
     "retrain_step",
-    "label_horizon",
-    "horizon",
+    "signal_horizon",
     "train_days",
     "valid_days",
     "train_start",
@@ -112,20 +113,34 @@ def resolve_rebalance_freq(cfg: dict, args) -> int:
 
 def resolve_retrain_step(cfg: dict, args) -> int:
     retrain_step = getattr(args, "retrain_step", None)
-    if retrain_step is None:
-        retrain_step = getattr(args, "horizon", None)
     return int(retrain_step or cfg.get("rolling", {}).get("retrain_step", 10))
 
 
-def resolve_label_horizon_for_run(cfg: dict, args) -> int:
-    label_horizon = getattr(args, "label_horizon", None)
-    if label_horizon is not None:
-        return int(label_horizon)
-    return int(resolve_label_horizon(cfg) or DEFAULT_LABEL_HORIZON)
+def resolve_signal_horizon_for_run(cfg: dict, args) -> int:
+    signal_horizon = getattr(args, "signal_horizon", None)
+    if signal_horizon is None:
+        signal_horizon = getattr(args, "label_horizon", None)
+    if signal_horizon is not None:
+        return int(signal_horizon)
+    return int(resolve_signal_horizon(cfg) or DEFAULT_SIGNAL_HORIZON)
 
 
 def resolve_feature_profile_name(cfg: dict, args) -> str:
-    profile = getattr(args, "profile", None) or cfg.get("features", {}).get("profile")
+    profile = (
+        getattr(args, "feature_profile", None)
+        or getattr(args, "profile", None)
+        or cfg.get("features", {}).get("profile")
+    )
+    return str(profile or "")
+
+
+def resolve_model_profile_name(cfg: dict, args) -> str:
+    profile = getattr(args, "model_profile", None) or cfg.get("model", {}).get("profile")
+    return str(profile or "")
+
+
+def resolve_experiment_profile_name(cfg: dict, args) -> str:
+    profile = getattr(args, "experiment_profile", None) or cfg.get("experiment", {}).get("profile")
     return str(profile or "")
 
 
@@ -151,6 +166,7 @@ def prepare_run_store(
         f"_reb{resolve_rebalance_freq(cfg, args)}"
     )
     tag_slug = _slugify(getattr(args, "run_tag", None))
+    experiment_slug = _slugify(resolve_experiment_profile_name(cfg, args))
     profile_slug = _slugify(resolve_feature_profile_name(cfg, args))
     run_id_parts = [
         created_at.strftime("%Y%m%d_%H%M%S"),
@@ -159,7 +175,9 @@ def prepare_run_store(
         model_name,
         strategy_slug,
     ]
-    if not tag_slug and profile_slug:
+    if not tag_slug and experiment_slug:
+        run_id_parts.append(experiment_slug)
+    elif not tag_slug and profile_slug:
         run_id_parts.append(profile_slug)
     if tag_slug:
         run_id_parts.append(tag_slug)
@@ -232,6 +250,8 @@ def finalize_run_store(
         "backend": backend,
         "pipeline": pipeline,
         "model": model_name,
+        "experiment_profile": resolve_experiment_profile_name(cfg, args),
+        "model_profile": resolve_model_profile_name(cfg, args),
         "run_tag": getattr(args, "run_tag", None) or "",
         "feature_profile": resolve_feature_profile_name(cfg, args),
         "universe": cfg.get("universe", ""),
@@ -239,8 +259,7 @@ def finalize_run_store(
         "n_drop": cfg.get("strategy", {}).get("n_drop"),
         "rebalance_freq": resolve_rebalance_freq(cfg, args),
         "retrain_step": extra_context.get("retrain_step", resolve_retrain_step(cfg, args)),
-        "label_horizon": extra_context.get("label_horizon", resolve_label_horizon_for_run(cfg, args)),
-        "horizon": extra_context.get("horizon", extra_context.get("retrain_step", resolve_retrain_step(cfg, args))),
+        "signal_horizon": extra_context.get("signal_horizon", resolve_signal_horizon_for_run(cfg, args)),
         "train_days": extra_context.get("train_days", ""),
         "valid_days": extra_context.get("valid_days", ""),
         "train_start": extra_context.get("train_start", cfg.get("time", {}).get("train", ["", ""])[0]),

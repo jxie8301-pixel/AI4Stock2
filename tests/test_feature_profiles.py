@@ -13,16 +13,16 @@ from src.gen_feature import (
 
 
 class FeatureProfilesTest(unittest.TestCase):
-    def test_default_profile_is_core_v1(self):
+    def test_default_profile_is_core_v4_techlite(self):
         profile = resolve_feature_profile({})
 
         self.assertEqual(profile["alpha"], "all_factors")
         self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
-        self.assertEqual(len(profile["selected_columns"]), 41)
-        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v1.yaml"))
+        self.assertEqual(len(profile["selected_columns"]), 46)
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v4_techlite.yaml"))
         self.assertEqual(profile["selected_columns"][0], "KMID")
-        self.assertEqual(profile["selected_columns"][-1], "TEMP_corr_cv_20")
+        self.assertEqual(profile["selected_columns"][-1], f"{TECHNICAL_FACTOR_PREFIX}mfi_14")
         self.assertEqual(len(get_all_factor_feature_names()), 279)
         self.assertIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", get_all_factor_feature_names())
         self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}macd_hist_12_26_9", get_all_factor_feature_names())

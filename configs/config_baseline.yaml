@@ -5,47 +5,8 @@ artifacts:
   enable_local_store: true
   store_dir: ./results/experiments
 
-universe: csi300
-
-time:
-  train: ["2016-01-01", "2020-12-31"]
-  valid: ["2021-01-01", "2021-12-31"]
-  test:  ["2022-01-01", "2025-12-31"]
+features:
+  factor_store_dir: ./data/factor_store/full_factor_space
 
 label:
-  horizon: 10
   horizons: [1, 5, 10, 20]
-
-rolling:
-  retrain_step: 10
-  train_days: 242
-  valid_days: 10
-
-features:
-  profile: all_factors_full
-  # selected_columns:
-  #   - KMID
-  #   - MA20
-  #   - RSV20
-  # transforms:
-  #   cross_sectional_rank: true
-  handler: Alpha158
-  lookback: 20
-  use_valuation: True
-
-model:
-  preset: lgbm_default
-
-strategy:
-  topk: 30
-  n_drop: 5
-
-backtest:
-  rebalance_freq: 10
-  cost:
-    buy: 0.001
-    sell: 0.001
-  slippage: 0.0
-  min_cost: 5
-  account: 100000000
-  risk_degree: 0.95

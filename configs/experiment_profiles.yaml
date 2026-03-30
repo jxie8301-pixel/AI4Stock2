@@ -1,0 +1,12 @@
+profiles:
+  core_v4_lgbm_default_10x20x10:
+    path: configs/experiments/core_v4_lgbm_default_10x20x10.yaml
+
+  core_v4_lgbm_default_20x20x10:
+    path: configs/experiments/core_v4_lgbm_default_20x20x10.yaml
+
+  core_v4_lgbm_fast_10x20x10:
+    path: configs/experiments/core_v4_lgbm_fast_10x20x10.yaml
+
+  all_factors_lgbm_default_20x20x10:
+    path: configs/experiments/all_factors_lgbm_default_20x20x10.yaml

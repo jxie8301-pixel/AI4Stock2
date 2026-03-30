@@ -1,23 +1,42 @@
 import unittest
 
-from src.config_loader import load_config, resolve_model_preset
+from src.config_loader import load_config
+from src.experiment_profiles import resolve_experiment_profile
+from src.model_profiles import resolve_model_profile
 
 
 class ConfigLoaderTest(unittest.TestCase):
-    def test_resolve_model_preset_loads_external_yaml(self):
-        preset = resolve_model_preset({"model": {"preset": "lgbm_default"}})
+    def test_resolve_model_profile_loads_external_yaml(self):
+        profile = resolve_model_profile({"model": {"profile": "lgbm_default"}})
 
-        self.assertEqual(preset["name"], "lgbm_default")
-        self.assertTrue(preset["path"].endswith("configs/models/lgbm_default.yaml"))
-        self.assertEqual(preset["config"]["model"]["name"], "lgbm")
+        self.assertEqual(profile["name"], "lgbm_default")
+        self.assertTrue(profile["path"].endswith("configs/models/lgbm_default.yaml"))
+        self.assertEqual(profile["config"]["model"]["name"], "lgbm")
 
-    def test_load_config_merges_model_preset(self):
-        cfg = load_config("configs/config.yaml")
+    def test_resolve_experiment_profile_loads_external_yaml(self):
+        profile = resolve_experiment_profile({}, profile_name="core_v4_lgbm_default_10x20x10")
 
-        self.assertEqual(cfg["model"]["preset"], "lgbm_default")
+        self.assertEqual(profile["name"], "core_v4_lgbm_default_10x20x10")
+        self.assertTrue(profile["path"].endswith("configs/experiments/core_v4_lgbm_default_10x20x10.yaml"))
+        self.assertEqual(profile["config"]["features"]["profile"], "core_v4_techlite")
+
+    def test_load_config_merges_experiment_and_model_profiles(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+
+        self.assertEqual(cfg["experiment"]["profile"], "core_v4_lgbm_default_10x20x10")
+        self.assertTrue(cfg["experiment"]["profile_path"].endswith("configs/experiments/core_v4_lgbm_default_10x20x10.yaml"))
+        self.assertEqual(cfg["features"]["profile"], "core_v4_techlite")
+        self.assertEqual(cfg["model"]["profile"], "lgbm_default")
+        self.assertTrue(cfg["model"]["profile_path"].endswith("configs/models/lgbm_default.yaml"))
         self.assertEqual(cfg["model"]["name"], "lgbm")
         self.assertEqual(cfg["lgbm"]["learning_rate"], 0.05)
-        self.assertTrue(cfg["model"]["preset_path"].endswith("configs/models/lgbm_default.yaml"))
+        self.assertEqual(cfg["label"]["signal_horizon"], 20)
+        self.assertEqual(cfg["rolling"]["retrain_step"], 10)
+        self.assertEqual(cfg["backtest"]["rebalance_freq"], 10)
+
+    def test_load_config_requires_explicit_experiment_profile(self):
+        with self.assertRaises(ValueError):
+            load_config("configs/config.yaml")
 
 
 if __name__ == "__main__":

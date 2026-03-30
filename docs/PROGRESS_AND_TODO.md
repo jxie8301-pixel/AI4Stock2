@@ -20,6 +20,7 @@ What is true now:
 - Training-time feature subset selection is supported through `features.selected_columns`
 - Local experiment storage is enabled through `results/experiments/`
 - Parquet factor-store migration design is documented in `docs/PARQUET_FACTOR_STORE_DESIGN.md`
+- Canonical config layering is documented in `docs/CONFIG_PROFILE_ARCHITECTURE.md`
 
 ## Current Recommended Workflow
 
@@ -77,8 +78,8 @@ What is true now:
 ### 7. Tooling And UX
 
 - [x] Split feature-set definitions into dedicated files under `configs/features/`
-- [ ] Split model hyperparameters into dedicated files under `configs/models/`
-- [ ] Add experiment-level config composition so a run can reference named feature/model presets
+- [x] Upgrade model presets into first-class model profiles under `configs/models/`
+- [x] Add experiment-level config composition so a run can reference named feature/model/experiment profiles
 - [x] Add automatic LightGBM feature-importance export for single and rolling runs
 - [ ] Make native model saving opt-out rather than opt-in where practical
 - [ ] Add a script to compare runs directly from `experiment_index.csv`

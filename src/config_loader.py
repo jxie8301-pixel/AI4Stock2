@@ -1,72 +1,41 @@
-"""Runtime config loading with preset composition."""
+"""Layered runtime config loading with experiment/model profiles."""
 
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
-import yaml
+from src.config_utils import deep_update, load_yaml_file
+from src.experiment_profiles import resolve_experiment_profile
+from src.model_profiles import resolve_model_profile
 
 
-DEFAULT_MODEL_PRESET_CONFIG_PATH = "configs/model_presets.yaml"
+def load_runtime_config(config_path: str = "configs/config.yaml") -> dict[str, Any]:
+    cfg = load_yaml_file(config_path)
+    cfg.setdefault("runtime", {})
+    return cfg
 
 
-def _load_yaml_file(path: str | Path) -> dict[str, Any]:
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
-
-
-def _deep_update(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    for key, value in override.items():
-        if isinstance(value, dict) and isinstance(base.get(key), dict):
-            _deep_update(base[key], value)
-        else:
-            base[key] = deepcopy(value)
-    return base
-
-
-def resolve_model_preset(
-    cfg: dict[str, Any] | None = None,
+def load_config(
+    config_path: str = "configs/config.yaml",
     *,
-    preset_name: str | None = None,
-    preset_config_path: str = DEFAULT_MODEL_PRESET_CONFIG_PATH,
+    experiment_profile_name: str | None = None,
+    model_profile_name: str | None = None,
 ) -> dict[str, Any]:
-    cfg = cfg or {}
-    preset_index = _load_yaml_file(preset_config_path)
-    presets = preset_index.get("presets", {})
-    if not isinstance(presets, dict) or not presets:
-        raise ValueError(f"No model presets found in {preset_config_path}")
+    merged = deepcopy(load_runtime_config(config_path))
 
-    model_cfg = cfg.get("model", {})
-    resolved_preset_name = preset_name or model_cfg.get("preset") or preset_index.get("default_preset")
-    if resolved_preset_name not in presets:
-        raise ValueError(
-            f"Unknown model preset: {resolved_preset_name}. "
-            f"Available: {', '.join(sorted(presets))}"
-        )
+    experiment_profile = resolve_experiment_profile(merged, profile_name=experiment_profile_name)
+    deep_update(merged, experiment_profile["config"])
 
-    repo_root = Path(preset_config_path).resolve().parent.parent
-    preset_path = Path(presets[resolved_preset_name]["path"])
-    if not preset_path.is_absolute():
-        preset_path = repo_root / preset_path
+    model_profile = resolve_model_profile(merged, profile_name=model_profile_name)
+    deep_update(merged, model_profile["config"])
 
-    preset = _load_yaml_file(preset_path)
-    return {
-        "name": resolved_preset_name,
-        "path": str(preset_path),
-        "config": preset,
-    }
-
-
-def load_config(config_path: str = "configs/config.yaml") -> dict[str, Any]:
-    cfg = _load_yaml_file(config_path)
-    preset = resolve_model_preset(cfg)
-
-    merged = deepcopy(cfg)
-    _deep_update(merged, preset["config"])
-
+    merged.setdefault("runtime", {})
+    merged["runtime"]["config_path"] = config_path
+    merged.setdefault("experiment", {})
+    merged["experiment"]["profile"] = experiment_profile["name"]
+    merged["experiment"]["profile_path"] = experiment_profile["path"]
     merged.setdefault("model", {})
-    merged["model"]["preset"] = preset["name"]
-    merged["model"]["preset_path"] = preset["path"]
+    merged["model"]["profile"] = model_profile["name"]
+    merged["model"]["profile_path"] = model_profile["path"]
     return merged

@@ -1,5 +1,6 @@
 """Pure LightGBM Native Implementation."""
 
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -48,7 +49,11 @@ class NativeLGBM:
         min_data_in_leaf: int = 100,
         num_threads: int = 20,
         early_stop: int = 50,
+        num_boost_round: int = 1000,
+        early_stopping_min_delta: float = 0.0,
+        log_evaluation_period: int = 50,
         alpha: float = 0.9,
+        seed: int = 42,
         **kwargs
     ):
         # Map generic loss names to lightgbm specific objectives
@@ -84,11 +89,14 @@ class NativeLGBM:
             "min_data_in_leaf": min_data_in_leaf,
             "num_threads": num_threads,
             "verbosity": -1,
-            "seed": 42
+            "seed": seed,
         }
         if objective == "huber":
             self.params["alpha"] = alpha
         self.early_stop = early_stop
+        self.num_boost_round = int(num_boost_round)
+        self.early_stopping_min_delta = float(early_stopping_min_delta)
+        self.log_evaluation_period = int(log_evaluation_period)
         self.model = None
         self.evals_result_: dict[str, dict[str, list[float]]] = {}
         self.best_iteration_: int | None = None
@@ -121,20 +129,23 @@ class NativeLGBM:
         callbacks = []
         callbacks.append(lgb.record_evaluation(evals_result))
         if self.early_stop > 0 and X_valid is not None:
+            early_stopping_kwargs: dict[str, Any] = {
+                "stopping_rounds": self.early_stop,
+                "first_metric_only": True,
+                "verbose": True,
+            }
+            if "min_delta" in inspect.signature(lgb.early_stopping).parameters:
+                early_stopping_kwargs["min_delta"] = self.early_stopping_min_delta
             callbacks.append(
-                lgb.early_stopping(
-                    stopping_rounds=self.early_stop,
-                    first_metric_only=True,
-                    verbose=True,
-                )
+                lgb.early_stopping(**early_stopping_kwargs)
             )
 
-        callbacks.append(lgb.log_evaluation(period=50))
+        callbacks.append(lgb.log_evaluation(period=max(1, self.log_evaluation_period)))
 
         self.model = lgb.train(
             self.params,
             dtrain,
-            num_boost_round=1000,  # Large number, rely on early stopping
+            num_boost_round=max(1, self.num_boost_round),
             valid_sets=valid_sets,
             valid_names=valid_names,
             feval=feval,

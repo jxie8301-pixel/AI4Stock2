@@ -12,8 +12,8 @@ AI4Stock2 is now a native A-share research pipeline built around:
 The default research path is:
 
 1. Update raw/processed Parquet data with `src/collector_akshare.py`
-2. Generate a feature cache from the selected feature profile
-3. Train a native LightGBM model on rolling windows
+2. Generate one unified full-factor store with `src/gen_feature.py`
+3. Train a native LightGBM model from a named experiment profile
 4. Evaluate signal quality and run the native backtest
 5. Archive metrics, plots, models, and config snapshots into the local experiment store
 
@@ -34,13 +34,14 @@ The default research path is:
 
 The intended workflow is:
 
-- Generate a full profile cache once
-- Use `features.selected_columns` in config to train on subsets without rebuilding the cache
+- Generate one unified full-factor store once
+- Resolve a feature profile at training time
+- Use `features.selected_columns` only as a narrow explicit override when needed
 
 ### Model Layer
 
-- Model preset index: `configs/model_presets.yaml`
-- Model preset definitions: `configs/models/*.yaml`
+- Model profile index: `configs/model_profiles.yaml`
+- Model profile definitions: `configs/models/*.yaml`
 - Native LightGBM: `src/models/pure_lightgbm.py`
 - Native LSTM: `src/models/pure_pytorch_lstm.py`
 
@@ -48,6 +49,8 @@ Current default model is `lgbm`.
 
 ### Experiment Layer
 
+- Experiment profile index: `configs/experiment_profiles.yaml`
+- Experiment profile definitions: `configs/experiments/*.yaml`
 - Single-run entry: `main.py`
 - Rolling entry: `run_native_rolling.py`
 - Experiment/model archive: `src/experiment_store.py`
@@ -65,22 +68,28 @@ AI4Stock2/
 ├── configs/
 │   ├── config.yaml
 │   ├── config_baseline.yaml
-│   └── feature_profiles.yaml
-│   └── features/
-│   └── model_presets.yaml
-│   └── models/
+│   ├── feature_profiles.yaml
+│   ├── model_profiles.yaml
+│   ├── experiment_profiles.yaml
+│   ├── features/
+│   ├── models/
+│   └── experiments/
 ├── data/
 │   ├── processed/combined/
-│   └── cache/
+│   └── factor_store/
 ├── docs/
 │   ├── AI_CONTEXT_MAP.md
+│   ├── CONFIG_PROFILE_ARCHITECTURE.md
 │   ├── PROGRESS_AND_TODO.md
 │   └── USER_GUIDE.md
 ├── src/
 │   ├── collector_akshare.py
+│   ├── config_loader.py
+│   ├── experiment_profiles.py
 │   ├── gen_feature.py
 │   ├── feature_profiles.py
 │   ├── feature_selection.py
+│   ├── model_profiles.py
 │   ├── native_backtest.py
 │   ├── backtest.py
 │   ├── evaluate.py
@@ -95,15 +104,20 @@ AI4Stock2/
 
 - Backend: native only
 - Default model: `lgbm`
-- Default profile: `alpha158_compact_v1`
+- Default feature profile: `core_v4_techlite`
+- Experiments must now be selected explicitly via `--experiment-profile`
 - Default universe: `csi300`
 - Supported generated universes: `csi300`, `csi500`, `zz1000`
-- Default label: `open_{t+2} / open_{t+1} - 1`
+- Backtest always uses realized `1d` returns
+- Signal evaluation uses the configured `signal_horizon`
 
 ## Practical Notes
 
-- If you change `features.profile`, rebuild the cache.
-- If you only change `features.selected_columns`, do not rebuild the cache.
+- If you change experiment profile, you do not rebuild the cache.
+- If you change feature profile, you do not rebuild the cache.
+- If you only change model profile, you do not rebuild the cache.
+- `gen_feature.py` should remain detached from feature/model/experiment profiles.
 - Use this document for structure.
+- Use `docs/CONFIG_PROFILE_ARCHITECTURE.md` for the canonical layering rules.
 - Use `docs/USER_GUIDE.md` for commands.
 - Use `docs/PROGRESS_AND_TODO.md` for next research tasks.

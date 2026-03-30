@@ -68,7 +68,7 @@ uv run python src/gen_feature.py --workers 8 --incremental
 - `low_gap`
 - `corr_cv`
 
-之后无论是单次训练还是 rolling，都可以只在训练阶段通过 `features.selected_columns` 挑选子集，不需要重复生成 cache。
+之后无论是单次训练还是 rolling，都可以只在训练阶段通过 profile 或 `features.selected_columns` 挑选子集，不需要重复生成 cache。
 `features.profile` 现在更适合理解为“默认选列模板”：
 - `core_v1`: 默认核心策略因子集
 - `all_factors_full`: 使用全集
@@ -82,37 +82,40 @@ uv run python src/gen_feature.py --workers 8 --incremental
 ## 2. 核心运行模式 (Core Workflow)
 
 ### 滚动训练与回测 (推荐实战模式)
-当前推荐优先使用 native + LightGBM，先做稳健基线：
+当前推荐优先使用 native + LightGBM，并通过命名实验 profile 运行：
 ```bash
-uv run python run_native_rolling.py --model lgbm --horizon 20 --run-tag core_v1
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10
 ```
 
-如果要直接从命令行切换因子 profile，不必改 `config.yaml`：
+训练/回测入口现在不再依赖默认 experiment profile。
+请显式传入 `--experiment-profile`。
+
+如果要直接从命令行切换 feature / model profile，不必改 `config.yaml`：
 ```bash
-uv run python run_native_rolling.py --model lgbm --profile alpha158_full --horizon 20 --run-tag alpha158_full
-uv run python run_native_rolling.py --model lgbm --profile lgbm_purified_v1 --horizon 20 --run-tag purified_v1
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --feature-profile alpha158_full --run-tag alpha158_full
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --model-profile lgbm_fast --run-tag fast_profile
 ```
 
-同一模型做不同策略对比时，建议直接从命令行覆写策略参数，并加上一个 `run tag`：
+同一实验做策略参数对比时，可以在 experiment profile 基础上直接覆写：
 ```bash
-uv run python run_native_rolling.py --model lgbm --horizon 20 --topk 20 --n-drop 4 --run-tag top20_drop4
-uv run python run_native_rolling.py --model lgbm --horizon 20 --topk 30 --n-drop 5 --run-tag top30_drop5
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --topk 20 --n-drop 4 --run-tag top20_drop4
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --topk 30 --n-drop 5 --run-tag top30_drop5
 ```
 
 ### 单次实验 (研究模式)
 用于快速验证想法：
 ```bash
-uv run python main.py --model lgbm --save-model results/lgbm/model.pkl
+uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --save-model results/lgbm/model.pkl
 ```
 
 同样支持命令行覆写 profile：
 ```bash
-uv run python main.py --model lgbm --profile alpha158_full --run-tag alpha158_full_single
+uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --feature-profile alpha158_full --run-tag alpha158_full_single
 ```
 
 也可以让系统自动把模型和实验元数据归档到本地实验库：
 ```bash
-uv run python main.py --model lgbm --topk 25 --n-drop 5 --run-tag alpha25
+uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --topk 25 --n-drop 5 --run-tag alpha25
 ```
 
 ## 3. 模型复用 (Save & Load)
@@ -120,7 +123,7 @@ uv run python main.py --model lgbm --topk 25 --n-drop 5 --run-tag alpha25
 利用之前保存的滚动专家模型，实现秒级快速回测：
 ```bash
 # 加载 native rolling 模型库
-uv run python run_native_rolling.py --model lgbm --horizon 20 --load-models
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --load-models
 ```
 
 ## 4. 本地实验库 (Local Experiment Store)
@@ -135,32 +138,54 @@ uv run python run_native_rolling.py --model lgbm --horizon 20 --load-models
 uv run python main.py --model lgbm --disable-local-store
 ```
 
-## 5. 关键参数微调 (`configs/config.yaml`)
+## 5. 配置分层
 
-- **股票池** (`universe`): 强烈建议使用 `csi300`（沪深300）。
-- **回看天数** (`lookback`): 建议设为 `20`（抓取短期时序特征）。
-- **特征 Profile** (`features.profile`): 默认使用 `core_v1`。这里的 profile 主要表示“从全集 factor store 中默认选择哪些列”，不再表示单独的 cache 家族。具体定义保存在 `configs/features/*.yaml`。
-- **推荐候选**: `alpha158_compact_v1` 适合作为技术面基线，`lgbm_purified_v1` 适合作为 LightGBM 研究起点。
-- **命令行覆写**: `main.py` 和 `run_native_rolling.py` 都支持 `--profile`，适合做 profile 对照实验。
-- **模型 Preset** (`model.preset`): 主配置只引用模型预设，具体超参保存在 `configs/models/*.yaml`。
-- **训练期选列** (`features.selected_columns`): 可以在不重建 cache 的前提下，只挑选全集中的部分因子参与训练。
-- **训练历史**: 建议从 `2016-01-01` 开始，以适应当前的机构化行情。
-- **交易约束**: 在 `src/backtest.py` 中已默认开启“涨跌停禁止交易”和“开盘价成交”。
+当前推荐按以下层级管理配置：
+
+- `configs/config.yaml`: 运行时配置，只放路径、存储、本地环境默认值
+- `configs/feature_profiles.yaml` + `configs/features/*.yaml`: feature profile，只定义训练选列
+- `configs/model_profiles.yaml` + `configs/models/*.yaml`: model profile，只定义模型与训练超参
+- `configs/experiment_profiles.yaml` + `configs/experiments/*.yaml`: experiment profile，定义完整实验语义
+
+其中实验语义包括：
+
+- `signal_horizon`
+- `retrain_step`
+- `rebalance_freq`
+- `topk`
+- `n_drop`
+- 时间切分
+- universe
+- 实验级 transforms
+
+术语约定：
+
+- `signal_horizon`: 模型预测的前瞻周期
+- `retrain_step`: rolling 多久重训一次
+- `rebalance_freq`: 组合多久调仓一次
+
+不要再使用孤立的 `horizon` 概念。
 
 示例：
 ```yaml
 features:
-  profile: core_v1
-  selected_columns:
-    - KMID
-    - MA20
-    - RSV20
-    - LGBM_ret_20
-    - TEMP_ret_20
+  profile: core_v4_techlite
+
+model:
+  profile: lgbm_default
+
+label:
+  signal_horizon: 20
+
+rolling:
+  retrain_step: 10
+
+backtest:
+  rebalance_freq: 10
 ```
 
-改完 `selected_columns` 后，不需要重新执行 `gen_feature.py`；直接重新训练即可。
-如果启用 `features.transforms.cross_sectional_rank: true`，同样不需要重建 cache；这是训练期动态变换。
+改 feature profile、model profile、experiment profile，都不需要重新执行 `gen_feature.py`。
+只有当 unified factor store 的生成空间本身变化时，才需要重建 cache。
 
 为什么 `gen_feature.py` 仍然独立存在，而不是在主训练脚本里隐式生成：
 - factor store 生成是一个重 I/O、重 CPU 的预处理步骤，耗时和训练完全不是一个量级。
@@ -168,6 +193,21 @@ features:
 - 同一个全量 factor store 可以被很多次训练复用，这正好符合“先生成最全，再按需挑选”的研究方式。
 
 如果后续要进一步提效，推荐新增一个显式模式，例如 `main.py --build-cache-if-missing`，而不是让训练脚本默认偷偷重建 cache。
+
+LightGBM 的训练参数应当优先写进 model profile，而不是硬编码在 Python 中。
+例如：
+
+- `num_boost_round`
+- `early_stop`
+- `early_stopping_min_delta`
+- `learning_rate`
+- `num_leaves`
+
+如果只想先做配置审核，而不真正开始训练，可以单独运行：
+
+```bash
+uv run python -m src.config_validation --config configs/config.yaml --experiment-profile core_v4_lgbm_default_10x20x10
+```
 
 LightGBM 训练会自动输出特征重要性：
 - 单次实验：`results/native/lgbm/feature_importance_gain.csv`

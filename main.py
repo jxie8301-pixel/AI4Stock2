@@ -14,8 +14,9 @@ from src.feature_selection import (
     resolve_selected_features,
 )
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
+from src.config_validation import validate_training_config
 from src.feature_profiles import get_native_factor_store_dir
-from src.label_utils import get_label_column_name, resolve_label_horizon, sanitize_label_series
+from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
 
 
@@ -103,8 +104,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     factor_store_dir = get_native_factor_store_dir(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
-    label_horizon = int(resolve_label_horizon(cfg))
-    label_column = get_label_column_name(label_horizon)
+    signal_horizon = int(resolve_signal_horizon(cfg))
+    label_column = get_label_column_name(signal_horizon)
     backtest_label_column = get_label_column_name(1)
     
     print("\n[Step 1/6] Loading Parquet Factor Store")
@@ -330,7 +331,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         f"topk={cfg['strategy']['topk']}, "
         f"n_drop={cfg['strategy']['n_drop']}, "
         f"rebalance={rebalance_freq}d, "
-        f"signal_label={label_horizon}d, "
+        f"signal_label={signal_horizon}d, "
         "backtest_label=1d"
     )
     backtest_report = run_native_backtest(
@@ -408,14 +409,17 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         "portfolio_metrics": safe_portfolio_results,
         "selected_features": selected_feature_names,
         "feature_importance_path": str(feature_importance_path) if model_name == "lgbm" else None,
-        "label_horizon": label_horizon,
+        "signal_horizon": signal_horizon,
     }
 
 def main():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Quantitative Pipeline")
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default=None, help="Model name: lstm / transformer / lgbm")
-    parser.add_argument("--profile", help="Override features.profile and use the corresponding factor-store/profile")
+    parser.add_argument("--experiment-profile", help="Named experiment profile under configs/experiments/")
+    parser.add_argument("--feature-profile", help="Override features.profile for this run")
+    parser.add_argument("--model-profile", help="Override model.profile for this run")
+    parser.add_argument("--profile", help=argparse.SUPPRESS)
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
     parser.add_argument("--save-model", help="Path to save the trained model (e.g. results/lstm/model.pkl)")
@@ -426,25 +430,41 @@ def main():
     parser.add_argument("--disable-local-store", action="store_true", help="Disable automatic local experiment/model storage")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id (-1 for CPU)")
     parser.add_argument("--rebalance-freq", type=int, default=None, help="Backtest rebalance frequency in days (default: from config or 1)")
-    parser.add_argument("--label-horizon", type=int, help="Prediction label horizon in trading days. If omitted, use config value.")
+    parser.add_argument("--signal-horizon", type=int, help="Prediction signal horizon in trading days. If omitted, use experiment profile.")
+    parser.add_argument("--label-horizon", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--trace-backtest", action="store_true", help="Export detailed trace for selected backtest dates")
     parser.add_argument("--trace-top-days", type=int, default=5, help="Auto-select this many high-return/turnover/cost dates for trace export")
     parser.add_argument("--trace-dates", help="Comma-separated YYYY-MM-DD dates to include in backtest trace export")
     args = parser.parse_args()
 
-    cfg = load_config(args.config)
-    if args.model:
-        cfg["model"]["name"] = args.model
-    if args.profile:
-        cfg.setdefault("features", {})
-        cfg["features"]["profile"] = args.profile
-    if args.topk is not None:
-        cfg["strategy"]["topk"] = args.topk
-    if args.n_drop is not None:
-        cfg["strategy"]["n_drop"] = args.n_drop
-    if args.label_horizon is not None:
-        cfg.setdefault("label", {})
-        cfg["label"]["horizon"] = int(args.label_horizon)
+    try:
+        cfg = load_config(
+            args.config,
+            experiment_profile_name=args.experiment_profile,
+            model_profile_name=args.model_profile,
+        )
+        if args.model:
+            cfg["model"]["name"] = args.model
+        feature_profile_override = args.feature_profile or args.profile
+        if feature_profile_override:
+            cfg.setdefault("features", {})
+            cfg["features"]["profile"] = feature_profile_override
+        if args.topk is not None:
+            cfg["strategy"]["topk"] = args.topk
+        if args.n_drop is not None:
+            cfg["strategy"]["n_drop"] = args.n_drop
+        signal_horizon_override = args.signal_horizon
+        if signal_horizon_override is None:
+            signal_horizon_override = args.label_horizon
+        if signal_horizon_override is not None:
+            cfg.setdefault("label", {})
+            cfg["label"]["signal_horizon"] = int(signal_horizon_override)
+        if args.rebalance_freq is not None:
+            cfg.setdefault("backtest", {})
+            cfg["backtest"]["rebalance_freq"] = int(args.rebalance_freq)
+        validate_training_config(cfg, check_paths=True)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     backend = "native"
     model_name = cfg["model"]["name"]
@@ -484,7 +504,7 @@ def main():
         extra_context={
             "selected_features": (run_summary or {}).get("selected_features", []),
             "feature_importance_path": (run_summary or {}).get("feature_importance_path"),
-            "label_horizon": (run_summary or {}).get("label_horizon"),
+            "signal_horizon": (run_summary or {}).get("signal_horizon"),
         },
     )
     if manifest_path:

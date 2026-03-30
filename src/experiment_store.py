@@ -13,6 +13,8 @@ from typing import Any
 
 import yaml
 
+from src.label_utils import DEFAULT_LABEL_HORIZON, resolve_label_horizon
+
 
 SUMMARY_FIELDS = [
     "created_at",
@@ -26,6 +28,8 @@ SUMMARY_FIELDS = [
     "topk",
     "n_drop",
     "rebalance_freq",
+    "retrain_step",
+    "label_horizon",
     "horizon",
     "train_days",
     "valid_days",
@@ -104,6 +108,20 @@ def _safe_float(value: Any) -> float | None:
 
 def resolve_rebalance_freq(cfg: dict, args) -> int:
     return getattr(args, "rebalance_freq", None) or cfg.get("backtest", {}).get("rebalance_freq", 5)
+
+
+def resolve_retrain_step(cfg: dict, args) -> int:
+    retrain_step = getattr(args, "retrain_step", None)
+    if retrain_step is None:
+        retrain_step = getattr(args, "horizon", None)
+    return int(retrain_step or cfg.get("rolling", {}).get("retrain_step", 10))
+
+
+def resolve_label_horizon_for_run(cfg: dict, args) -> int:
+    label_horizon = getattr(args, "label_horizon", None)
+    if label_horizon is not None:
+        return int(label_horizon)
+    return int(resolve_label_horizon(cfg) or DEFAULT_LABEL_HORIZON)
 
 
 def resolve_feature_profile_name(cfg: dict, args) -> str:
@@ -220,7 +238,9 @@ def finalize_run_store(
         "topk": cfg.get("strategy", {}).get("topk"),
         "n_drop": cfg.get("strategy", {}).get("n_drop"),
         "rebalance_freq": resolve_rebalance_freq(cfg, args),
-        "horizon": extra_context.get("horizon", ""),
+        "retrain_step": extra_context.get("retrain_step", resolve_retrain_step(cfg, args)),
+        "label_horizon": extra_context.get("label_horizon", resolve_label_horizon_for_run(cfg, args)),
+        "horizon": extra_context.get("horizon", extra_context.get("retrain_step", resolve_retrain_step(cfg, args))),
         "train_days": extra_context.get("train_days", ""),
         "valid_days": extra_context.get("valid_days", ""),
         "train_start": extra_context.get("train_start", cfg.get("time", {}).get("train", ["", ""])[0]),

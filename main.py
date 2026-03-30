@@ -6,7 +6,7 @@ import json
 import pickle
 
 from src.config_loader import load_config
-from src.experiment_store import finalize_run_store, prepare_run_store
+from src.experiment_store import finalize_run_store, prepare_run_store, resolve_rebalance_freq
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_selection import (
     apply_feature_transforms,
@@ -15,6 +15,7 @@ from src.feature_selection import (
 )
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
 from src.feature_profiles import get_native_factor_store_dir
+from src.label_utils import get_label_column_name, resolve_label_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
 
 
@@ -102,6 +103,9 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     factor_store_dir = get_native_factor_store_dir(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
+    label_horizon = int(resolve_label_horizon(cfg))
+    label_column = get_label_column_name(label_horizon)
+    backtest_label_column = get_label_column_name(1)
     
     print("\n[Step 1/6] Loading Parquet Factor Store")
     meta = load_factor_store_metadata(factor_store_dir)
@@ -114,7 +118,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     load_end = max(cfg["time"]["train"][1], cfg["time"]["valid"][1], cfg["time"]["test"][1])
     factor_frame = load_factor_frame(
         store_dir=factor_store_dir,
-        columns=selected_feature_names,
+        columns=selected_feature_names + ([backtest_label_column] if backtest_label_column != label_column else []),
+        label_column=label_column,
         date_start=load_start,
         date_end=load_end,
         universe_name=universe_name,
@@ -128,6 +133,10 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     print("\n[Step 2/6] Time Splitting & Universe Filtering")
     dt_index = pd.to_datetime(factor_frame["date"])
     y = factor_frame["label"].to_numpy(dtype=np.float32, copy=True)
+    if backtest_label_column in factor_frame.columns:
+        backtest_y = sanitize_label_series(factor_frame[backtest_label_column]).to_numpy(dtype=np.float32, copy=True)
+    else:
+        backtest_y = y.copy()
 
     train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1]))
     valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1]))
@@ -180,6 +189,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         pred_dates = pd.to_datetime(dt_index[test_valid_mask]).reset_index(drop=True)
         pred_symbols = factor_frame.loc[test_valid_mask, "symbol"].reset_index(drop=True)
         pred_labels = y[test_valid_mask]
+        pred_backtest_labels = backtest_y[test_valid_mask]
     else:
         from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
         from torch.utils.data import DataLoader
@@ -190,6 +200,10 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         id_to_symbol = {idx: symbol for idx, symbol in enumerate(unique_symbols)}
         X = seq_frame[selected_feature_names].to_numpy(dtype=np.float32, copy=True)
         y = seq_frame["label"].to_numpy(dtype=np.float32, copy=True)
+        if backtest_label_column in seq_frame.columns:
+            seq_backtest_y = sanitize_label_series(seq_frame[backtest_label_column]).to_numpy(dtype=np.float32, copy=True)
+        else:
+            seq_backtest_y = y.copy()
         dt_index = pd.to_datetime(seq_frame["date"])
         train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1]))
         valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1]))
@@ -275,6 +289,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         pred_dates = pd.to_datetime(seq_dates[test_dataset.valid_end_indices])
         pred_symbols = pd.Series([id_to_symbol[sym] for sym in seq_symbol_ids[test_dataset.valid_end_indices]])
         pred_labels = y[test_dataset.valid_end_indices]
+        pred_backtest_labels = seq_backtest_y[test_dataset.valid_end_indices]
 
     pred_series = pd.Series(
         preds_arr,
@@ -282,6 +297,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     ).sort_index()
     
     label_series = pd.Series(pred_labels, index=pred_series.index)
+    backtest_label_series = pd.Series(pred_backtest_labels, index=pred_series.index)
     aligned_preds, aligned_labels = align_prediction_label_pairs(pred_series, label_series)
     signal_metrics, daily_ic = compute_signal_metrics(aligned_preds, aligned_labels)
     plot_ic_series(daily_ic, save_path=str(results_dir / "native_ic_series.png"))
@@ -307,17 +323,19 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         save_monthly_report,
     )
     
-    rebalance_freq = getattr(args, 'rebalance_freq', None) or cfg.get("backtest", {}).get("rebalance_freq", 1)
+    rebalance_freq = resolve_rebalance_freq(cfg, args)
 
     print(
         "\n[Backtest] "
         f"topk={cfg['strategy']['topk']}, "
         f"n_drop={cfg['strategy']['n_drop']}, "
-        f"rebalance={rebalance_freq}d"
+        f"rebalance={rebalance_freq}d, "
+        f"signal_label={label_horizon}d, "
+        "backtest_label=1d"
     )
     backtest_report = run_native_backtest(
         preds=pred_series,
-        labels=label_series,
+        labels=backtest_label_series,
         topk=cfg["strategy"]["topk"],
         n_drop=cfg["strategy"]["n_drop"],
         cost_buy=cfg["backtest"]["cost"]["buy"],
@@ -325,7 +343,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         min_cost=cfg["backtest"].get("min_cost", 5.0),
         account=cfg["backtest"].get("account", 100_000_000),
         risk_degree=cfg["backtest"].get("risk_degree", 0.95),
-        slippage=cfg["backtest"].get("slippage", 0.0005),
+        slippage=cfg["backtest"].get("slippage", 0.0),
         rebalance_freq=rebalance_freq
     )
     
@@ -333,7 +351,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
     
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
-    bench_series = build_cross_section_benchmark(label_series)
+    bench_series = build_cross_section_benchmark(backtest_label_series)
     metric_report["bench"] = bench_series.reindex(metric_report.index).fillna(0.0).to_numpy()
     monthly_summary = build_period_summary(metric_report, freq="ME")
     biweekly_summary = build_period_summary(metric_report, freq="2W-FRI")
@@ -355,7 +373,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         report_for_selection=plot_report,
         rerun_fn=lambda trace_dates: run_native_backtest(
             preds=pred_series,
-            labels=label_series,
+            labels=backtest_label_series,
             topk=cfg["strategy"]["topk"],
             n_drop=cfg["strategy"]["n_drop"],
             cost_buy=cfg["backtest"]["cost"]["buy"],
@@ -363,7 +381,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             min_cost=cfg["backtest"].get("min_cost", 5.0),
             account=cfg["backtest"].get("account", 100_000_000),
             risk_degree=cfg["backtest"].get("risk_degree", 0.95),
-            slippage=cfg["backtest"].get("slippage", 0.0005),
+            slippage=cfg["backtest"].get("slippage", 0.0),
             rebalance_freq=rebalance_freq,
             return_trace=True,
             trace_dates=trace_dates,
@@ -390,6 +408,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         "portfolio_metrics": safe_portfolio_results,
         "selected_features": selected_feature_names,
         "feature_importance_path": str(feature_importance_path) if model_name == "lgbm" else None,
+        "label_horizon": label_horizon,
     }
 
 def main():
@@ -407,6 +426,7 @@ def main():
     parser.add_argument("--disable-local-store", action="store_true", help="Disable automatic local experiment/model storage")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id (-1 for CPU)")
     parser.add_argument("--rebalance-freq", type=int, default=None, help="Backtest rebalance frequency in days (default: from config or 1)")
+    parser.add_argument("--label-horizon", type=int, help="Prediction label horizon in trading days. If omitted, use config value.")
     parser.add_argument("--trace-backtest", action="store_true", help="Export detailed trace for selected backtest dates")
     parser.add_argument("--trace-top-days", type=int, default=5, help="Auto-select this many high-return/turnover/cost dates for trace export")
     parser.add_argument("--trace-dates", help="Comma-separated YYYY-MM-DD dates to include in backtest trace export")
@@ -422,6 +442,9 @@ def main():
         cfg["strategy"]["topk"] = args.topk
     if args.n_drop is not None:
         cfg["strategy"]["n_drop"] = args.n_drop
+    if args.label_horizon is not None:
+        cfg.setdefault("label", {})
+        cfg["label"]["horizon"] = int(args.label_horizon)
 
     backend = "native"
     model_name = cfg["model"]["name"]
@@ -461,6 +484,7 @@ def main():
         extra_context={
             "selected_features": (run_summary or {}).get("selected_features", []),
             "feature_importance_path": (run_summary or {}).get("feature_importance_path"),
+            "label_horizon": (run_summary or {}).get("label_horizon"),
         },
     )
     if manifest_path:

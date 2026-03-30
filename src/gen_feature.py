@@ -25,9 +25,23 @@ from tqdm import tqdm
 import yaml
 
 try:
-    from src.label_utils import DEFAULT_LABEL_ABS_CAP
+    from src.label_utils import (
+        DEFAULT_LABEL_ABS_CAP,
+        DEFAULT_LABEL_HORIZON,
+        get_label_column_name,
+        get_label_definition,
+        get_legacy_label_column_name,
+        resolve_label_horizons,
+    )
 except ModuleNotFoundError:
-    from label_utils import DEFAULT_LABEL_ABS_CAP  # type: ignore
+    from label_utils import (  # type: ignore
+        DEFAULT_LABEL_ABS_CAP,
+        DEFAULT_LABEL_HORIZON,
+        get_label_column_name,
+        get_label_definition,
+        get_legacy_label_column_name,
+        resolve_label_horizons,
+    )
 
 EPS = 1e-12
 FULL_FACTOR_SPACE_NAME = "full_factor_space"
@@ -1113,31 +1127,44 @@ def compute_all_factor_features(
     return feat
 
 
-def build_open_to_open_label(df: pd.DataFrame) -> pd.Series:
-    """Label: open_{t+2}/open_{t+1} - 1."""
+def build_open_to_open_label(df: pd.DataFrame, horizon_days: int = DEFAULT_LABEL_HORIZON) -> pd.Series:
+    """Label: open_{t+1+h}/open_{t+1} - 1 for a holding horizon of ``h`` trading days."""
     base = _prepare_ohlcv(df)
     next_open = base["open"].shift(-1)
-    next2_open = base["open"].shift(-2)
-    label = next2_open / next_open - 1
+    exit_open = base["open"].shift(-(1 + int(horizon_days)))
+    label = exit_open / next_open - 1
 
     valid = (
         np.isfinite(next_open)
-        & np.isfinite(next2_open)
+        & np.isfinite(exit_open)
         & (next_open > 0)
-        & (next2_open > 0)
+        & (exit_open > 0)
     )
     if "volume" in base.columns:
         next_vol = base["volume"].shift(-1)
-        next2_vol = base["volume"].shift(-2)
-        valid &= np.isfinite(next_vol) & np.isfinite(next2_vol) & (next_vol > 0) & (next2_vol > 0)
+        exit_vol = base["volume"].shift(-(1 + int(horizon_days)))
+        valid &= np.isfinite(next_vol) & np.isfinite(exit_vol) & (next_vol > 0) & (exit_vol > 0)
     if "amount" in base.columns:
         next_amt = base["amount"].shift(-1)
-        next2_amt = base["amount"].shift(-2)
-        valid &= np.isfinite(next_amt) & np.isfinite(next2_amt) & (next_amt > 0) & (next2_amt > 0)
+        exit_amt = base["amount"].shift(-(1 + int(horizon_days)))
+        valid &= np.isfinite(next_amt) & np.isfinite(exit_amt) & (next_amt > 0) & (exit_amt > 0)
 
     label = label.where(valid)
     label = label.where(label.abs() <= DEFAULT_LABEL_ABS_CAP)
     return label
+
+
+def build_open_to_open_labels(
+    df: pd.DataFrame,
+    horizons: list[int],
+) -> dict[str, pd.Series]:
+    """Build multiple open-to-open labels keyed by factor-store column name."""
+    labels = {
+        get_label_column_name(horizon): build_open_to_open_label(df, horizon_days=horizon)
+        for horizon in horizons
+    }
+    labels[get_legacy_label_column_name()] = labels[get_label_column_name(1)]
+    return labels
 
 
 def _index_to_epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
@@ -1162,8 +1189,21 @@ def _compute_symbol_feat_label(
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
     feat = compute_all_factor_features(df)
-    label = build_open_to_open_label(df)
+    label = build_open_to_open_label(df, horizon_days=1)
     return symbol, feat, label
+
+
+def _compute_symbol_feat_labels(
+    file_path: str,
+    *,
+    label_horizons: list[int],
+) -> tuple[str, pd.DataFrame, dict[str, pd.Series]]:
+    """Load one parquet and compute features plus all configured labels."""
+    df = pd.read_parquet(file_path)
+    symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
+    feat = compute_all_factor_features(df)
+    labels = build_open_to_open_labels(df, label_horizons)
+    return symbol, feat, labels
 
 
 def _count_file_worker(
@@ -1263,6 +1303,7 @@ def _load_reusable_shard_meta(
     shard_meta_root: Path,
     file_path: str | Path,
     feature_names: list[str],
+    label_columns: list[str],
 ) -> dict[str, Any] | None:
     shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, file_path)
     shard_meta = _load_json(meta_path)
@@ -1274,6 +1315,8 @@ def _load_reusable_shard_meta(
     if shard_meta.get("factor_space") != FULL_FACTOR_SPACE_NAME:
         return None
     if shard_meta.get("feature_names") != feature_names:
+        return None
+    if shard_meta.get("label_columns") != label_columns:
         return None
     row_count = shard_meta.get("row_count")
     if not isinstance(row_count, int) or row_count < 0:
@@ -1288,6 +1331,7 @@ def _save_shard(
     file_path: str | Path,
     symbol: str,
     feature_names: list[str],
+    label_columns: list[str],
     shard_frame: pd.DataFrame,
 ) -> dict[str, Any]:
     shard_root.mkdir(parents=True, exist_ok=True)
@@ -1301,6 +1345,7 @@ def _save_shard(
         "factor_space": FULL_FACTOR_SPACE_NAME,
         "source": _source_file_signature(file_path),
         "feature_names": feature_names,
+        "label_columns": label_columns,
         "min_date": str(pd.to_datetime(shard_frame["date"]).min().date()) if not shard_frame.empty else "",
         "max_date": str(pd.to_datetime(shard_frame["date"]).max().date()) if not shard_frame.empty else "",
         "shard_path": str(shard_path),
@@ -1310,13 +1355,18 @@ def _save_shard(
     return shard_meta
 
 
-def _build_shard_frame(file_path: str | Path) -> tuple[str, pd.DataFrame]:
-    symbol, feat, label = _compute_symbol_feat_label(str(file_path))
+def _build_shard_frame(file_path: str | Path, *, label_horizons: list[int]) -> tuple[str, pd.DataFrame]:
+    symbol, feat, labels = _compute_symbol_feat_labels(str(file_path), label_horizons=label_horizons)
     frame = feat.copy()
     frame = frame.astype(np.float32)
     frame.insert(0, "date", pd.to_datetime(frame.index))
     frame.insert(1, "symbol", symbol)
-    frame.insert(2, "label", label.reindex(frame.index).astype(np.float32))
+    insert_at = 2
+    for label_column in [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]:
+        if label_column in frame.columns:
+            continue
+        frame.insert(insert_at, label_column, labels[label_column].reindex(frame.index).astype(np.float32))
+        insert_at += 1
     frame = frame.reset_index(drop=True)
     return symbol, frame
 
@@ -1326,8 +1376,9 @@ def _write_factor_shard_worker(
     shard_path: str,
     meta_path: str,
     feature_names: list[str],
+    label_horizons: list[int],
 ) -> dict[str, Any]:
-    symbol, shard_frame = _build_shard_frame(file_path)
+    symbol, shard_frame = _build_shard_frame(file_path, label_horizons=label_horizons)
     shard_root = Path(shard_path).parent
     shard_meta_root = Path(meta_path).parent
     return _save_shard(
@@ -1336,6 +1387,7 @@ def _write_factor_shard_worker(
         file_path=file_path,
         symbol=symbol,
         feature_names=feature_names,
+        label_columns=[get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)],
         shard_frame=shard_frame,
     )
 
@@ -1379,6 +1431,7 @@ def generate_factor_store(
     output_dir: str = DEFAULT_FULL_FACTOR_STORE_DIR,
     workers: int = 1,
     incremental: bool = False,
+    label_horizons: list[int] | None = None,
 ) -> dict[str, Any]:
     """Generate the unified Parquet factor store."""
     pdir = Path(parquet_dir)
@@ -1396,6 +1449,8 @@ def generate_factor_store(
     _remove_orphan_shards(shard_root=shard_root, shard_meta_root=shard_meta_root, source_files=files)
 
     feature_names = get_full_factor_space_feature_names()
+    label_horizons = resolve_label_horizons({"label": {"horizons": label_horizons}} if label_horizons is not None else {})
+    label_columns = [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]
     workers = max(1, int(workers))
     files_to_recompute: list[Path] = []
     reused_shard_metas: list[dict[str, Any]] = []
@@ -1412,6 +1467,7 @@ def generate_factor_store(
                 shard_meta_root=shard_meta_root,
                 file_path=fp,
                 feature_names=feature_names,
+                label_columns=label_columns,
             )
         else:
             reusable = None
@@ -1435,7 +1491,13 @@ def generate_factor_store(
             pbar = tqdm(files_to_recompute, desc="shards", total=len(files_to_recompute), unit="file")
             for idx, fp in enumerate(pbar, start=1):
                 shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, fp)
-                shard_meta = _write_factor_shard_worker(str(fp), str(shard_path), str(meta_path), feature_names)
+                shard_meta = _write_factor_shard_worker(
+                    str(fp),
+                    str(shard_path),
+                    str(meta_path),
+                    feature_names,
+                    label_horizons,
+                )
                 written_shard_metas.append(shard_meta)
                 elapsed = time.perf_counter() - t1
                 speed = idx / elapsed if elapsed > 0 else 0.0
@@ -1454,6 +1516,7 @@ def generate_factor_store(
                             str(shard_path),
                             str(meta_path),
                             feature_names,
+                            label_horizons,
                         )
                     )
                 pbar = tqdm(total=len(files_to_recompute), desc="shards", unit="file")
@@ -1489,7 +1552,25 @@ def generate_factor_store(
         "num_rows": total_rows,
         "shape": [total_rows, len(feature_names)],
         "feature_names": feature_names,
-        "label": "open_t+2 / open_t+1 - 1",
+        "label": get_label_definition(1),
+        "default_label_column": get_legacy_label_column_name(),
+        "label_columns": [
+            {
+                "column": get_legacy_label_column_name(),
+                "horizon": 1,
+                "definition": get_label_definition(1),
+                "legacy_alias": True,
+            },
+            *[
+                {
+                    "column": get_label_column_name(horizon),
+                    "horizon": int(horizon),
+                    "definition": get_label_definition(horizon),
+                    "legacy_alias": False,
+                }
+                for horizon in label_horizons
+            ],
+        ],
         "factor_store_dir": str(out_root),
         "shards_dir": str(shard_root),
         "available_dates": _compute_available_dates_from_shards(shard_root),
@@ -1523,6 +1604,7 @@ def generate_panel_cache(
     output_dir: str = DEFAULT_FULL_FACTOR_STORE_DIR,
     workers: int = 1,
     incremental: bool = False,
+    label_horizons: list[int] | None = None,
 ) -> dict[str, Any]:
     """Backward-compatible alias for the factor-store generator."""
     return generate_factor_store(
@@ -1530,6 +1612,7 @@ def generate_panel_cache(
         output_dir=output_dir,
         workers=workers,
         incremental=incremental,
+        label_horizons=label_horizons,
     )
 
 
@@ -1546,6 +1629,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--parquet-dir", default="data/processed/combined", help="Input parquet directory.")
     parser.add_argument("--output-dir", default=None, help="Output factor-store directory.")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for counting/writing.")
+    parser.add_argument(
+        "--label-horizons",
+        help="Comma-separated label horizons to materialize, for example '1,5,10,20'. If omitted, use config/defaults.",
+    )
     parser.set_defaults(incremental=True)
     parser.add_argument(
         "--incremental",
@@ -1569,6 +1656,11 @@ def main() -> None:
     if args.config:
         with open(args.config, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
+    label_horizons = resolve_label_horizons(cfg)
+    if args.label_horizons:
+        label_horizons = resolve_label_horizons(
+            {"label": {"horizons": [int(item.strip()) for item in args.label_horizons.split(",") if item.strip()]}}
+        )
     out_dir = args.output_dir or cfg.get("features", {}).get("factor_store_dir") or cfg.get("features", {}).get("cache_dir") or DEFAULT_FULL_FACTOR_STORE_DIR
     feature_names = get_full_factor_space_feature_names()
     alpha158_count = len(get_alpha158_feature_config()[1])
@@ -1580,7 +1672,8 @@ def main() -> None:
         "storage_format=parquet, "
         f"factor_space={FULL_FACTOR_SPACE_NAME}, "
         f"output={out_dir}, "
-        f"incremental={args.incremental}"
+        f"incremental={args.incremental}, "
+        f"label_horizons={label_horizons}"
     )
     print(
         "factor_groups="
@@ -1595,6 +1688,7 @@ def main() -> None:
         output_dir=out_dir,
         workers=max(1, int(args.workers)),
         incremental=args.incremental,
+        label_horizons=label_horizons,
     )
 
 

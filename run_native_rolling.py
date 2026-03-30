@@ -9,10 +9,16 @@ import torch
 import numpy as np
 
 from src.config_loader import load_config
-from src.experiment_store import finalize_run_store, prepare_run_store, resolve_rebalance_freq
+from src.experiment_store import (
+    finalize_run_store,
+    prepare_run_store,
+    resolve_rebalance_freq,
+    resolve_retrain_step,
+)
 from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask_frame, resolve_selected_features
+from src.label_utils import get_label_column_name, resolve_label_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
 
 def run_rolling_pipeline():
@@ -20,9 +26,11 @@ def run_rolling_pipeline():
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
     parser.add_argument("--model", default="lgbm", help="Model name")
     parser.add_argument("--profile", help="Override features.profile and use the corresponding factor-store/profile")
-    parser.add_argument("--horizon", type=int, default=10, help="Rolling horizon in trading days")
-    parser.add_argument("--train-days", type=int, default=242, help="Training window length in trading days")
-    parser.add_argument("--valid-days", type=int, default=10, help="Validation window length in trading days")
+    parser.add_argument("--retrain-step", type=int, help="Rolling retrain step in trading days. If omitted, use config value.")
+    parser.add_argument("--horizon", type=int, help="Deprecated alias for --retrain-step.")
+    parser.add_argument("--label-horizon", type=int, help="Prediction label horizon in trading days. If omitted, use config value.")
+    parser.add_argument("--train-days", type=int, help="Training window length in trading days. If omitted, use config value.")
+    parser.add_argument("--valid-days", type=int, help="Validation window length in trading days. If omitted, use config value.")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id")
     parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
     parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step")
@@ -36,6 +44,10 @@ def run_rolling_pipeline():
 
     cfg = load_config(args.config)
     cfg["model"]["name"] = args.model
+    if args.retrain_step is not None and args.horizon is not None and args.retrain_step != args.horizon:
+        parser.error("--retrain-step and --horizon refer to the same parameter; use one value.")
+    if args.retrain_step is None and args.horizon is not None:
+        args.retrain_step = args.horizon
     if args.profile:
         cfg.setdefault("features", {})
         cfg["features"]["profile"] = args.profile
@@ -46,6 +58,24 @@ def run_rolling_pipeline():
     if args.rebalance_freq is not None:
         cfg.setdefault("backtest", {})
         cfg["backtest"]["rebalance_freq"] = args.rebalance_freq
+    if args.label_horizon is not None:
+        cfg.setdefault("label", {})
+        cfg["label"]["horizon"] = int(args.label_horizon)
+    if args.retrain_step is not None:
+        cfg.setdefault("rolling", {})
+        cfg["rolling"]["retrain_step"] = int(args.retrain_step)
+    if args.train_days is not None:
+        cfg.setdefault("rolling", {})
+        cfg["rolling"]["train_days"] = int(args.train_days)
+    if args.valid_days is not None:
+        cfg.setdefault("rolling", {})
+        cfg["rolling"]["valid_days"] = int(args.valid_days)
+    retrain_step = int(resolve_retrain_step(cfg, args))
+    train_days = int(cfg.get("rolling", {}).get("train_days", args.train_days or 242))
+    valid_days = int(cfg.get("rolling", {}).get("valid_days", args.valid_days or 10))
+    label_horizon = int(resolve_label_horizon(cfg))
+    label_column = get_label_column_name(label_horizon)
+    backtest_label_column = get_label_column_name(1)
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
     
     run_store = prepare_run_store(
@@ -103,11 +133,12 @@ def run_rolling_pipeline():
 
     first_test_start = test_calendar.iloc[0]
     first_test_idx = int(full_calendar.searchsorted(first_test_start))
-    earliest_idx = max(0, first_test_idx - args.train_days - args.valid_days)
+    earliest_idx = max(0, first_test_idx - train_days - valid_days)
     load_start = full_calendar.iloc[earliest_idx]
     factor_frame = load_factor_frame(
         store_dir=factor_store_dir,
-        columns=selected_feature_names,
+        columns=selected_feature_names + ([backtest_label_column] if backtest_label_column != label_column else []),
+        label_column=label_column,
         date_start=load_start,
         date_end=test_end,
         universe_name=universe_name,
@@ -118,16 +149,23 @@ def run_rolling_pipeline():
     if factor_frame.empty:
         raise ValueError("Parquet factor store returned no rows for the configured rolling date range.")
     y = factor_frame["label"].to_numpy(dtype=np.float32, copy=True)
+    if backtest_label_column in factor_frame.columns:
+        backtest_y = sanitize_label_series(factor_frame[backtest_label_column]).to_numpy(dtype=np.float32, copy=True)
+    else:
+        backtest_y = y.copy()
     dt_index = pd.to_datetime(factor_frame["date"])
 
     # ── 2. Setup Rolling Windows ────────────────────────
-    rolling_steps = range(0, len(test_calendar), args.horizon)
+    rolling_steps = range(0, len(test_calendar), retrain_step)
     all_predictions = []
     feature_importance_frames = []
     training_summary_records = []
     finite_feature_mask = compute_finite_feature_mask_frame(factor_frame, selected_feature_names)
     
-    print(f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} with {args.horizon}-day steps.")
+    print(
+        f"\n[Rolling Setup] Testing from {test_start.date()} to {test_end.date()} "
+        f"| retrain_step={retrain_step}d | label_horizon={label_horizon}d | rebalance={rebalance_freq}d"
+    )
 
     from torch.utils.data import DataLoader
     from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
@@ -137,14 +175,14 @@ def run_rolling_pipeline():
 
     for i, start_idx in enumerate(rolling_steps):
         current_test_start = test_calendar[start_idx]
-        end_idx = min(start_idx + args.horizon - 1, len(test_calendar) - 1)
+        end_idx = min(start_idx + retrain_step - 1, len(test_calendar) - 1)
         current_test_end = test_calendar[end_idx]
         full_start_idx = int(full_calendar.searchsorted(current_test_start))
 
         valid_end_idx = full_start_idx - 1
-        valid_start_idx = valid_end_idx - args.valid_days + 1
+        valid_start_idx = valid_end_idx - valid_days + 1
         train_end_idx = valid_start_idx - 1
-        train_start_idx = train_end_idx - args.train_days + 1
+        train_start_idx = train_end_idx - train_days + 1
 
         if valid_end_idx < 0 or valid_start_idx < 0 or train_end_idx < 0 or train_start_idx < 0:
             print("    Skipping window: insufficient trading-day history for requested train/valid lengths.")
@@ -218,6 +256,7 @@ def run_rolling_pipeline():
                 "train_end": train_end.strftime("%Y-%m-%d"),
                 "valid_start": valid_start.strftime("%Y-%m-%d"),
                 "valid_end": valid_end.strftime("%Y-%m-%d"),
+                "label_horizon": int(label_horizon),
                 "train_rows": int(len(X_train_df)),
                 "valid_rows": int(len(X_valid_df)),
                 "feature_count": int(len(selected_feature_names)),
@@ -361,6 +400,10 @@ def run_rolling_pipeline():
         y[global_test_mask],
         index=pd.MultiIndex.from_arrays([global_dates, global_symbols], names=['datetime', 'instrument'])
     ).sort_index()
+    backtest_label_series = pd.Series(
+        backtest_y[global_test_mask],
+        index=pd.MultiIndex.from_arrays([global_dates, global_symbols], names=['datetime', 'instrument'])
+    ).sort_index()
     
     # Align final predictions with global labels
     common_idx = final_predictions.index.intersection(label_series.index)
@@ -376,12 +419,14 @@ def run_rolling_pipeline():
         "\n[Backtest] "
         f"topk={cfg['strategy']['topk']}, "
         f"n_drop={cfg['strategy']['n_drop']}, "
-        f"rebalance={rebalance_freq}d"
+        f"rebalance={rebalance_freq}d, "
+        f"signal_label={label_horizon}d, "
+        "backtest_label=1d"
     )
     from src.native_backtest import run_native_backtest
     backtest_report = run_native_backtest(
         preds=final_predictions,
-        labels=label_series,
+        labels=backtest_label_series,
         topk=cfg["strategy"]["topk"],
         n_drop=cfg["strategy"]["n_drop"],
         cost_buy=cfg["backtest"]["cost"]["buy"],
@@ -458,9 +503,11 @@ def run_rolling_pipeline():
         portfolio_metrics=sanitize_dict_keys(portfolio_results),
         models_dir=models_dir if (args.save_models or args.load_models) else None,
         extra_context={
-            "horizon": args.horizon,
-            "train_days": args.train_days,
-            "valid_days": args.valid_days,
+            "retrain_step": retrain_step,
+            "label_horizon": label_horizon,
+            "horizon": retrain_step,
+            "train_days": train_days,
+            "valid_days": valid_days,
             "test_start": str(test_start.date()),
             "test_end": str(test_end.date()),
             "selected_features": selected_feature_names,

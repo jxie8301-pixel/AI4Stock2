@@ -10,7 +10,7 @@ import pandas as pd
 import pyarrow.dataset as ds
 from tqdm import tqdm
 
-from src.label_utils import sanitize_label_series
+from src.label_utils import get_label_column_name, get_legacy_label_column_name, sanitize_label_series
 from src.native_universe import build_universe_frame_mask, load_universe_table
 
 
@@ -94,10 +94,35 @@ def _filter_available_dates_by_universe(
     return pd.DatetimeIndex(dates_series.loc[mask].drop_duplicates().sort_values())
 
 
+def _resolve_requested_label_column(meta: dict[str, Any], requested_label_column: str | None) -> str:
+    requested = str(requested_label_column or get_legacy_label_column_name())
+    available_label_columns = {
+        str(item.get("column"))
+        for item in meta.get("label_columns", [])
+        if isinstance(item, dict) and item.get("column")
+    }
+    if not available_label_columns:
+        available_label_columns = {str(meta.get("default_label_column") or get_legacy_label_column_name())}
+
+    if requested in available_label_columns:
+        return requested
+
+    if requested == get_label_column_name(1) and get_legacy_label_column_name() in available_label_columns:
+        return get_legacy_label_column_name()
+
+    available_preview = ", ".join(sorted(available_label_columns))
+    raise ValueError(
+        f"Requested label column '{requested}' is not available in factor store. "
+        f"Available label columns: {available_preview}. "
+        "If you changed label horizons, regenerate the factor store."
+    )
+
+
 def load_factor_frame(
     *,
     store_dir: str | Path,
     columns: list[str],
+    label_column: str | None = None,
     date_start: str | pd.Timestamp | None = None,
     date_end: str | pd.Timestamp | None = None,
     universe_name: str = "all",
@@ -105,8 +130,10 @@ def load_factor_frame(
     sort_by: tuple[str, str] = ("date", "symbol"),
     progress_desc: str | None = None,
 ) -> pd.DataFrame:
+    meta = load_factor_store_metadata(store_dir)
     shards_dir = _get_shards_dir(store_dir)
-    selected_columns = ["date", "symbol", "label", *columns]
+    actual_label_column = _resolve_requested_label_column(meta, label_column)
+    selected_columns = ["date", "symbol", actual_label_column, *columns]
     allowed_symbols = None
     if universe_name != "all":
         universe_table = load_universe_table(universe_name, universe_dir=universe_dir)
@@ -135,7 +162,9 @@ def load_factor_frame(
         return frame
 
     frame["date"] = pd.to_datetime(frame["date"])
-    frame["label"] = sanitize_label_series(frame["label"])
+    if actual_label_column != get_legacy_label_column_name():
+        frame = frame.rename(columns={actual_label_column: get_legacy_label_column_name()})
+    frame[get_legacy_label_column_name()] = sanitize_label_series(frame[get_legacy_label_column_name()])
 
     if universe_name != "all":
         mask = build_universe_frame_mask(

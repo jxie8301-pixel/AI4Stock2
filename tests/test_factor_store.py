@@ -82,6 +82,43 @@ class FactorStoreTest(unittest.TestCase):
             self.assertEqual(loaded["symbol"].tolist(), ["000001"])
             self.assertEqual(loaded["F1"].tolist(), [1.0])
 
+    def test_load_factor_frame_can_select_non_default_label_column(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            shards = root / "shards"
+            shards.mkdir(parents=True, exist_ok=True)
+            with open(root / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "feature_names": ["F1"],
+                        "default_label_column": "label",
+                        "label_columns": [
+                            {"column": "label", "horizon": 1, "legacy_alias": True},
+                            {"column": "label_10d", "horizon": 10, "legacy_alias": False},
+                        ],
+                    },
+                    f,
+                )
+
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                    "symbol": ["000001", "000001"],
+                    "label": [0.1, 0.2],
+                    "label_10d": [0.03, 0.04],
+                    "F1": [1.0, 2.0],
+                }
+            ).to_parquet(shards / "000001.parquet", index=False)
+
+            loaded = load_factor_frame(
+                store_dir=root,
+                columns=["F1"],
+                label_column="label_10d",
+            )
+
+            self.assertEqual(list(loaded.columns), ["date", "symbol", "label", "F1"])
+            self.assertEqual(loaded["label"].tolist(), [0.03, 0.04])
+
     def test_load_available_dates_returns_unique_sorted_dates(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

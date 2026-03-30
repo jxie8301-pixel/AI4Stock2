@@ -148,6 +148,17 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}boll_pos_20_2", techlite["selected_columns"])
         self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}macd_hist_12_26_9", techlite_pruned["selected_columns"])
 
+    def test_core_v4_ablation_profiles_are_registered(self):
+        no_ret120 = resolve_feature_profile({"features": {"profile": "core_v4_techlite_no_ret120"}})
+
+        self.assertTrue(str(no_ret120["profile_path"]).endswith("configs/features/core_v4_techlite_no_ret120.yaml"))
+        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", no_ret120["selected_columns"])
+        self.assertEqual(len(no_ret120["selected_columns"]), 45)
+
+    def test_removed_duplicate_v3_no_rank20_profile_is_rejected(self):
+        with self.assertRaises(ValueError):
+            resolve_feature_profile({"features": {"profile": "core_v3_techlite_no_price_rank20"}})
+
     def test_removed_alpha360_profile_is_rejected(self):
         with self.assertRaises(ValueError):
             resolve_feature_profile({"features": {"profile": "alpha360_full"}})

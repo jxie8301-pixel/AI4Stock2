@@ -1,0 +1,39 @@
+features:
+  profile: core_v4_techlite_tailguard
+  transforms:
+    cross_sectional_rank: true
+  handler: Alpha158
+  lookback: 20
+  use_valuation: true
+
+model:
+  profile: lgbm_default
+
+universe: csi300
+
+time:
+  train: ["2016-01-01", "2020-12-31"]
+  valid: ["2021-01-01", "2021-12-31"]
+  test: ["2022-01-01", "2025-12-31"]
+
+label:
+  signal_horizon: 20
+
+rolling:
+  retrain_step: 10
+  train_days: 242
+  valid_days: 10
+
+strategy:
+  topk: 30
+  n_drop: 5
+
+backtest:
+  rebalance_freq: 10
+  cost:
+    buy: 0.001
+    sell: 0.001
+  slippage: 0.0
+  min_cost: 5
+  account: 100000000
+  risk_degree: 0.95

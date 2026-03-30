@@ -8,5 +8,17 @@ profiles:
   core_v4_lgbm_fast_10x20x10:
     path: configs/experiments/core_v4_lgbm_fast_10x20x10.yaml
 
+  core_v4_no_aroon_lgbm_default_10x20x10:
+    path: configs/experiments/core_v4_no_aroon_lgbm_default_10x20x10.yaml
+
+  core_v4_no_ret120_lgbm_default_10x20x10:
+    path: configs/experiments/core_v4_no_ret120_lgbm_default_10x20x10.yaml
+
+  core_v4_no_cntd20_lgbm_default_10x20x10:
+    path: configs/experiments/core_v4_no_cntd20_lgbm_default_10x20x10.yaml
+
+  core_v4_tailguard_lgbm_default_10x20x10:
+    path: configs/experiments/core_v4_tailguard_lgbm_default_10x20x10.yaml
+
   all_factors_lgbm_default_20x20x10:
     path: configs/experiments/all_factors_lgbm_default_20x20x10.yaml

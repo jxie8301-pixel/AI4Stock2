@@ -29,7 +29,6 @@ selected_columns:
   - TEMP_ret_5
   - TEMP_ret_20
   - TEMP_ret_60
-  - TEMP_ret_120
   - TEMP_ma_gap_20
   - TEMP_ma_gap_60
   - TEMP_std_20

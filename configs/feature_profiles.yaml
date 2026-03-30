@@ -22,8 +22,17 @@ profiles:
   core_v3_techlite_pruned:
     path: configs/features/core_v3_techlite_pruned.yaml
 
-  core_v3_techlite_no_price_rank20:
-    path: configs/features/core_v3_techlite_no_price_rank20.yaml
+  core_v4_techlite_no_aroon:
+    path: configs/features/core_v4_techlite_no_aroon.yaml
+
+  core_v4_techlite_no_ret120:
+    path: configs/features/core_v4_techlite_no_ret120.yaml
+
+  core_v4_techlite_no_cntd20:
+    path: configs/features/core_v4_techlite_no_cntd20.yaml
+
+  core_v4_techlite_tailguard:
+    path: configs/features/core_v4_techlite_tailguard.yaml
 
   core_v3_techlite_no_price_rank20_no_aroon:
     path: configs/features/core_v3_techlite_no_price_rank20_no_aroon.yaml

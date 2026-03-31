@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from src.collector_gm import (
+    EndpointRateLimiter,
     GM_PROCESSED_CANONICAL_COLS,
     PRECHECK_WORKERS,
     RAW_BARS_DIR,
@@ -16,11 +17,16 @@ from src.collector_gm import (
     _chunked,
     build_processed_symbol_frame,
     gm_symbol_to_local,
+    infer_latest_date,
+    load_parquet_if_exists,
     is_symbol_complete,
     local_symbol_to_gm,
     normalize_symbol_cache_frame,
     precheck_pending_symbols,
     precheck_stage_updates,
+    resolve_all_symbols,
+    resolve_effective_end_date,
+    resolve_symbol_lifecycle_status,
 )
 
 
@@ -29,6 +35,29 @@ def test_symbol_conversion_round_trip_for_a_share_codes() -> None:
     assert local_symbol_to_gm("000001") == "SZSE.000001"
     assert gm_symbol_to_local("SHSE.600000") == "600000"
     assert gm_symbol_to_local("SZSE.000001") == "000001"
+
+
+def test_endpoint_rate_limiter_zero_interval_bypasses_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    limiter = EndpointRateLimiter(0.0)
+
+    def fail_sleep(seconds: float) -> None:
+        raise AssertionError(f"time.sleep should not be called, got {seconds}")
+
+    def fail_monotonic() -> float:
+        raise AssertionError("time.monotonic should not be called for zero interval")
+
+    monkeypatch.setattr("src.collector_gm.time.sleep", fail_sleep)
+    monkeypatch.setattr("src.collector_gm.time.monotonic", fail_monotonic)
+
+    limiter.wait()
+
+
+def test_zero_byte_parquet_is_treated_as_missing(tmp_path) -> None:
+    path = tmp_path / "broken.parquet"
+    path.write_bytes(b"")
+
+    assert infer_latest_date(path, "trade_date") is None
+    assert load_parquet_if_exists(path) is None
 
 
 def test_chunked_caps_requests_to_20_fields() -> None:
@@ -53,6 +82,66 @@ def test_normalize_symbol_cache_frame_keeps_a_share_universe_only() -> None:
 
     assert out["local_symbol"].tolist() == ["000001", "600000"]
     assert out["symbol"].tolist() == ["SZSE.000001", "SHSE.600000"]
+
+
+def test_resolve_symbol_lifecycle_status_and_effective_end_date_for_delisted() -> None:
+    target_end_date = pd.Timestamp("2026-03-31")
+    delisted_date = pd.Timestamp("2025-12-15")
+
+    assert (
+        resolve_symbol_lifecycle_status(
+            target_end_date, listed_date="2000-01-01", delisted_date=delisted_date
+        )
+        == "delisted"
+    )
+    assert resolve_effective_end_date(
+        target_end_date, listed_date="2000-01-01", delisted_date=delisted_date
+    ) == delisted_date
+
+
+def test_resolve_symbol_lifecycle_status_marks_suspended_without_truncating_end_date() -> None:
+    target_end_date = pd.Timestamp("2026-03-31")
+
+    assert (
+        resolve_symbol_lifecycle_status(
+            target_end_date,
+            listed_date="2000-01-01",
+            delisted_date=None,
+            latest_is_suspended=True,
+        )
+        == "suspended"
+    )
+    assert resolve_effective_end_date(
+        target_end_date,
+        listed_date="2000-01-01",
+        delisted_date=None,
+        latest_is_suspended=True,
+    ) == target_end_date
+
+
+def test_resolve_all_symbols_preserves_local_history_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.collector_gm.list_local_symbols", lambda: ["000001", "600000"])
+    monkeypatch.setattr(
+        "src.collector_gm.load_symbol_cache",
+        lambda: pd.DataFrame(
+            {
+                "local_symbol": ["000001", "300001"],
+                "symbol": ["SZSE.000001", "SZSE.300001"],
+                "sec_id": ["000001", "300001"],
+                "sec_name": ["平安银行", "特锐德"],
+                "exchange": ["SZSE", "SZSE"],
+                "listed_date": [pd.Timestamp("1991-01-01"), pd.Timestamp("2009-10-30")],
+                "delisted_date": [pd.NaT, pd.NaT],
+                "board": [None, None],
+                "trade_n": [None, None],
+                "fetched_at": [pd.Timestamp("2026-03-31"), pd.Timestamp("2026-03-31")],
+            }
+        ),
+    )
+
+    symbols = resolve_all_symbols()
+
+    assert symbols == ["000001", "300001", "600000"]
 
 
 def test_is_symbol_complete_requires_all_raw_layers_and_processed() -> None:
@@ -95,7 +184,7 @@ def test_precheck_pending_symbols_filters_completed_in_input_order(monkeypatch: 
 
     monkeypatch.setattr("src.collector_gm.load_symbol_state", lambda symbol: state_map[symbol])
 
-    pending, completed = precheck_pending_symbols(
+    pending, completed, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
         ["000002", "000001"],
         target_end_date=pd.Timestamp("2026-03-31"),
         max_workers=PRECHECK_WORKERS,
@@ -103,6 +192,11 @@ def test_precheck_pending_symbols_filters_completed_in_input_order(monkeypatch: 
 
     assert pending == ["000002"]
     assert completed == ["000001"]
+    assert effective_end_dates == {
+        "000001": pd.Timestamp("2026-03-31"),
+        "000002": pd.Timestamp("2026-03-31"),
+    }
+    assert set(lifecycle_registry["local_symbol"]) == {"000001", "000002"}
 
 
 def test_precheck_stage_updates_marks_ready_and_pending_in_input_order(

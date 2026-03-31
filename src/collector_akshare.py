@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import math
 import json
+import os
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -205,11 +207,11 @@ class RequestPatcher:
             return kwargs
 
         def patched_request(method: str, url: str, **kwargs: Any):
-            time.sleep(REQUEST_SLEEP_SECONDS)
+            _maybe_sleep_request_interval()
             return self.session.request(method=method, url=url, **normalize_kwargs(kwargs))
 
         def patched_session_request(_session_self, method: str, url: str, **kwargs: Any):
-            time.sleep(REQUEST_SLEEP_SECONDS)
+            _maybe_sleep_request_interval()
             return self.session.request(method=method, url=url, **normalize_kwargs(kwargs))
 
         def patched_get(url: str, **kwargs: Any):
@@ -223,6 +225,11 @@ class RequestPatcher:
         requests.post = patched_post  # type: ignore[assignment]
         requests.sessions.Session.request = patched_session_request  # type: ignore[assignment]
         print("[*] Global requests patched with curl_cffi session.")
+
+
+def _maybe_sleep_request_interval() -> None:
+    if REQUEST_SLEEP_SECONDS > 0.0:
+        time.sleep(REQUEST_SLEEP_SECONDS)
 
 
 def install_proxy_patch(auth_token: str = "") -> None:
@@ -515,7 +522,32 @@ def _optimize_numeric_dtypes(df: pd.DataFrame) -> pd.DataFrame:
 
 def save_optimized_parquet(df: pd.DataFrame, path: Path) -> None:
     optimized = _optimize_numeric_dtypes(df)
-    optimized.to_parquet(path, index=False, engine="pyarrow", compression="zstd")
+    tmp_path = path.with_name(
+        f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
+    )
+    try:
+        optimized.to_parquet(tmp_path, index=False, engine="pyarrow", compression="zstd")
+        os.replace(tmp_path, path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+
+def _read_parquet_safe(
+    path: Path,
+    columns: list[str] | None = None,
+) -> pd.DataFrame | None:
+    if not path.exists():
+        return None
+    try:
+        if path.stat().st_size == 0:
+            return None
+    except OSError:
+        return None
+    try:
+        return pd.read_parquet(path, columns=columns)
+    except Exception:
+        return None
 
 
 def _normalize_date_column(df: pd.DataFrame, column: str = "date") -> pd.DataFrame:
@@ -637,9 +669,7 @@ def merge_daily_and_valuation(daily_df: pd.DataFrame, valuation_df: pd.DataFrame
 
 
 def load_parquet_if_exists(path: Path) -> pd.DataFrame | None:
-    if not path.exists():
-        return None
-    return pd.read_parquet(path)
+    return _read_parquet_safe(path)
 
 
 def infer_latest_date(
@@ -662,8 +692,8 @@ def infer_latest_date(
     except Exception:
         pass
 
-    frame = pd.read_parquet(path, columns=[date_column])
-    if frame.empty:
+    frame = _read_parquet_safe(path, columns=[date_column])
+    if frame is None or frame.empty or date_column not in frame.columns:
         return None
     return pd.to_datetime(frame[date_column], errors="coerce").max().normalize()
 

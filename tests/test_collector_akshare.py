@@ -14,7 +14,10 @@ from src.collector_akshare import (
     SymbolState,
     UpdateResult,
     VAL_COLS,
+    _maybe_sleep_request_interval,
     _optimize_numeric_dtypes,
+    infer_latest_date,
+    load_parquet_if_exists,
     TaskResult,
     collect_symbols,
     is_symbol_complete,
@@ -47,6 +50,25 @@ def test_optimize_numeric_dtypes_keeps_large_int64() -> None:
     assert str(out["small_int"].dtype) in {"uint32", "int32"}
     assert str(out["big_int"].dtype) == "int64"
     assert str(out["float_col"].dtype) == "float32"
+
+
+def test_maybe_sleep_request_interval_skips_sleep_when_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.collector_akshare.REQUEST_SLEEP_SECONDS", 0.0)
+
+    def fail_sleep(seconds: float) -> None:
+        raise AssertionError(f"time.sleep should not be called, got {seconds}")
+
+    monkeypatch.setattr("src.collector_akshare.time.sleep", fail_sleep)
+
+    _maybe_sleep_request_interval()
+
+
+def test_zero_byte_parquet_is_treated_as_missing(tmp_path) -> None:
+    path = tmp_path / "broken.parquet"
+    path.write_bytes(b"")
+
+    assert infer_latest_date(path, "date") is None
+    assert load_parquet_if_exists(path) is None
 
 
 def test_sanitize_daily_history_frame_backfills_new_fields() -> None:

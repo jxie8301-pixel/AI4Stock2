@@ -4,6 +4,16 @@
 
 本项目使用 `akshare` 并结合 Cookie 劫持来稳定获取全市场 A 股（量价+估值）数据。你需要手动执行数据同步。
 
+当前支持两种互斥的网络后端：
+- `cookie`: 默认方案，使用本地 `data/cookies.json` + `curl_cffi`
+- `proxy_patch`: 使用 `akshare-proxy-patch` 的代理鉴权方案
+
+两种方案不要混用；每次运行只选其一。
+
+如果你要试验 GM 数据源，当前建议走“全量 raw 保留 + 二次规范化”的独立目录，不要和东财数据混写。GM 路径当前使用：
+- raw: `data/gm/raw/...`
+- normalized parquet: `data/gm/processed/combined/...`
+
 ### 同步旧项目数据
 建议直接将旧 `AI4Stock` 项目的 `data/raw` 和 `data/processed` 文件夹复制到本项目的 `data/` 目录下，实现无缝衔接。
 
@@ -11,12 +21,111 @@
 运行以下命令，自动补全缺失数据并刷新本地 Parquet 数据：
 ```bash
 # 更新数据
-python src/collector_akshare.py --update --workers 8
+uv run python src/collector_akshare.py --update --workers 8
+```
+
+如果你要切到 `proxy_patch` 后端，需要显式传入：
+```bash
+uv run python src/collector_akshare.py --update --network-backend proxy_patch --proxy-auth-token <TOKEN> --workers 8
+```
+
+当前 collector 直接内置 README 示例里的固定网关 `101.201.173.125`，不再暴露 `--proxy-auth-ip` 这个选项。
+
+当前 proxy 模式只 hook 我们实际用到的东财域名：
+- `push2.eastmoney.com`
+- `push2his.eastmoney.com`
+- `82.push2.eastmoney.com`
+- `datacenter-web.eastmoney.com`
+
+`--update` 现在默认不会联网刷新股票代码列表。
+它会只用：
+- 本地已有 raw/processed symbol
+- 本地缓存过的股票列表
+
+做并集，也就是 `local + cache`。
+
+如果你希望在增量更新时顺手把新上市股票也带进来，再显式加：
+```bash
+uv run python src/collector_akshare.py --update --refresh-stock-list --workers 8
+```
+
+这时才会联网刷新一份 live 股票列表，并用：
+- 本地已有 raw/processed symbol
+- 本地缓存过的股票列表
+- 当前 live 股票列表
+
+做并集，因此不会漏掉新上市股票，也不会因为退市/停牌把本地已有 symbol 丢掉。
+
+`--all` 现在也优先使用本地股票列表缓存。
+只有两种情况才会重新触发股票列表分页刷新：
+- 本地 `data/raw/meta/stock_list.parquet` 不存在
+- 你显式传入 `--refresh-stock-list`
+
+股票列表刷新现在是按页落盘并支持续跑的，页缓存位于：
+- `data/raw/meta/stock_list_pages/page_0001.parquet`
+- `data/raw/meta/stock_list_manifest.json`
+
+如果单个 cookie 无法跑完整个股票列表分页，可以先只刷新或续跑股票列表缓存：
+```bash
+uv run python src/collector_akshare.py --refresh-stock-list-only
+```
+
+切换 cookie 后重复执行这条命令即可从缺失页继续，不会丢掉已经抓到的页。
+
+如果你刚切到新的 collector schema，并且已经把旧数据完整备份到别处，建议先清空以下目录再重抓：
+- `data/raw/daily`
+- `data/raw/valuation`
+- `data/processed/combined`
+- `data/factor_store`
+
+这样新的 parquet 从第一天起就只使用新脚本自己的格式，不再混用旧 schema。
+
+如果只是修复融合逻辑、列名或本地 processed 文件，而不想重新联网抓取，可以只用本地 raw 重建：
+```bash
+uv run python src/collector_akshare.py --rebuild-processed --workers 8
 ```
 
 如需构建或刷新常用股票池文件：
 ```bash
 uv run python src/build_universes.py
+```
+
+### GM 数据采集
+GM 路径会先保留各个 endpoint 的完整原始字段，再输出一份给 native pipeline 使用的规范化 parquet。
+
+运行前先在 shell 里注入 token：
+```bash
+export GM_TOKEN=<YOUR_TOKEN>
+```
+
+全量或缓存股票池更新：
+```bash
+uv run python src/collector_gm.py --all --workers 8 --end-date 2026-03-31
+```
+
+只刷新 GM 股票列表缓存：
+```bash
+uv run python src/collector_gm.py --refresh-symbols-only
+```
+
+只用本地 raw 重建 GM 规范化 parquet：
+```bash
+uv run python src/collector_gm.py --rebuild-processed --workers 8
+```
+
+GM raw 目录当前拆分为：
+- `data/gm/raw/bars_raw/`
+- `data/gm/raw/symbol_day/`
+- `data/gm/raw/daily_basic/`
+- `data/gm/raw/daily_mktvalue/`
+- `data/gm/raw/daily_valuation/`
+
+当前默认 GM 路径只依赖你已验证可用的免费接口。
+`stk_get_adj_factor` 属于付费增值接口，因此当前 collector 不再把它作为必需步骤；免费 `get_history_symbol` 返回的 `adj_factor` 会保留在 `symbol_day` 和规范化 parquet 里。
+
+如果你要基于 GM 的规范化 parquet 生成因子库，直接显式指定输入目录：
+```bash
+uv run python src/gen_feature.py --parquet-dir data/gm/processed/combined --output-dir data/factor_store/gm_full_factor_space --workers 8
 ```
 
 当前脚本默认生成：

@@ -13,8 +13,10 @@ from src.feature_selection import (
     compute_finite_feature_mask_frame,
     resolve_selected_features,
 )
+from src.override_utils import apply_override_args
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
 from src.config_validation import validate_training_config
+from src.data_source import SUPPORTED_DATA_SOURCES, resolve_data_source_name
 from src.feature_profiles import get_native_factor_store_dir
 from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
@@ -102,13 +104,14 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     )
     
     factor_store_dir = get_native_factor_store_dir(cfg)
+    data_source = resolve_data_source_name(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
     signal_horizon = int(resolve_signal_horizon(cfg))
     label_column = get_label_column_name(signal_horizon)
     backtest_label_column = get_label_column_name(1)
     
-    print("\n[Step 1/6] Loading Parquet Factor Store")
+    print(f"\n[Step 1/6] Loading Parquet Factor Store (data_source={data_source})")
     meta = load_factor_store_metadata(factor_store_dir)
 
     selected_feature_idx, selected_feature_names = resolve_selected_features(meta, cfg)
@@ -419,6 +422,13 @@ def main():
     parser.add_argument("--experiment-profile", help="Named experiment profile under configs/experiments/")
     parser.add_argument("--feature-profile", help="Override features.profile for this run")
     parser.add_argument("--model-profile", help="Override model.profile for this run")
+    parser.add_argument("--data-source", choices=SUPPORTED_DATA_SOURCES, help="Override runtime data source")
+    parser.add_argument(
+        "--set",
+        action="append",
+        dest="set_overrides",
+        help="Generic dotted override in key=value form, for example strategy.topk=20",
+    )
     parser.add_argument("--profile", help=argparse.SUPPRESS)
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
@@ -445,6 +455,10 @@ def main():
         )
         if args.model:
             cfg["model"]["name"] = args.model
+        if args.data_source:
+            cfg.setdefault("data", {})
+            cfg["data"]["source"] = args.data_source
+        apply_override_args(cfg, args.set_overrides)
         feature_profile_override = args.feature_profile or args.profile
         if feature_profile_override:
             cfg.setdefault("features", {})

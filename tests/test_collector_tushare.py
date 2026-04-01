@@ -11,11 +11,14 @@ from src.collector_tushare import (
     PRECHECK_WORKERS,
     TS_PROCESSED_CANONICAL_COLS,
     SymbolState,
+    build_backfill_exhaustion_lookup,
     build_processed_symbol_frame_from_raw,
     collect_stage,
+    is_backfill_satisfied,
     is_symbol_complete,
     local_symbol_to_ts,
     normalize_symbol_cache_frame,
+    precheck_pending_symbols,
     precheck_stage_updates,
     resolve_all_symbols,
     resolve_effective_end_date,
@@ -86,6 +89,46 @@ def test_resolve_symbol_lifecycle_status_and_effective_end_date_for_delisted() -
         list_date="2000-01-01",
         delist_date=delisted_date,
     ) == delisted_date
+
+
+def test_resolve_symbol_lifecycle_status_marks_suspended_when_trade_stops_but_aux_tables_continue() -> None:
+    target_end_date = pd.Timestamp("2026-03-31")
+
+    assert (
+        resolve_symbol_lifecycle_status(
+            target_end_date,
+            list_status="L",
+            list_date="2000-01-01",
+            delist_date=None,
+            last_trade_date=pd.Timestamp("2026-03-26"),
+            latest_adj_factor_date=pd.Timestamp("2026-03-31"),
+            latest_stk_limit_date=pd.Timestamp("2026-03-31"),
+        )
+        == "suspended"
+    )
+    assert resolve_effective_end_date(
+        target_end_date,
+        list_status="L",
+        list_date="2000-01-01",
+        delist_date=None,
+        last_trade_date=pd.Timestamp("2026-03-26"),
+        latest_adj_factor_date=pd.Timestamp("2026-03-31"),
+        latest_stk_limit_date=pd.Timestamp("2026-03-31"),
+    ) == pd.Timestamp("2026-03-26")
+
+
+def test_resolve_effective_end_date_prefers_last_trade_date_for_early_suspended_delisting() -> None:
+    target_end_date = pd.Timestamp("2026-03-31")
+    delisted_date = pd.Timestamp("2007-05-21")
+    last_trade_date = pd.Timestamp("2006-04-19")
+
+    assert resolve_effective_end_date(
+        target_end_date,
+        list_status="D",
+        list_date="1995-11-01",
+        delist_date=delisted_date,
+        last_trade_date=last_trade_date,
+    ) == last_trade_date
 
 
 def test_resolve_all_symbols_preserves_local_history_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -185,6 +228,75 @@ def test_precheck_stage_updates_respects_effective_end_dates(monkeypatch: pytest
 
     assert plan.pending_symbols == []
     assert set(plan.ready_outputs) == {"600001", "000001"}
+
+
+def test_is_backfill_satisfied_accepts_exhaustion_marker() -> None:
+    lookup = build_backfill_exhaustion_lookup(
+        pd.DataFrame(
+            {
+                "stage_name": ["daily"],
+                "local_symbol": ["000001"],
+                "expected_start_date": [pd.Timestamp("1991-04-03")],
+                "observed_earliest_date": [pd.Timestamp("1991-04-04")],
+                "recorded_at": [pd.Timestamp("2026-04-02")],
+            }
+        )
+    )
+
+    assert is_backfill_satisfied(
+        "daily",
+        "000001",
+        expected_start_date=pd.Timestamp("1991-04-03"),
+        earliest=pd.Timestamp("1991-04-04"),
+        exhaustion_lookup=lookup,
+    ) is True
+
+
+def test_precheck_pending_symbols_skips_not_yet_listed_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.collector_tushare.load_symbol_cache",
+        lambda: pd.DataFrame(
+            {
+                "local_symbol": ["000001", "301999"],
+                "ts_code": ["000001.SZ", "301999.SZ"],
+                "symbol": ["000001", "301999"],
+                "name": ["平安银行", "未来样本"],
+                "area": ["深圳", "深圳"],
+                "industry": ["银行", "测试"],
+                "market": ["主板", "主板"],
+                "list_date": [pd.Timestamp("2000-01-01"), pd.Timestamp("2026-05-01")],
+                "delist_date": [pd.NaT, pd.NaT],
+                "list_status": ["L", "L"],
+                "fetched_at": [pd.Timestamp("2026-04-01"), pd.Timestamp("2026-04-01")],
+            }
+        ),
+    )
+    state_map = {
+        "000001": SymbolState(
+            "000001",
+            pd.Timestamp("2000-01-01"),
+            pd.Timestamp("2000-01-01"),
+            pd.Timestamp("2000-01-01"),
+            pd.Timestamp("2026-03-31"),
+            pd.Timestamp("2026-03-31"),
+            pd.Timestamp("2026-03-31"),
+            pd.Timestamp("2026-03-31"),
+            pd.Timestamp("2026-03-31"),
+        ),
+        "301999": SymbolState("301999", None, None, None, None, None, None, None, None),
+    }
+    monkeypatch.setattr("src.collector_tushare.load_symbol_state", lambda symbol: state_map[symbol])
+
+    pending, completed, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
+        ["301999", "000001"],
+        target_end_date=pd.Timestamp("2026-03-31"),
+        max_workers=PRECHECK_WORKERS,
+    )
+
+    assert pending == []
+    assert completed == ["301999", "000001"]
+    assert effective_end_dates == {"000001": pd.Timestamp("2026-03-31")}
+    assert set(lifecycle_registry["lifecycle_status"]) == {"active", "not_yet_listed"}
 
 
 def test_build_processed_symbol_frame_from_raw_adjusts_prices_and_units() -> None:

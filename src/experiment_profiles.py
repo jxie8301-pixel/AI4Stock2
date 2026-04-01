@@ -49,8 +49,12 @@ def resolve_experiment_profile(
         profile_path = repo_root / profile_path
 
     profile_cfg = load_yaml_file(profile_path)
+    config = deepcopy(profile_cfg)
+    sweep = deepcopy(config.pop("sweep", {}))
     return {
         "name": resolved_name,
         "path": str(profile_path),
-        "config": deepcopy(profile_cfg),
+        "config": config,
+        "sweep": sweep,
+        "raw": deepcopy(profile_cfg),
     }

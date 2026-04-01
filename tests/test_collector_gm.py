@@ -101,6 +101,7 @@ def test_resolve_symbol_lifecycle_status_and_effective_end_date_for_delisted() -
 
 def test_resolve_symbol_lifecycle_status_marks_suspended_without_truncating_end_date() -> None:
     target_end_date = pd.Timestamp("2026-03-31")
+    latest_known_date = pd.Timestamp("2026-03-20")
 
     assert (
         resolve_symbol_lifecycle_status(
@@ -116,7 +117,8 @@ def test_resolve_symbol_lifecycle_status_marks_suspended_without_truncating_end_
         listed_date="2000-01-01",
         delisted_date=None,
         latest_is_suspended=True,
-    ) == target_end_date
+        latest_known_date=latest_known_date,
+    ) == latest_known_date
 
 
 def test_resolve_all_symbols_preserves_local_history_symbols(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -197,6 +199,57 @@ def test_precheck_pending_symbols_filters_completed_in_input_order(monkeypatch: 
         "000002": pd.Timestamp("2026-03-31"),
     }
     assert set(lifecycle_registry["local_symbol"]) == {"000001", "000002"}
+
+
+def test_precheck_pending_symbols_skips_not_yet_listed_and_converges_suspended(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "src.collector_gm.load_symbol_cache",
+        lambda: pd.DataFrame(
+            {
+                "local_symbol": ["000001", "000002"],
+                "symbol": ["SZSE.000001", "SZSE.000002"],
+                "sec_id": ["000001", "000002"],
+                "sec_name": ["平安银行", "未来样本"],
+                "exchange": ["SZSE", "SZSE"],
+                "listed_date": [pd.Timestamp("1991-01-01"), pd.Timestamp("2026-05-01")],
+                "delisted_date": [pd.NaT, pd.NaT],
+                "board": [None, None],
+                "trade_n": [None, None],
+                "fetched_at": [pd.Timestamp("2026-04-01"), pd.Timestamp("2026-04-01")],
+            }
+        ),
+    )
+    state_map = {
+        "000001": SymbolState(
+            "000001",
+            pd.Timestamp("2026-03-20"),
+            pd.Timestamp("2026-03-20"),
+            pd.Timestamp("2026-03-20"),
+            pd.Timestamp("2026-03-20"),
+            pd.Timestamp("2026-03-20"),
+            pd.Timestamp("2026-03-20"),
+        ),
+        "000002": SymbolState("000002", None, None, None, None, None, None),
+    }
+    monkeypatch.setattr("src.collector_gm.load_symbol_state", lambda symbol: state_map[symbol])
+    monkeypatch.setattr(
+        "src.collector_gm.infer_latest_flag",
+        lambda path, column, date_column="trade_date": True if path.stem == "000001" else None,
+    )
+
+    pending, completed, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
+        ["000002", "000001"],
+        target_end_date=pd.Timestamp("2026-03-31"),
+        max_workers=PRECHECK_WORKERS,
+    )
+
+    assert pending == []
+    assert completed == ["000002", "000001"]
+    assert effective_end_dates == {"000001": pd.Timestamp("2026-03-20")}
+    registry_status = lifecycle_registry.set_index("local_symbol")["lifecycle_status"].to_dict()
+    assert registry_status == {"000001": "suspended", "000002": "not_yet_listed"}
 
 
 def test_precheck_stage_updates_marks_ready_and_pending_in_input_order(

@@ -25,6 +25,21 @@ from tqdm import tqdm
 import yaml
 
 try:
+    from src.data_source import (
+        SUPPORTED_DATA_SOURCES,
+        get_default_factor_store_dir,
+        resolve_data_source_name,
+        resolve_source_parquet_dir,
+    )
+except ModuleNotFoundError:
+    from data_source import (  # type: ignore
+        SUPPORTED_DATA_SOURCES,
+        get_default_factor_store_dir,
+        resolve_data_source_name,
+        resolve_source_parquet_dir,
+    )
+
+try:
     from src.label_utils import (
         DEFAULT_LABEL_ABS_CAP,
         DEFAULT_LABEL_HORIZON,
@@ -1432,6 +1447,7 @@ def generate_factor_store(
     workers: int = 1,
     incremental: bool = False,
     label_horizons: list[int] | None = None,
+    data_source: str | None = None,
 ) -> dict[str, Any]:
     """Generate the unified Parquet factor store."""
     pdir = Path(parquet_dir)
@@ -1548,6 +1564,8 @@ def generate_factor_store(
         "storage_format": "parquet",
         "storage_layout": "symbol_shards",
         "factor_space": FULL_FACTOR_SPACE_NAME,
+        "data_source": data_source or "",
+        "source_parquet_dir": str(pdir),
         "num_features": len(feature_names),
         "num_rows": total_rows,
         "shape": [total_rows, len(feature_names)],
@@ -1605,6 +1623,7 @@ def generate_panel_cache(
     workers: int = 1,
     incremental: bool = False,
     label_horizons: list[int] | None = None,
+    data_source: str | None = None,
 ) -> dict[str, Any]:
     """Backward-compatible alias for the factor-store generator."""
     return generate_factor_store(
@@ -1613,6 +1632,7 @@ def generate_panel_cache(
         workers=workers,
         incremental=incremental,
         label_horizons=label_horizons,
+        data_source=data_source,
     )
 
 
@@ -1626,7 +1646,12 @@ def validate_default_dimensions() -> dict[str, int]:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate the unified full-factor Parquet store from parquet.")
     parser.add_argument("--config", default="configs/config.yaml", help="Experiment config path for factor-store output settings.")
-    parser.add_argument("--parquet-dir", default="data/processed/combined", help="Input parquet directory.")
+    parser.add_argument(
+        "--data-source",
+        choices=SUPPORTED_DATA_SOURCES,
+        help="Named data source for default parquet/factor-store resolution.",
+    )
+    parser.add_argument("--parquet-dir", default=None, help="Input parquet directory.")
     parser.add_argument("--output-dir", default=None, help="Output factor-store directory.")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for counting/writing.")
     parser.add_argument(
@@ -1656,12 +1681,22 @@ def main() -> None:
     if args.config:
         with open(args.config, encoding="utf-8") as f:
             cfg = yaml.safe_load(f) or {}
+    if args.data_source:
+        cfg.setdefault("data", {})
+        cfg["data"]["source"] = args.data_source
     label_horizons = resolve_label_horizons(cfg)
     if args.label_horizons:
         label_horizons = resolve_label_horizons(
             {"label": {"horizons": [int(item.strip()) for item in args.label_horizons.split(",") if item.strip()]}}
         )
-    out_dir = args.output_dir or cfg.get("features", {}).get("factor_store_dir") or cfg.get("features", {}).get("cache_dir") or DEFAULT_FULL_FACTOR_STORE_DIR
+    data_source = resolve_data_source_name(cfg)
+    parquet_dir = args.parquet_dir or resolve_source_parquet_dir(cfg)
+    out_dir = (
+        args.output_dir
+        or cfg.get("features", {}).get("factor_store_dir")
+        or cfg.get("features", {}).get("cache_dir")
+        or get_default_factor_store_dir(data_source, FULL_FACTOR_SPACE_NAME)
+    )
     feature_names = get_full_factor_space_feature_names()
     alpha158_count = len(get_alpha158_feature_config()[1])
     lgbm_count = len(get_lgbm_purified_feature_names())
@@ -1670,6 +1705,8 @@ def main() -> None:
 
     print(
         "storage_format=parquet, "
+        f"data_source={data_source}, "
+        f"parquet_dir={parquet_dir}, "
         f"factor_space={FULL_FACTOR_SPACE_NAME}, "
         f"output={out_dir}, "
         f"incremental={args.incremental}, "
@@ -1684,11 +1721,12 @@ def main() -> None:
         f"total:{len(feature_names)}"
     )
     generate_factor_store(
-        parquet_dir=args.parquet_dir,
+        parquet_dir=parquet_dir,
         output_dir=out_dir,
         workers=max(1, int(args.workers)),
         incremental=args.incremental,
         label_horizons=label_horizons,
+        data_source=data_source,
     )
 
 

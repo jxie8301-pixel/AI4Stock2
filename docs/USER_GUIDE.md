@@ -2,7 +2,13 @@
 
 ## 1. 数据准备 (Data Preparation)
 
-本项目使用 `akshare` 并结合 Cookie 劫持来稳定获取全市场 A 股（量价+估值）数据。你需要手动执行数据同步。
+本项目当前同时保留三条数据源路径：
+
+- `akshare` / 东财：历史主路径，当前仍可用于旧数据兼容
+- `GM`：独立 raw 保留 + 二次规范化路径
+- `Tushare`：新的主替代候选，当前已经可以独立抓取和增量更新
+
+你需要手动执行数据同步。
 
 当前支持两种互斥的网络后端：
 - `cookie`: 默认方案，使用本地 `data/cookies.json` + `curl_cffi`
@@ -13,6 +19,10 @@
 如果你要试验 GM 数据源，当前建议走“全量 raw 保留 + 二次规范化”的独立目录，不要和东财数据混写。GM 路径当前使用：
 - raw: `data/gm/raw/...`
 - normalized parquet: `data/gm/processed/combined/...`
+
+如果你要试验或逐步切换到 Tushare，当前同样建议走独立目录，不要和东财 / GM 混写。Tushare 路径当前使用：
+- raw: `data/tushare/raw/...`
+- normalized parquet: `data/tushare/processed/combined/...`
 
 ### 同步旧项目数据
 建议直接将旧 `AI4Stock` 项目的 `data/raw` 和 `data/processed` 文件夹复制到本项目的 `data/` 目录下，实现无缝衔接。
@@ -128,6 +138,77 @@ GM raw 目录当前拆分为：
 uv run python src/gen_feature.py --parquet-dir data/gm/processed/combined --output-dir data/factor_store/gm_full_factor_space --workers 8
 ```
 
+### Tushare 数据采集
+
+Tushare 路径当前已经支持：
+- 股票列表缓存
+- 交易日历缓存
+- `daily`
+- `daily_basic`
+- `adj_factor`
+- `stk_limit`
+- 基于这些表输出一份 `hfq` 规范化 combined parquet
+
+当前这条路径已经可以独立跑通，但还没有正式切换为默认研究数据源。
+原因不是 collector 不可用，而是正式接入前还要完成：
+- canonical schema 定稿
+- 训练 / rolling 入口的正式切换
+- 财务 / 事件表的系统接入
+
+如果 shell 里已经保存过 Tushare token，通常不需要重复显式 `export`。
+如需显式指定，也可以在运行前注入：
+```bash
+export TUSHARE_TOKEN=<YOUR_TOKEN>
+```
+
+刷新 Tushare 股票列表缓存：
+```bash
+uv run python src/collector_tushare.py --refresh-symbols-only
+```
+
+抓取全量或缓存股票池：
+```bash
+uv run python src/collector_tushare.py --all --workers 8 --end-date 2026-03-31
+```
+
+按本地已有 symbol + 缓存股票池做增量更新：
+```bash
+uv run python src/collector_tushare.py --update --workers 8 --end-date 2026-03-31
+```
+
+只跑少量 symbol 做验证：
+```bash
+uv run python src/collector_tushare.py --symbols 600000,000333 --workers 2 --end-date 2026-03-31
+```
+
+如果 raw 已经完整，只想从本地 raw 重建 `hfq` 规范化 parquet：
+```bash
+uv run python src/collector_tushare.py --rebuild-processed --workers 8
+```
+
+Tushare raw 目录当前拆分为：
+- `data/tushare/raw/meta/`
+- `data/tushare/raw/daily/`
+- `data/tushare/raw/daily_basic/`
+- `data/tushare/raw/adj_factor/`
+- `data/tushare/raw/stk_limit/`
+
+当前 Tushare collector 的几个关键行为：
+- 以 `stock_basic(list_status=L/D)` 维护股票缓存，并为退市股票记录 `delist_date`
+- 用交易日历推断“目标最新交易日”，而不是简单拿今天日期判断是否完整
+- 对长历史表按时间块分段抓取，避免 `6000` 行截断导致“看似完成，实际缺早期历史”
+- `processed/combined` 当前默认把 `open/high/low/close` 统一到 `hfq`，同时保留 `raw_open/raw_high/raw_low/raw_close/raw_pre_close`
+
+当前限流处理已经改成 stage-level cooldown 调度，而不是固定 sleep：
+- 某个接口如果明确返回“每分钟最多访问该接口...”，当前 stage 会进入 `60s cooldown`
+- 调度器会先去跑其他 stage
+- 只有当所有仍有 pending 的 stage 都处于 cooldown 时，才会等待最早恢复的那个
+
+如果你想先看真实接口列名和速度，再决定是否接入新的财务表，可以用探针脚本：
+```bash
+uv run python src/probe_tushare.py --symbol 000333.SZ
+```
+
 当前脚本默认生成：
 - `csi300`
 - `csi500`
@@ -209,6 +290,49 @@ uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10
 ```bash
 uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --topk 20 --n-drop 4 --run-tag top20_drop4
 uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --topk 30 --n-drop 5 --run-tag top30_drop5
+```
+
+如果你不想为了一个小参数改动再复制一份 experiment yaml，现在也可以直接用通用覆写：
+```bash
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --set strategy.topk=20 --set rolling.retrain_step=5
+uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --set label.signal_horizon=10
+```
+
+### 批量参数扫描
+
+如果你想批量扫描一组参数，不要再复制很多 experiment yaml。
+现在可以直接用批量入口：
+```bash
+uv run python run_experiment_batch.py \
+  --pipeline rolling \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --sweep 'rolling.retrain_step=[5,10,15]' \
+  --run-tag-prefix retrain_sweep
+```
+
+也可以同时扫多个维度，按笛卡尔积展开：
+```bash
+uv run python run_experiment_batch.py \
+  --pipeline rolling \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --sweep 'rolling.retrain_step=[5,10,15]' \
+  --sweep 'strategy.topk=[20,30]'
+```
+
+固定参数可以继续用 `--set`，它会应用到每一个子运行：
+```bash
+uv run python run_experiment_batch.py \
+  --pipeline rolling \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --data-source tushare \
+  --set strategy.n_drop=5 \
+  --sweep 'rolling.retrain_step=[5,10,15]'
+```
+
+当前 batch runner 默认是串行顺序执行。
+如果你只是想先确认会展开哪些命令，可以加：
+```bash
+uv run python run_experiment_batch.py --pipeline rolling --experiment-profile core_v4_lgbm_default_10x20x10 --sweep 'rolling.retrain_step=[5,10,15]' --dry-run
 ```
 
 ### 单次实验 (研究模式)

@@ -4,12 +4,12 @@
 
 AI4Stock2 is now a native A-share research pipeline built around:
 
-- Parquet market data in `data/processed/combined/`
+- Parquet market data in normalized `combined/` directories
 - Local feature-cache generation in `src/gen_feature.py`
 - Native rolling training in `run_native_rolling.py`
 - Native backtest and evaluation in `src/native_backtest.py` and `src/evaluate.py`
 
-The default research path is:
+The stable research path today is:
 
 1. Update raw/processed Parquet data with `src/collector_akshare.py`
 2. Generate one unified full-factor store with `src/gen_feature.py`
@@ -17,13 +17,29 @@ The default research path is:
 4. Evaluate signal quality and run the native backtest
 5. Archive metrics, plots, models, and config snapshots into the local experiment store
 
+At the same time, the data layer is actively being migrated:
+
+1. `src/collector_tushare.py` is the leading replacement candidate for daily market data
+2. `src/collector_gm.py` remains an isolated raw-retention + normalization path for comparison and backup coverage
+3. Tushare is not yet the default research source because the canonical normalized schema and formal workflow wiring are still in progress
+
 ## Active Workflow
 
 ### Data Layer
 
-- Source of truth: `data/processed/combined/*.parquet`
-- Updater: `src/collector_akshare.py`
+- Stable source of truth today: `data/processed/combined/*.parquet`
+- Stable updater today: `src/collector_akshare.py`
+- Isolated GM path: `data/gm/raw/*` -> `data/gm/processed/combined/*.parquet`
+- Isolated Tushare path: `data/tushare/raw/*` -> `data/tushare/processed/combined/*.parquet`
+- Migration target: promote one canonical Tushare-normalized `combined` schema into the formal research workflow
 - Native feature-cache builder: `src/gen_feature.py`
+
+Current collector roles:
+
+- `src/collector_akshare.py`: legacy Eastmoney-compatible update path for the current default research dataset
+- `src/collector_gm.py`: GM raw endpoint preservation plus second-pass normalization
+- `src/collector_tushare.py`: lifecycle-aware symbol-by-symbol incremental collector with segmented backfill and stage cooldown scheduling
+- `src/probe_tushare.py`: endpoint probe for schema/latency inspection before formal integration
 
 ### Feature Layer
 
@@ -84,6 +100,8 @@ AI4Stock2/
 │   └── USER_GUIDE.md
 ├── src/
 │   ├── collector_akshare.py
+│   ├── collector_gm.py
+│   ├── collector_tushare.py
 │   ├── config_loader.py
 │   ├── experiment_profiles.py
 │   ├── gen_feature.py
@@ -93,6 +111,7 @@ AI4Stock2/
 │   ├── native_backtest.py
 │   ├── backtest.py
 │   ├── evaluate.py
+│   ├── probe_tushare.py
 │   └── models/
 │       ├── pure_lightgbm.py
 │       └── pure_pytorch_lstm.py
@@ -105,6 +124,8 @@ AI4Stock2/
 - Backend: native only
 - Default model: `lgbm`
 - Default feature profile: `core_v4_techlite`
+- Stable default data path: AkShare / Eastmoney-compatible `data/processed/combined`
+- Tushare is the active migration target, but not yet the formal default
 - Experiments must now be selected explicitly via `--experiment-profile`
 - Default universe: `csi300`
 - Supported generated universes: `csi300`, `csi500`, `zz1000`
@@ -117,6 +138,7 @@ AI4Stock2/
 - If you change feature profile, you do not rebuild the cache.
 - If you only change model profile, you do not rebuild the cache.
 - `gen_feature.py` should remain detached from feature/model/experiment profiles.
+- When validating GM or Tushare, keep their normalized parquet under their own directories until the canonical schema switch is finished.
 - Use this document for structure.
 - Use `docs/CONFIG_PROFILE_ARCHITECTURE.md` for the canonical layering rules.
 - Use `docs/USER_GUIDE.md` for commands.

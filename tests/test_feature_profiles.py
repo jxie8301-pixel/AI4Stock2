@@ -17,6 +17,7 @@ class FeatureProfilesTest(unittest.TestCase):
         profile = resolve_feature_profile({})
 
         self.assertEqual(profile["alpha"], "all_factors")
+        self.assertEqual(profile["data_source"], "akshare")
         self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
         self.assertEqual(len(profile["selected_columns"]), 46)
@@ -44,6 +45,17 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertEqual(len(profile["selected_columns"]), 158)
         self.assertEqual(profile["selected_columns"][0], "KMID")
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/alpha158_full.yaml"))
+
+    def test_tushare_source_switches_default_factor_store_dir(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v4_techlite"},
+            }
+        )
+
+        self.assertEqual(profile["data_source"], "tushare")
+        self.assertEqual(profile["factor_store_dir"], "data/factor_store/tushare_full_factor_space")
 
     def test_compact_profile_reduces_feature_count(self):
         profile = resolve_feature_profile(

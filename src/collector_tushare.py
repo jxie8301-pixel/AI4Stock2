@@ -28,6 +28,7 @@ PROCESSED_DIR = TS_ROOT / "processed" / "combined"
 SYMBOL_CACHE_PATH = RAW_META_DIR / "symbol_cache.parquet"
 TRADE_CALENDAR_PATH = RAW_META_DIR / "trade_calendar.parquet"
 SYMBOL_LIFECYCLE_PATH = RAW_META_DIR / "symbol_lifecycle.parquet"
+BACKFILL_EXHAUSTION_PATH = RAW_META_DIR / "backfill_exhaustion.parquet"
 
 DEFAULT_TOKEN_ENV = "TUSHARE_TOKEN"
 DEFAULT_START_DATE = "19900101"
@@ -68,6 +69,14 @@ SYMBOL_LIFECYCLE_COLS = [
     "latest_stk_limit_date",
     "latest_processed_date",
     "last_checked_at",
+]
+
+BACKFILL_EXHAUSTION_COLS = [
+    "stage_name",
+    "local_symbol",
+    "expected_start_date",
+    "observed_earliest_date",
+    "recorded_at",
 ]
 
 TS_PROCESSED_CANONICAL_COLS = [
@@ -132,10 +141,20 @@ class TaskResult:
 
 
 @dataclass(slots=True)
+class StageTaskResult:
+    symbol: str
+    ok: bool
+    detail: str
+    payload: Any | None = None
+
+
+@dataclass(slots=True)
 class UpdateResult:
     status: str
     changed: bool
     latest: pd.Timestamp | None
+    earliest: pd.Timestamp | None = None
+    backfill_exhausted: bool = False
 
 
 @dataclass(slots=True)
@@ -570,18 +589,128 @@ def _normalize_optional_timestamp(value: Any) -> pd.Timestamp | None:
     return ts_value.normalize()
 
 
+def _latest_trade_date(state: SymbolState) -> pd.Timestamp | None:
+    latest_dates = [
+        item for item in [state.daily_latest, state.daily_basic_latest] if item is not None
+    ]
+    if not latest_dates:
+        return None
+    return min(latest_dates)
+
+
+def load_backfill_exhaustion() -> pd.DataFrame:
+    frame = _read_parquet_safe(BACKFILL_EXHAUSTION_PATH)
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=BACKFILL_EXHAUSTION_COLS)
+    out = frame.copy()
+    for col in ["expected_start_date", "observed_earliest_date", "recorded_at"]:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce")
+    return out.reindex(columns=BACKFILL_EXHAUSTION_COLS)
+
+
+def save_backfill_exhaustion(df: pd.DataFrame) -> None:
+    save_optimized_parquet(df.reindex(columns=BACKFILL_EXHAUSTION_COLS), BACKFILL_EXHAUSTION_PATH)
+
+
+def build_backfill_exhaustion_lookup(
+    frame: pd.DataFrame,
+) -> dict[tuple[str, str], dict[str, pd.Timestamp | None]]:
+    lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] = {}
+    if frame.empty:
+        return lookup
+    for _, row in frame.iterrows():
+        stage_name = str(row.get("stage_name") or "").strip()
+        symbol = str(row.get("local_symbol") or "").strip()
+        if not stage_name or not symbol:
+            continue
+        lookup[(stage_name, symbol)] = {
+            "expected_start_date": _normalize_optional_timestamp(row.get("expected_start_date")),
+            "observed_earliest_date": _normalize_optional_timestamp(row.get("observed_earliest_date")),
+            "recorded_at": _normalize_optional_timestamp(row.get("recorded_at")),
+        }
+    return lookup
+
+
+def merge_backfill_exhaustion_records(
+    existing: pd.DataFrame,
+    updates: list[dict[str, Any]],
+    removals: set[tuple[str, str]],
+) -> pd.DataFrame:
+    out = existing.copy()
+    if removals and not out.empty:
+        removal_keys = {(stage, symbol) for stage, symbol in removals}
+        keep_mask = [
+            (str(row.get("stage_name") or "").strip(), str(row.get("local_symbol") or "").strip())
+            not in removal_keys
+            for _, row in out.iterrows()
+        ]
+        out = out.loc[keep_mask].copy()
+    if updates:
+        updates_df = pd.DataFrame(updates).reindex(columns=BACKFILL_EXHAUSTION_COLS)
+        if out.empty:
+            out = updates_df.copy()
+        else:
+            out = pd.concat([out, updates_df], ignore_index=True)
+        out = (
+            out.drop_duplicates(subset=["stage_name", "local_symbol"], keep="last")
+            .sort_values(["stage_name", "local_symbol"])
+            .reset_index(drop=True)
+        )
+    elif not out.empty:
+        out = out.sort_values(["stage_name", "local_symbol"]).reset_index(drop=True)
+    return out.reindex(columns=BACKFILL_EXHAUSTION_COLS)
+
+
+def is_backfill_satisfied(
+    stage_name: str,
+    symbol: str,
+    expected_start_date: pd.Timestamp | None,
+    earliest: pd.Timestamp | None,
+    exhaustion_lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None = None,
+) -> bool:
+    if expected_start_date is None:
+        return True
+    if earliest is not None and earliest <= expected_start_date:
+        return True
+    if exhaustion_lookup is None:
+        return False
+    record = exhaustion_lookup.get((stage_name, symbol))
+    if not record:
+        return False
+    recorded_expected = _normalize_optional_timestamp(record.get("expected_start_date"))
+    return recorded_expected == expected_start_date
+
+
 def resolve_symbol_lifecycle_status(
     target_end_date: pd.Timestamp,
     list_status: str | None = None,
     list_date: Any = None,
     delist_date: Any = None,
+    last_trade_date: Any = None,
+    latest_adj_factor_date: Any = None,
+    latest_stk_limit_date: Any = None,
 ) -> str:
     list_ts = _normalize_optional_timestamp(list_date)
     delist_ts = _normalize_optional_timestamp(delist_date)
+    last_trade_ts = _normalize_optional_timestamp(last_trade_date)
+    latest_adj_ts = _normalize_optional_timestamp(latest_adj_factor_date)
+    latest_stk_limit_ts = _normalize_optional_timestamp(latest_stk_limit_date)
     if list_ts is not None and list_ts > target_end_date:
         return "not_yet_listed"
     if list_status == "D" and delist_ts is not None and delist_ts <= target_end_date:
         return "delisted"
+    if (
+        last_trade_ts is not None
+        and last_trade_ts < target_end_date
+        and latest_adj_ts is not None
+        and latest_adj_ts >= target_end_date
+        and (
+            target_end_date < STK_LIMIT_COVERAGE_START
+            or (latest_stk_limit_ts is not None and latest_stk_limit_ts >= target_end_date)
+        )
+    ):
+        return "suspended"
     return "active"
 
 
@@ -590,17 +719,27 @@ def resolve_effective_end_date(
     list_status: str | None = None,
     list_date: Any = None,
     delist_date: Any = None,
+    last_trade_date: Any = None,
+    latest_adj_factor_date: Any = None,
+    latest_stk_limit_date: Any = None,
 ) -> pd.Timestamp:
-    if (
-        resolve_symbol_lifecycle_status(
-            target_end_date,
-            list_status=list_status,
-            list_date=list_date,
-            delist_date=delist_date,
-        )
-        == "delisted"
-    ):
-        return _normalize_optional_timestamp(delist_date) or target_end_date
+    lifecycle_status = resolve_symbol_lifecycle_status(
+        target_end_date,
+        list_status=list_status,
+        list_date=list_date,
+        delist_date=delist_date,
+        last_trade_date=last_trade_date,
+        latest_adj_factor_date=latest_adj_factor_date,
+        latest_stk_limit_date=latest_stk_limit_date,
+    )
+    if lifecycle_status == "delisted":
+        delist_ts = _normalize_optional_timestamp(delist_date) or target_end_date
+        trade_ts = _normalize_optional_timestamp(last_trade_date)
+        if trade_ts is not None and trade_ts < delist_ts:
+            return trade_ts
+        return delist_ts
+    if lifecycle_status == "suspended":
+        return _normalize_optional_timestamp(last_trade_date) or target_end_date
     return target_end_date
 
 
@@ -622,15 +761,23 @@ def is_symbol_complete(
     state: SymbolState,
     target_end_date: pd.Timestamp,
     expected_start_date: pd.Timestamp | None = None,
+    backfill_ready: dict[str, bool] | None = None,
 ) -> bool:
     if expected_start_date is not None:
-        required_starts = [
-            state.daily_earliest,
-            state.daily_basic_earliest,
-            state.adj_factor_earliest,
-        ]
-        if any(item is None or item > expected_start_date for item in required_starts):
-            return False
+        required_starts = {
+            "daily": state.daily_earliest,
+            "daily_basic": state.daily_basic_earliest,
+            "adj_factor": state.adj_factor_earliest,
+        }
+        for stage_name, earliest in required_starts.items():
+            if earliest is None and not (backfill_ready or {}).get(stage_name, False):
+                return False
+            if (
+                earliest is not None
+                and earliest > expected_start_date
+                and not (backfill_ready or {}).get(stage_name, False)
+            ):
+                return False
     required = [
         state.daily_latest,
         state.daily_basic_latest,
@@ -680,12 +827,18 @@ def build_symbol_lifecycle_registry(
                 list_status=list_status,
                 list_date=list_date,
                 delist_date=delist_date,
+                last_trade_date=_latest_trade_date(state),
+                latest_adj_factor_date=state.adj_factor_latest,
+                latest_stk_limit_date=state.stk_limit_latest,
             )
             effective_end_date = resolve_effective_end_date(
                 target_end_date,
                 list_status=list_status,
                 list_date=list_date,
                 delist_date=delist_date,
+                last_trade_date=_latest_trade_date(state),
+                latest_adj_factor_date=state.adj_factor_latest,
+                latest_stk_limit_date=state.stk_limit_latest,
             )
             rows.append(
                 {
@@ -721,6 +874,7 @@ def build_symbol_lifecycle_registry(
 def split_symbols_by_completion(
     symbols: list[str],
     lifecycle_registry: pd.DataFrame,
+    exhaustion_lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None = None,
 ) -> tuple[list[str], list[str], dict[str, pd.Timestamp]]:
     if lifecycle_registry.empty:
         return list(symbols), [], {}
@@ -735,12 +889,29 @@ def split_symbols_by_completion(
             pending.append(symbol)
             continue
         row = registry_by_symbol.loc[symbol]
+        if str(row.get("lifecycle_status") or "") == "not_yet_listed":
+            completed.append(symbol)
+            continue
         effective_end = _normalize_optional_timestamp(row["effective_end_date"])
         if effective_end is None:
             pending.append(symbol)
             continue
         effective_end_dates[symbol] = effective_end
         expected_start_date = _normalize_optional_timestamp(row["list_date"])
+        backfill_ready = {
+            stage_name: is_backfill_satisfied(
+                stage_name,
+                symbol,
+                expected_start_date,
+                _normalize_optional_timestamp(row.get(column_name)),
+                exhaustion_lookup,
+            )
+            for stage_name, column_name in {
+                "daily": "earliest_daily_date",
+                "daily_basic": "earliest_daily_basic_date",
+                "adj_factor": "earliest_adj_factor_date",
+            }.items()
+        }
         state = SymbolState(
             symbol=symbol,
             daily_earliest=_normalize_optional_timestamp(row.get("earliest_daily_date")),
@@ -752,7 +923,12 @@ def split_symbols_by_completion(
             stk_limit_latest=_normalize_optional_timestamp(row["latest_stk_limit_date"]),
             processed_latest=_normalize_optional_timestamp(row["latest_processed_date"]),
         )
-        if is_symbol_complete(state, effective_end, expected_start_date=expected_start_date):
+        if is_symbol_complete(
+            state,
+            effective_end,
+            expected_start_date=expected_start_date,
+            backfill_ready=backfill_ready,
+        ):
             completed.append(symbol)
         else:
             pending.append(symbol)
@@ -775,8 +951,9 @@ def precheck_pending_symbols(
         target_end_date=target_end_date,
         max_workers=max_workers,
     )
+    exhaustion_lookup = build_backfill_exhaustion_lookup(load_backfill_exhaustion())
     pending, completed, effective_end_dates = split_symbols_by_completion(
-        symbols, lifecycle_registry
+        symbols, lifecycle_registry, exhaustion_lookup=exhaustion_lookup
     )
     print(f"[*] Tushare precheck done. completed={len(completed)}, pending={len(pending)}")
     return pending, completed, effective_end_dates, lifecycle_registry
@@ -790,6 +967,7 @@ def precheck_stage_updates(
     effective_end_dates: dict[str, pd.Timestamp] | None = None,
     expected_start_dates: dict[str, pd.Timestamp] | None = None,
     coverage_start_date: pd.Timestamp | None = None,
+    exhaustion_lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None = None,
     max_workers: int = PRECHECK_WORKERS,
 ) -> StageUpdatePlan:
     if not symbols:
@@ -835,14 +1013,19 @@ def precheck_stage_updates(
             else None
         )
         earliest = earliest_by_symbol.get(symbol)
-        is_backfilled = expected_start_date is None or (
-            earliest is not None and earliest <= expected_start_date
+        is_backfilled = is_backfill_satisfied(
+            stage_name,
+            symbol,
+            expected_start_date,
+            earliest,
+            exhaustion_lookup,
         )
         if latest is not None and latest >= required_end_date and is_backfilled:
             ready_outputs[symbol] = UpdateResult(
                 status=f"{stage_name} up-to-date at {latest.date()}",
                 changed=False,
                 latest=latest,
+                earliest=earliest,
             )
         else:
             pending_set.add(symbol)
@@ -1046,6 +1229,7 @@ def update_raw_table(
             status=f"{path.parent.name} up-to-date at {latest.date()}",
             changed=False,
             latest=latest,
+            earliest=earliest,
         )
 
     existing = load_parquet_if_exists(path)
@@ -1062,16 +1246,26 @@ def update_raw_table(
             status=f"{path.parent.name} unchanged at {latest.date() if latest is not None else 'n/a'}",
             changed=False,
             latest=latest,
+            earliest=earliest,
         )
 
     fetched = fetcher(symbol, fetch_start.strftime("%Y%m%d"), fetch_end.strftime("%Y%m%d"))
 
     if fetched.empty:
+        if needs_backfill and not needs_future and existing is not None and not existing.empty and earliest is not None:
+            return UpdateResult(
+                status=f"{path.parent.name} backfill exhausted at {earliest.date()}",
+                changed=False,
+                latest=latest,
+                earliest=earliest,
+                backfill_exhausted=True,
+            )
         if existing is not None and not existing.empty and latest is not None:
             return UpdateResult(
                 status=f"{path.parent.name} unchanged at {latest.date()}",
                 changed=False,
                 latest=latest,
+                earliest=earliest,
             )
         raise RuntimeError(f"{path.parent.name} fetch returned empty data")
 
@@ -1079,10 +1273,12 @@ def update_raw_table(
     combined = _normalize_symbol_date_frame(combined, "trade_date", "ts_code")
     save_optimized_parquet(combined, path)
     latest = combined["trade_date"].max()
+    earliest = combined["trade_date"].min()
     return UpdateResult(
         status=f"{path.parent.name} saved to {latest.date()}",
         changed=True,
         latest=latest,
+        earliest=earliest,
     )
 
 
@@ -1242,13 +1438,13 @@ def should_rebuild_processed(symbol: str, updates: list[UpdateResult]) -> bool:
     return processed_latest < daily_latest
 
 
-def _run_stage_worker(symbol: str, worker: Callable[[str], Any]) -> TaskResult:
+def _run_stage_worker(symbol: str, worker: Callable[[str], Any]) -> StageTaskResult:
     try:
         payload = worker(symbol)
         detail = payload.status if isinstance(payload, UpdateResult) else str(payload)
-        return TaskResult(symbol=symbol, ok=True, detail=detail)
+        return StageTaskResult(symbol=symbol, ok=True, detail=detail, payload=payload)
     except Exception as exc:
-        return TaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
+        return StageTaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
 
 
 def collect_stage_batch(
@@ -1258,8 +1454,8 @@ def collect_stage_batch(
     max_workers: int,
     max_consecutive_failures: int = MAX_CONSECUTIVE_FAILURES,
     skip_remaining_on_threshold: bool = True,
-) -> tuple[list[TaskResult], list[str], bool]:
-    results: list[TaskResult] = []
+) -> tuple[list[StageTaskResult], list[str], bool]:
+    results: list[StageTaskResult] = []
     consecutive_failures = 0
     rate_limit_hit = False
     batch_symbols = list(symbols)
@@ -1323,9 +1519,9 @@ def collect_stage(
             else f"{stage_name} skipped after {max_consecutive_failures} consecutive failures"
         )
         results.extend(
-            TaskResult(symbol=symbol, ok=False, detail=detail) for symbol in deferred_symbols
+            StageTaskResult(symbol=symbol, ok=False, detail=detail) for symbol in deferred_symbols
         )
-    return results
+    return [TaskResult(symbol=item.symbol, ok=item.ok, detail=item.detail) for item in results]
 
 
 def run_tushare_update_pipeline(
@@ -1334,6 +1530,8 @@ def run_tushare_update_pipeline(
     max_workers: int,
     effective_end_dates: dict[str, pd.Timestamp] | None = None,
 ) -> list[TaskResult]:
+    exhaustion_frame = load_backfill_exhaustion()
+    exhaustion_lookup = build_backfill_exhaustion_lookup(exhaustion_frame)
     cached = load_symbol_cache()
     expected_start_dates: dict[str, pd.Timestamp] = {}
     if cached is not None and not cached.empty:
@@ -1404,6 +1602,7 @@ def run_tushare_update_pipeline(
             effective_end_dates=effective_end_dates,
             expected_start_dates=expected_start_dates if stage_name in {"daily", "daily_basic", "adj_factor"} else None,
             coverage_start_date=STK_LIMIT_COVERAGE_START if stage_name == "stk_limit" else None,
+            exhaustion_lookup=exhaustion_lookup,
             max_workers=PRECHECK_WORKERS,
         )
         for stage_name, stage_dir, _ in stage_specs
@@ -1418,6 +1617,8 @@ def run_tushare_update_pipeline(
     stage_failure: dict[str, int] = {}
     stage_done: dict[str, int] = {}
     stage_total: dict[str, int] = {}
+    backfill_updates: list[dict[str, Any]] = []
+    backfill_removals: set[tuple[str, str]] = set()
 
     for stage_name, _, _ in stage_specs:
         plan = stage_plans[stage_name]
@@ -1468,11 +1669,28 @@ def run_tushare_update_pipeline(
             for item in results:
                 if item.ok:
                     stage_details[item.symbol].append(f"{stage_name}: {item.detail}")
-                    stage_outputs[stage_name][item.symbol] = UpdateResult(
-                        status=item.detail,
-                        changed=" saved to " in item.detail,
-                        latest=infer_latest_date(stage_dir / f"{item.symbol}.parquet", "trade_date"),
-                    )
+                    if isinstance(item.payload, UpdateResult):
+                        stage_outputs[stage_name][item.symbol] = item.payload
+                        if item.payload.changed:
+                            backfill_removals.add((stage_name, item.symbol))
+                        elif item.payload.backfill_exhausted:
+                            backfill_updates.append(
+                                {
+                                    "stage_name": stage_name,
+                                    "local_symbol": item.symbol,
+                                    "expected_start_date": expected_start_dates.get(item.symbol)
+                                    if stage_name in {"daily", "daily_basic", "adj_factor"}
+                                    else pd.NaT,
+                                    "observed_earliest_date": item.payload.earliest,
+                                    "recorded_at": pd.Timestamp.now().normalize(),
+                                }
+                            )
+                    else:
+                        stage_outputs[stage_name][item.symbol] = UpdateResult(
+                            status=item.detail,
+                            changed=" saved to " in item.detail,
+                            latest=infer_latest_date(stage_dir / f"{item.symbol}.parquet", "trade_date"),
+                        )
                     stage_success[stage_name] += 1
                     stage_done[stage_name] += 1
                     continue
@@ -1526,6 +1744,14 @@ def run_tushare_update_pipeline(
             f"Waiting {wait_for:.1f}s for {next_stage} to resume..."
         )
         time.sleep(wait_for)
+
+    if backfill_updates or backfill_removals:
+        exhaustion_frame = merge_backfill_exhaustion_records(
+            exhaustion_frame,
+            updates=backfill_updates,
+            removals=backfill_removals,
+        )
+        save_backfill_exhaustion(exhaustion_frame)
 
     build_symbols = [
         symbol

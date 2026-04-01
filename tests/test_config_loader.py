@@ -1,6 +1,6 @@
 import unittest
 
-from src.config_loader import load_config
+from src.config_loader import load_config, load_runtime_config
 from src.experiment_profiles import resolve_experiment_profile
 from src.model_profiles import resolve_model_profile
 
@@ -21,8 +21,10 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(profile["config"]["features"]["profile"], "core_v4_techlite")
 
     def test_load_config_merges_experiment_and_model_profiles(self):
+        runtime_cfg = load_runtime_config("configs/config.yaml")
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
 
+        self.assertEqual(cfg["data"]["source"], runtime_cfg["data"]["source"])
         self.assertEqual(cfg["experiment"]["profile"], "core_v4_lgbm_default_10x20x10")
         self.assertTrue(cfg["experiment"]["profile_path"].endswith("configs/experiments/core_v4_lgbm_default_10x20x10.yaml"))
         self.assertEqual(cfg["features"]["profile"], "core_v4_techlite")

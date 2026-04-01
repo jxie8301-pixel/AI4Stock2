@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from src.data_source import resolve_data_source_name
 from src.label_utils import DEFAULT_SIGNAL_HORIZON, resolve_signal_horizon
 
 
@@ -22,6 +23,7 @@ SUMMARY_FIELDS = [
     "backend",
     "pipeline",
     "model",
+    "data_source",
     "experiment_profile",
     "model_profile",
     "run_tag",
@@ -250,6 +252,7 @@ def finalize_run_store(
         "backend": backend,
         "pipeline": pipeline,
         "model": model_name,
+        "data_source": resolve_data_source_name(cfg),
         "experiment_profile": resolve_experiment_profile_name(cfg, args),
         "model_profile": resolve_model_profile_name(cfg, args),
         "run_tag": getattr(args, "run_tag", None) or "",

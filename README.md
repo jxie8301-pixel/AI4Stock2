@@ -4,6 +4,9 @@ Native A-share research pipeline built around Parquet data, local feature caches
 
 ## Quickstart
 
+Before running training or factor generation, prepare one local normalized parquet data source first.
+The current stable path is still AkShare / Eastmoney-compatible data; GM and Tushare usage is documented in `docs/USER_GUIDE.md`.
+
 Generate the factor store for the active config:
 
 ```bash

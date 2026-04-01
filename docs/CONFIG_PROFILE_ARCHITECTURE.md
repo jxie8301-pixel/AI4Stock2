@@ -172,6 +172,24 @@ uv run python run_native_rolling.py \
   --model-profile lgbm_fast
 ```
 
+For one-off comparisons, prefer generic dotted overrides over cloning many yaml files:
+
+```bash
+uv run python run_native_rolling.py \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --set strategy.topk=20 \
+  --set rolling.retrain_step=5
+```
+
+For batch sweeps, prefer one base experiment plus a sweep runner:
+
+```bash
+uv run python run_experiment_batch.py \
+  --pipeline rolling \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --sweep 'rolling.retrain_step=[5,10,15]'
+```
+
 ## Recommended Baselines
 
 The recommended baseline stack is:

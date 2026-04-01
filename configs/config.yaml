@@ -1,12 +1,9 @@
+data:
+  source: tushare
 native:
   universe_dir: ./data/universes
-
 artifacts:
   enable_local_store: true
   store_dir: ./results/experiments
-
-features:
-  factor_store_dir: ./data/factor_store/full_factor_space
-
 label:
   horizons: [1, 5, 10, 20]

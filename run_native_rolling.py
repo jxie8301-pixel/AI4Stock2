@@ -10,6 +10,7 @@ import numpy as np
 
 from src.config_loader import load_config
 from src.config_validation import validate_training_config
+from src.data_source import SUPPORTED_DATA_SOURCES, resolve_data_source_name
 from src.experiment_store import (
     finalize_run_store,
     prepare_run_store,
@@ -21,6 +22,7 @@ from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask_frame, resolve_selected_features
 from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
+from src.override_utils import apply_override_args
 
 def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
@@ -29,6 +31,13 @@ def run_rolling_pipeline():
     parser.add_argument("--experiment-profile", help="Named experiment profile under configs/experiments/")
     parser.add_argument("--feature-profile", help="Override features.profile for this run")
     parser.add_argument("--model-profile", help="Override model.profile for this run")
+    parser.add_argument("--data-source", choices=SUPPORTED_DATA_SOURCES, help="Override runtime data source")
+    parser.add_argument(
+        "--set",
+        action="append",
+        dest="set_overrides",
+        help="Generic dotted override in key=value form, for example strategy.topk=20",
+    )
     parser.add_argument("--profile", help=argparse.SUPPRESS)
     parser.add_argument("--retrain-step", type=int, help="Rolling retrain step in trading days. If omitted, use config value.")
     parser.add_argument("--horizon", type=int, help=argparse.SUPPRESS)
@@ -55,6 +64,10 @@ def run_rolling_pipeline():
         )
         if args.model:
             cfg["model"]["name"] = args.model
+        if args.data_source:
+            cfg.setdefault("data", {})
+            cfg["data"]["source"] = args.data_source
+        apply_override_args(cfg, args.set_overrides)
         if args.retrain_step is not None and args.horizon is not None and args.retrain_step != args.horizon:
             parser.error("--retrain-step and --horizon refer to the same parameter; use one value.")
         if args.retrain_step is None and args.horizon is not None:
@@ -124,10 +137,11 @@ def run_rolling_pipeline():
     
     # ── 1. Load Global Native Data ────────────────────────
     factor_store_dir = get_native_factor_store_dir(cfg)
+    data_source = resolve_data_source_name(cfg)
     lookback = cfg["features"]["lookback"]
     batch_size = cfg["model"]["batch_size"]
     
-    print("\n[Step 1] Loading Parquet Factor Store Metadata")
+    print(f"\n[Step 1] Loading Parquet Factor Store Metadata (data_source={data_source})")
     meta = load_factor_store_metadata(factor_store_dir)
 
     selected_feature_idx, selected_feature_names = resolve_selected_features(meta, cfg)

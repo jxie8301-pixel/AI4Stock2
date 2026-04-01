@@ -1055,6 +1055,23 @@ def _normalize_optional_timestamp(value: Any) -> pd.Timestamp | None:
     return ts.normalize()
 
 
+def _latest_required_raw_date(state: SymbolState) -> pd.Timestamp | None:
+    latest_dates = [
+        item
+        for item in [
+            state.bars_latest,
+            state.meta_latest,
+            state.basic_latest,
+            state.mktvalue_latest,
+            state.valuation_latest,
+        ]
+        if item is not None
+    ]
+    if not latest_dates:
+        return None
+    return max(latest_dates)
+
+
 def resolve_symbol_lifecycle_status(
     target_end_date: pd.Timestamp,
     listed_date: Any = None,
@@ -1077,6 +1094,7 @@ def resolve_effective_end_date(
     listed_date: Any = None,
     delisted_date: Any = None,
     latest_is_suspended: bool | None = None,
+    latest_known_date: Any = None,
 ) -> pd.Timestamp:
     status = resolve_symbol_lifecycle_status(
         target_end_date,
@@ -1086,6 +1104,8 @@ def resolve_effective_end_date(
     )
     if status == "delisted":
         return _normalize_optional_timestamp(delisted_date) or target_end_date
+    if status == "suspended":
+        return _normalize_optional_timestamp(latest_known_date) or target_end_date
     return target_end_date
 
 
@@ -1138,6 +1158,7 @@ def build_symbol_lifecycle_registry(
                 listed_date=listed_date,
                 delisted_date=delisted_date,
                 latest_is_suspended=latest_is_suspended,
+                latest_known_date=_latest_required_raw_date(state),
             )
             rows.append(
                 {
@@ -1185,6 +1206,9 @@ def split_symbols_by_completion(
             pending.append(symbol)
             continue
         row = registry_by_symbol.loc[symbol]
+        if str(row.get("lifecycle_status") or "") == "not_yet_listed":
+            completed.append(symbol)
+            continue
         effective_end = _normalize_optional_timestamp(row["effective_end_date"])
         if effective_end is None:
             pending.append(symbol)

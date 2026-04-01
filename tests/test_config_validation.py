@@ -39,6 +39,13 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unknown config keys"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_rejects_unknown_data_source(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["data"]["source"] = "demo"
+
+        with self.assertRaisesRegex(ValueError, "Unsupported data source"):
+            validate_training_config(cfg, check_paths=False)
+
 
 if __name__ == "__main__":
     unittest.main()

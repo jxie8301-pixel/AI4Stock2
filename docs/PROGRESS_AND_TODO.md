@@ -29,6 +29,10 @@ What is true now:
 - The current collector downcasts `int64 -> int32` blindly; some Eastmoney share-count fields already overflow to negative values and must be fixed before direct use
 - The current research default should stay on `hfq`; `qfq` should not be the default because it can leak future corporate-action adjustments into historical rows
 - A first GM data path should preserve full raw endpoint fields first, then derive normalized parquet as a second step
+- A first Tushare-native collector now exists under `src/collector_tushare.py`
+- The Tushare path currently stores symbol cache, trade calendar, raw market tables, and a first-pass normalized `hfq` combined parquet under `data/tushare/`
+- The Tushare collector now supports symbol-level incremental updates, lifecycle-aware completion checks, segmented long-history backfill, and stage cooldown after rate-limit errors
+- `src/probe_tushare.py` can be used to inspect real Tushare endpoint columns and latency before integrating new tables into the formal pipeline
 
 ## Current Recommended Workflow
 
@@ -37,7 +41,21 @@ What is true now:
 3. Train `lgbm` on rolling windows with `run_native_rolling.py`
 4. Compare experiments through `results/experiments/experiment_index.csv`
 
+Active migration note:
+
+- `src/collector_tushare.py` is now the leading replacement candidate for daily market data, but it is not yet the default research source until the canonical normalized schema and formal pipeline wiring are finished.
+
 ## Immediate TODO
+
+### 0. Tushare Migration And Pipeline Cleanup
+
+- [ ] Finalize the canonical Tushare-to-native normalized schema and decide which columns become the long-term source of truth for `combined` parquet
+- [ ] Add Tushare financial/event raw tables to the formal collector path: `income`, `balancesheet`, `cashflow`, `fina_indicator`, `forecast`, `express`, `dividend`, `fina_audit`, `fina_mainbz`
+- [ ] Wire the Tushare collector into the formal research workflow after schema validation, instead of treating it as a side path under `data/tushare/`
+- [ ] Deduplicate `main.py` and `run_native_rolling.py` into shared training/prediction/evaluation helpers before continuing to add more run modes
+- [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
+- [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py`, `collector_gm.py`, and `collector_tushare.py` stop diverging
+- [ ] Upgrade training-time transforms from ad-hoc functions to a real fit/transform pipeline before adding more transform combinations
 
 ### 1. LightGBM Feature Research
 
@@ -126,10 +144,7 @@ What is true now:
 - [ ] Add a script to summarize the best run per model/profile/tag
 - [ ] Add richer manifest metadata for selected features and transforms
 - [ ] Improve README with a short native quickstart
-- [ ] Deduplicate `main.py` and `run_native_rolling.py` into shared training/prediction/export helpers
-- [ ] Upgrade training-time transforms from ad-hoc functions to a real fit/transform pipeline
 - [ ] Unify canonical return naming across backtest/evaluation (`gross`, `net`, `cost`, `bench`) and keep compatibility only at wrapper boundaries
-- [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
 
 ## Research Priority Recommendation
 

@@ -8,6 +8,11 @@ from typing import Any
 
 import yaml
 
+try:
+    from src.data_source import get_default_factor_store_dir, resolve_data_source_name
+except ModuleNotFoundError:
+    from data_source import get_default_factor_store_dir, resolve_data_source_name  # type: ignore
+
 
 DEFAULT_PROFILE_CONFIG_PATH = "configs/feature_profiles.yaml"
 
@@ -85,7 +90,11 @@ def resolve_feature_profile(
     alpha = str(profile.get("alpha", features_cfg.get("alpha", cfg.get("alpha_version", 158))))
     generation_space = str(profile.get("generation_space", profile.get("generation_alpha", "full_factor_space")))
     factor_store_name = profile.get("factor_store_name") or "full_factor_space"
-    factor_store_dir = features_cfg.get("factor_store_dir") or str(Path("data/factor_store") / factor_store_name)
+    data_source = resolve_data_source_name(cfg)
+    factor_store_dir = features_cfg.get("factor_store_dir") or get_default_factor_store_dir(
+        data_source,
+        factor_store_name=factor_store_name,
+    )
     if "selected_columns" in profile:
         profile_selected_columns = list(profile["selected_columns"])
     elif alpha == "158":
@@ -100,6 +109,7 @@ def resolve_feature_profile(
 
     return {
         "name": resolved_profile_name,
+        "data_source": data_source,
         "alpha": alpha,
         "generation_space": generation_space,
         "factor_store_dir": factor_store_dir,

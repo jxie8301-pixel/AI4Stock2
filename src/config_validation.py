@@ -11,8 +11,17 @@ import pandas as pd
 from src.config_loader import load_config
 from src.feature_profiles import get_native_factor_store_dir
 
+try:
+    from src.data_source import resolve_data_source_name
+except ModuleNotFoundError:
+    from data_source import resolve_data_source_name  # type: ignore
+
 
 TOP_LEVEL_SCHEMA = {
+    "data": {
+        "source": None,
+        "parquet_dir": None,
+    },
     "runtime": {
         "config_path": None,
     },
@@ -180,6 +189,7 @@ def validate_training_config(
     universe = str(cfg.get("universe") or "").strip()
     if not universe:
         raise ValueError("universe must be non-empty")
+    resolve_data_source_name(cfg)
 
     features_cfg = cfg.get("features", {})
     feature_profile = str(features_cfg.get("profile") or "").strip()

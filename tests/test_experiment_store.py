@@ -12,6 +12,9 @@ from src.experiment_store import finalize_run_store, prepare_run_store
 class ExperimentStoreTest(unittest.TestCase):
     def _build_cfg(self, store_dir: str) -> dict:
         return {
+            "data": {
+                "source": "tushare",
+            },
             "artifacts": {
                 "enable_local_store": True,
                 "store_dir": store_dir,
@@ -112,6 +115,7 @@ class ExperimentStoreTest(unittest.TestCase):
                 rows = list(csv.DictReader(f))
 
             self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["data_source"], "tushare")
             self.assertEqual(rows[0]["run_tag"], "compare-a")
             self.assertEqual(rows[0]["signal_ic_mean"], "0.12")
             self.assertEqual(rows[0]["portfolio_annualized_return"], "0.25")

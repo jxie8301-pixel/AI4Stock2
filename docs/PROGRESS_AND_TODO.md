@@ -69,6 +69,8 @@ What is true now:
 ### 3. Native Data Quality
 
 - [x] Stand up a GM-native collector that stores full raw endpoint fields under `data/gm/raw/` before any schema reduction
+- [x] Add GM lifecycle-aware precheck with `effective_end_date` so delisted symbols do not stay pending forever
+- [x] Harden collector parquet writes with atomic replace and safe reads for broken/zero-byte files
 - [ ] Define the canonical GM-to-native mapping for `circ_mv`, `circ_share`, `pb`, `pcf`, and `ps`
 - [ ] Compare GM vs Eastmoney coverage, freshness, and field stability over the same sample
 - [ ] Add a feature coverage report during cache generation
@@ -80,6 +82,9 @@ What is true now:
 - [x] Audit Eastmoney fused parquet schema and confirm the current combined columns retained by the collector
 - [x] Normalize retained collector fields to ASCII names before factor generation
 - [x] Document the default price-adjustment choice; keep `hfq` in the current research path and avoid `qfq` leakage
+- [ ] Port lifecycle/effective-end-date handling to the Eastmoney collector path
+- [ ] Add collector performance telemetry: request count, empty-return count, write time, throughput by stage
+- [ ] Split collector common helpers into shared parquet/lifecycle utilities instead of duplicating logic in both collectors
 
 ### 4. Backtest Realism
 
@@ -121,6 +126,10 @@ What is true now:
 - [ ] Add a script to summarize the best run per model/profile/tag
 - [ ] Add richer manifest metadata for selected features and transforms
 - [ ] Improve README with a short native quickstart
+- [ ] Deduplicate `main.py` and `run_native_rolling.py` into shared training/prediction/export helpers
+- [ ] Upgrade training-time transforms from ad-hoc functions to a real fit/transform pipeline
+- [ ] Unify canonical return naming across backtest/evaluation (`gross`, `net`, `cost`, `bench`) and keep compatibility only at wrapper boundaries
+- [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
 
 ## Research Priority Recommendation
 

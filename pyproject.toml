@@ -24,4 +24,5 @@ dependencies = [
     "xgboost>=3.2.0",
     "akshare-proxy-patch>=0.2.13",
     "gm>=3.0.183",
+    "tushare>=1.4.29",
 ]

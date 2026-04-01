@@ -267,10 +267,18 @@ class StageUpdatePlan:
 
 
 class StageStatusPanel:
-    def __init__(self, stage_names: list[str], raw_total: int) -> None:
+    def __init__(
+        self,
+        stage_names: list[str],
+        raw_total: int,
+        started_at: float | None = None,
+    ) -> None:
         self.stage_names = stage_names
         self._isatty = sys.stdout.isatty()
         self._printed_lines = 0
+        self._started_at = (
+            time.monotonic() if started_at is None else float(started_at)
+        )
         self._stats = {
             name: {
                 "total": raw_total if name != "processed" else 0,
@@ -282,6 +290,39 @@ class StageStatusPanel:
             }
             for name in stage_names
         }
+
+    def _clear_rendered_block(self) -> None:
+        if not self._isatty or self._printed_lines <= 0:
+            return
+        sys.stdout.write(f"\x1b[{self._printed_lines}F")
+        for _ in range(self._printed_lines):
+            sys.stdout.write("\x1b[2K")
+            sys.stdout.write("\x1b[1E")
+        sys.stdout.write(f"\x1b[{self._printed_lines}F")
+
+    def _summary_line(self) -> str:
+        done = sum(int(stats["done"]) for stats in self._stats.values())
+        ok = sum(int(stats["success"]) for stats in self._stats.values())
+        failed = sum(int(stats["failed"]) for stats in self._stats.values())
+        total = sum(
+            int(stats["total"])
+            for stats in self._stats.values()
+            if int(stats["total"]) > 0
+        )
+        elapsed = max(time.monotonic() - self._started_at, 1e-9)
+        total_text = f"{done}/{total}" if total > 0 else f"{done}/-"
+        return (
+            f"Elapsed {elapsed:7.1f}s | Tasks {total_text:<11} | "
+            f"OK {ok:<5} | Fail {failed:<5} | Avg {ok / elapsed:6.2f} parquet/s"
+        )
+
+    def log(self, message: str) -> None:
+        if not self._isatty:
+            print(message)
+            return
+        self._clear_rendered_block()
+        self._printed_lines = 0
+        print(message)
 
     def set_total(self, stage_name: str, total: int) -> None:
         self._stats[stage_name]["total"] = int(total)
@@ -337,7 +378,8 @@ class StageStatusPanel:
     def _build_lines(self) -> list[str]:
         lines = [
             "GM Download Status",
-            f"{'Stage':<16} {'State':<8} {'Done':>11} {'Run':>5} {'OK':>5} {'Fail':>5}",
+            self._summary_line(),
+            f"{'Stage':<16} {'State':<8} {'Done/Pend':>11} {'Run':>5} {'OK':>5} {'Fail':>5}",
             "-" * 58,
         ]
         for name in self.stage_names:
@@ -360,8 +402,7 @@ class StageStatusPanel:
             if final:
                 print("\n".join(lines))
             return
-        if self._printed_lines:
-            sys.stdout.write(f"\x1b[{self._printed_lines}F")
+        self._clear_rendered_block()
         for line in lines:
             sys.stdout.write("\x1b[2K")
             sys.stdout.write(line)
@@ -371,6 +412,7 @@ class StageStatusPanel:
         if final:
             sys.stdout.write("\n")
             sys.stdout.flush()
+            self._printed_lines = 0
 
 
 def _chunked(
@@ -1422,7 +1464,10 @@ def collect_stage(
                     f"[!] Aborting stage '{stage_name}' after {consecutive_failures} consecutive GM failures. "
                     "Inspect token validity or the failing symbols before resuming."
                 )
-                tqdm.write(abort_message)
+                if use_inline_panel:
+                    panel.log(abort_message)
+                else:
+                    tqdm.write(abort_message)
                 for pending_future in future_map:
                     if not pending_future.done():
                         pending_future.cancel()
@@ -1539,6 +1584,7 @@ def run_gm_update_pipeline(
     target_end_date: pd.Timestamp,
     max_workers: int,
     effective_end_dates: dict[str, pd.Timestamp] | None = None,
+    started_at: float | None = None,
 ) -> list[TaskResult]:
     stage_specs: list[
         tuple[
@@ -1610,6 +1656,12 @@ def run_gm_update_pipeline(
         ),
     ]
 
+    panel = StageStatusPanel(
+        [name for name, _, _, _ in stage_specs] + ["processed"],
+        raw_total=0,
+        started_at=started_at,
+    )
+
     print(
         f"[*] Prechecking local GM raw shards sequentially by endpoint with {PRECHECK_WORKERS} workers..."
     )
@@ -1631,9 +1683,6 @@ def run_gm_update_pipeline(
         name: {} for name, _, _, _ in stage_specs
     }
     failed_symbols: set[str] = set()
-    panel = StageStatusPanel(
-        [name for name, _, _, _ in stage_specs] + ["processed"], raw_total=0
-    )
 
     runnable_stage_specs: list[tuple[str, Callable[[str], UpdateResult], list[str]]] = (
         []
@@ -1665,7 +1714,6 @@ def run_gm_update_pipeline(
         )
         panel.render()
         for stage_name, worker, stage_symbols in runnable_stage_specs:
-            print(f"[*] Stage {stage_name}: {len(stage_symbols)} pending symbols")
             results = collect_stage(
                 stage_symbols,
                 stage_name,
@@ -1690,7 +1738,7 @@ def run_gm_update_pipeline(
         and all(symbol in stage_outputs[name] for name, _, _, _ in stage_specs)
     ]
     if build_symbols:
-        print("[*] Raw downloads finished. Rebuilding processed parquet...")
+        panel.log("[*] Raw downloads finished. Rebuilding processed parquet...")
         panel.set_total("processed", len(build_symbols))
         panel.mark_pending("processed")
         panel.render()
@@ -1735,6 +1783,7 @@ def run_gm_update_pipeline(
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    execution_started_at = time.monotonic()
 
     configure_gm_token(args.token_env)
 
@@ -1796,6 +1845,7 @@ def main() -> None:
             target_end_date=target_end_date,
             max_workers=args.workers,
             effective_end_dates=effective_end_dates,
+            started_at=execution_started_at,
         )
 
     success = sum(1 for item in results if item.ok)

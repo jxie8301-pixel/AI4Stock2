@@ -32,7 +32,8 @@ Typical contents:
 Runtime config should live in:
 
 - `configs/config.yaml`
-- `configs/config_baseline.yaml`
+
+Switch the active source with `data.source` or `--data-source`.
 
 ### 2. Feature Profile
 
@@ -52,6 +53,7 @@ Feature profile index:
 Feature profile definitions:
 
 - `configs/features/*.yaml`
+- derived feature profiles may also live inline in `configs/feature_profiles.yaml` via `extends` / `drop_columns` / `add_columns`
 
 ### 3. Model Profile
 
@@ -115,6 +117,7 @@ Experiment profile index:
 Experiment profile definitions:
 
 - `configs/experiments/*.yaml`
+- derived experiment profiles may also live inline in `configs/experiment_profiles.yaml` via `extends`
 
 ## Naming Rules
 

@@ -1,16 +1,15 @@
 """Native Modular Rolling Retrain Pipeline for AI4Stock2."""
 
 import argparse
-import json
-import pandas as pd
-from pathlib import Path
 import datetime
-import torch
-import numpy as np
+import json
+from pathlib import Path
 
-from src.config_loader import load_config
-from src.config_validation import validate_training_config
-from src.data_source import SUPPORTED_DATA_SOURCES, resolve_data_source_name
+import numpy as np
+import pandas as pd
+import torch
+
+from src.data_source import resolve_data_source_name
 from src.experiment_store import (
     finalize_run_store,
     prepare_run_store,
@@ -22,85 +21,21 @@ from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask_frame, resolve_selected_features
 from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
-from src.override_utils import apply_override_args
+from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 
 def run_rolling_pipeline():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
-    parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
-    parser.add_argument("--model", default=None, help="Override model name")
-    parser.add_argument("--experiment-profile", help="Named experiment profile under configs/experiments/")
-    parser.add_argument("--feature-profile", help="Override features.profile for this run")
-    parser.add_argument("--model-profile", help="Override model.profile for this run")
-    parser.add_argument("--data-source", choices=SUPPORTED_DATA_SOURCES, help="Override runtime data source")
-    parser.add_argument(
-        "--set",
-        action="append",
-        dest="set_overrides",
-        help="Generic dotted override in key=value form, for example strategy.topk=20",
-    )
-    parser.add_argument("--profile", help=argparse.SUPPRESS)
+    add_common_runtime_args(parser, include_model_arg=True)
     parser.add_argument("--retrain-step", type=int, help="Rolling retrain step in trading days. If omitted, use config value.")
     parser.add_argument("--horizon", type=int, help=argparse.SUPPRESS)
-    parser.add_argument("--signal-horizon", type=int, help="Prediction signal horizon in trading days. If omitted, use experiment profile.")
-    parser.add_argument("--label-horizon", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--train-days", type=int, help="Training window length in trading days. If omitted, use config value.")
     parser.add_argument("--valid-days", type=int, help="Validation window length in trading days. If omitted, use config value.")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id")
     parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
     parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step")
-    parser.add_argument("--rebalance-freq", type=int, help="Override backtest rebalance frequency in days. If omitted, use config value.")
-    parser.add_argument("--topk", type=int, help="Override strategy top-k holdings")
-    parser.add_argument("--n-drop", dest="n_drop", type=int, help="Override strategy daily replacement count")
-    parser.add_argument("--run-tag", help="Short label for local experiment storage/comparison")
-    parser.add_argument("--store-dir", help="Override local experiment store root")
-    parser.add_argument("--disable-local-store", action="store_true", help="Disable automatic local experiment/model storage")
     args = parser.parse_args()
 
-    try:
-        cfg = load_config(
-            args.config,
-            experiment_profile_name=args.experiment_profile,
-            model_profile_name=args.model_profile,
-        )
-        if args.model:
-            cfg["model"]["name"] = args.model
-        if args.data_source:
-            cfg.setdefault("data", {})
-            cfg["data"]["source"] = args.data_source
-        apply_override_args(cfg, args.set_overrides)
-        if args.retrain_step is not None and args.horizon is not None and args.retrain_step != args.horizon:
-            parser.error("--retrain-step and --horizon refer to the same parameter; use one value.")
-        if args.retrain_step is None and args.horizon is not None:
-            args.retrain_step = args.horizon
-        feature_profile_override = args.feature_profile or args.profile
-        if feature_profile_override:
-            cfg.setdefault("features", {})
-            cfg["features"]["profile"] = feature_profile_override
-        if args.topk is not None:
-            cfg["strategy"]["topk"] = args.topk
-        if args.n_drop is not None:
-            cfg["strategy"]["n_drop"] = args.n_drop
-        if args.rebalance_freq is not None:
-            cfg.setdefault("backtest", {})
-            cfg["backtest"]["rebalance_freq"] = args.rebalance_freq
-        signal_horizon_override = args.signal_horizon
-        if signal_horizon_override is None:
-            signal_horizon_override = args.label_horizon
-        if signal_horizon_override is not None:
-            cfg.setdefault("label", {})
-            cfg["label"]["signal_horizon"] = int(signal_horizon_override)
-        if args.retrain_step is not None:
-            cfg.setdefault("rolling", {})
-            cfg["rolling"]["retrain_step"] = int(args.retrain_step)
-        if args.train_days is not None:
-            cfg.setdefault("rolling", {})
-            cfg["rolling"]["train_days"] = int(args.train_days)
-        if args.valid_days is not None:
-            cfg.setdefault("rolling", {})
-            cfg["rolling"]["valid_days"] = int(args.valid_days)
-        validate_training_config(cfg, check_paths=True)
-    except ValueError as exc:
-        parser.error(str(exc))
+    cfg = load_validated_config_from_args(args, parser, allow_rolling_overrides=True)
     retrain_step = int(resolve_retrain_step(cfg, args))
     train_days = int(cfg.get("rolling", {}).get("train_days", args.train_days or 242))
     valid_days = int(cfg.get("rolling", {}).get("valid_days", args.valid_days or 10))

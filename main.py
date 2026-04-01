@@ -1,11 +1,10 @@
 """AI4Stock2 native quantitative investment pipeline."""
 
 import argparse
-from pathlib import Path
 import json
 import pickle
+from pathlib import Path
 
-from src.config_loader import load_config
 from src.experiment_store import finalize_run_store, prepare_run_store, resolve_rebalance_freq
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_selection import (
@@ -13,13 +12,12 @@ from src.feature_selection import (
     compute_finite_feature_mask_frame,
     resolve_selected_features,
 )
-from src.override_utils import apply_override_args
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
-from src.config_validation import validate_training_config
-from src.data_source import SUPPORTED_DATA_SOURCES, resolve_data_source_name
+from src.data_source import resolve_data_source_name
 from src.feature_profiles import get_native_factor_store_dir
 from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
+from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 
 
 def _ensure_parent_dir(path_str: str) -> Path:
@@ -417,68 +415,17 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
 
 def main():
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Quantitative Pipeline")
-    parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
-    parser.add_argument("--model", default=None, help="Model name: lstm / transformer / lgbm")
-    parser.add_argument("--experiment-profile", help="Named experiment profile under configs/experiments/")
-    parser.add_argument("--feature-profile", help="Override features.profile for this run")
-    parser.add_argument("--model-profile", help="Override model.profile for this run")
-    parser.add_argument("--data-source", choices=SUPPORTED_DATA_SOURCES, help="Override runtime data source")
-    parser.add_argument(
-        "--set",
-        action="append",
-        dest="set_overrides",
-        help="Generic dotted override in key=value form, for example strategy.topk=20",
-    )
-    parser.add_argument("--profile", help=argparse.SUPPRESS)
+    add_common_runtime_args(parser, include_model_arg=True)
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")
     parser.add_argument("--save-model", help="Path to save the trained model (e.g. results/lstm/model.pkl)")
-    parser.add_argument("--topk", type=int, help="Override strategy top-k holdings")
-    parser.add_argument("--n-drop", dest="n_drop", type=int, help="Override strategy daily replacement count")
-    parser.add_argument("--run-tag", help="Short label for local experiment storage/comparison")
-    parser.add_argument("--store-dir", help="Override local experiment store root")
-    parser.add_argument("--disable-local-store", action="store_true", help="Disable automatic local experiment/model storage")
     parser.add_argument("--gpu", type=int, default=0, help="GPU device id (-1 for CPU)")
-    parser.add_argument("--rebalance-freq", type=int, default=None, help="Backtest rebalance frequency in days (default: from config or 1)")
-    parser.add_argument("--signal-horizon", type=int, help="Prediction signal horizon in trading days. If omitted, use experiment profile.")
-    parser.add_argument("--label-horizon", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--trace-backtest", action="store_true", help="Export detailed trace for selected backtest dates")
     parser.add_argument("--trace-top-days", type=int, default=5, help="Auto-select this many high-return/turnover/cost dates for trace export")
     parser.add_argument("--trace-dates", help="Comma-separated YYYY-MM-DD dates to include in backtest trace export")
     args = parser.parse_args()
 
-    try:
-        cfg = load_config(
-            args.config,
-            experiment_profile_name=args.experiment_profile,
-            model_profile_name=args.model_profile,
-        )
-        if args.model:
-            cfg["model"]["name"] = args.model
-        if args.data_source:
-            cfg.setdefault("data", {})
-            cfg["data"]["source"] = args.data_source
-        apply_override_args(cfg, args.set_overrides)
-        feature_profile_override = args.feature_profile or args.profile
-        if feature_profile_override:
-            cfg.setdefault("features", {})
-            cfg["features"]["profile"] = feature_profile_override
-        if args.topk is not None:
-            cfg["strategy"]["topk"] = args.topk
-        if args.n_drop is not None:
-            cfg["strategy"]["n_drop"] = args.n_drop
-        signal_horizon_override = args.signal_horizon
-        if signal_horizon_override is None:
-            signal_horizon_override = args.label_horizon
-        if signal_horizon_override is not None:
-            cfg.setdefault("label", {})
-            cfg["label"]["signal_horizon"] = int(signal_horizon_override)
-        if args.rebalance_freq is not None:
-            cfg.setdefault("backtest", {})
-            cfg["backtest"]["rebalance_freq"] = int(args.rebalance_freq)
-        validate_training_config(cfg, check_paths=True)
-    except ValueError as exc:
-        parser.error(str(exc))
+    cfg = load_validated_config_from_args(args, parser)
 
     backend = "native"
     model_name = cfg["model"]["name"]

@@ -6,11 +6,11 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 try:
+    from src.config_utils import deep_update, load_yaml_file
     from src.data_source import get_default_factor_store_dir, resolve_data_source_name
 except ModuleNotFoundError:
+    from config_utils import deep_update, load_yaml_file  # type: ignore
     from data_source import get_default_factor_store_dir, resolve_data_source_name  # type: ignore
 
 
@@ -18,45 +18,30 @@ DEFAULT_PROFILE_CONFIG_PATH = "configs/feature_profiles.yaml"
 
 
 def load_feature_profiles(config_path: str = DEFAULT_PROFILE_CONFIG_PATH) -> dict[str, Any]:
-    with open(config_path, encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
+    data = load_yaml_file(config_path)
     profiles = data.get("profiles", {})
     if not isinstance(profiles, dict) or not profiles:
         raise ValueError(f"No feature profiles found in {config_path}")
     return data
 
 
-def _load_yaml_file(path: str | Path) -> dict[str, Any]:
-    with open(path, encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+def _build_inline_profile_path(profile_name: str, profile_config_path: str) -> str:
+    return f"{Path(profile_config_path).resolve()}::{profile_name}"
 
 
-def _resolve_profile_definition(
-    profile_name: str,
-    profile_entry: dict[str, Any],
+def _normalize_profile_column_mutation(
+    value: Any,
     *,
-    profile_config_path: str,
-) -> dict[str, Any]:
-    if "path" not in profile_entry:
-        return deepcopy(profile_entry)
-
-    repo_root = Path(profile_config_path).resolve().parent.parent
-    feature_path = Path(profile_entry["path"])
-    if not feature_path.is_absolute():
-        feature_path = repo_root / feature_path
-
-    profile = _load_yaml_file(feature_path)
-    profile["path"] = str(feature_path)
-    profile["name"] = profile_name
-    return profile
+    field_name: str,
+) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{field_name} must be a list of non-empty strings")
+    return list(value)
 
 
-def resolve_feature_profile(
-    cfg: dict | None = None,
-    *,
-    profile_name: str | None = None,
-    profile_config_path: str = DEFAULT_PROFILE_CONFIG_PATH,
-) -> dict[str, Any]:
+def _materialize_profile_selected_columns(profile: dict[str, Any]) -> list[str] | None:
     try:
         from src.gen_feature import (
             ALL_FACTORS_LGBM_PREFIX,
@@ -70,6 +55,102 @@ def resolve_feature_profile(
             get_lgbm_purified_feature_names,
         )
 
+    if "selected_columns" in profile:
+        selected_columns = profile.get("selected_columns")
+        if selected_columns is None:
+            return None
+        if not isinstance(selected_columns, list) or not all(isinstance(item, str) and item for item in selected_columns):
+            raise ValueError("feature profile selected_columns must be a list of non-empty strings")
+        return list(selected_columns)
+
+    alpha = str(profile.get("alpha", 158))
+    if alpha == "158":
+        return list(get_alpha158_feature_config(profile.get("alpha158"))[1])
+    if alpha == "lgbm_purified":
+        return [
+            f"{ALL_FACTORS_LGBM_PREFIX}{name}"
+            for name in get_lgbm_purified_feature_names(profile.get("lgbm_purified"))
+        ]
+    return None
+
+
+def _resolve_profile_definition(
+    profile_name: str,
+    *,
+    profiles: dict[str, Any],
+    profile_config_path: str,
+    stack: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    if profile_name in stack:
+        cycle = " -> ".join([*stack, profile_name])
+        raise ValueError(f"Feature profile inheritance cycle detected: {cycle}")
+    if profile_name not in profiles:
+        raise ValueError(f"Unknown feature profile: {profile_name}")
+
+    profile_entry = deepcopy(profiles[profile_name])
+    source_path = _build_inline_profile_path(profile_name, profile_config_path)
+    if "path" not in profile_entry:
+        loaded_profile = {}
+    else:
+        repo_root = Path(profile_config_path).resolve().parent.parent
+        feature_path = Path(profile_entry.pop("path"))
+        if not feature_path.is_absolute():
+            feature_path = repo_root / feature_path
+        loaded_profile = load_yaml_file(feature_path)
+        source_path = str(feature_path)
+
+    extends_name = str(profile_entry.pop("extends", "") or "").strip()
+    drop_columns = _normalize_profile_column_mutation(
+        profile_entry.pop("drop_columns", None),
+        field_name=f"feature profile '{profile_name}'.drop_columns",
+    )
+    add_columns = _normalize_profile_column_mutation(
+        profile_entry.pop("add_columns", None),
+        field_name=f"feature profile '{profile_name}'.add_columns",
+    )
+
+    merged = deepcopy(loaded_profile)
+    deep_update(merged, profile_entry)
+    if extends_name:
+        parent_profile = _resolve_profile_definition(
+            extends_name,
+            profiles=profiles,
+            profile_config_path=profile_config_path,
+            stack=(*stack, profile_name),
+        )
+        parent_profile = deepcopy(parent_profile)
+        parent_profile.pop("name", None)
+        parent_profile.pop("path", None)
+        merged_profile = parent_profile
+        deep_update(merged_profile, merged)
+        merged = merged_profile
+
+    if drop_columns or add_columns:
+        base_columns = _materialize_profile_selected_columns(merged)
+        if base_columns is None:
+            raise ValueError(
+                f"Feature profile '{profile_name}' uses drop/add column mutations but does not resolve to selected_columns"
+            )
+        drop_set = set(drop_columns)
+        mutated_columns = [item for item in base_columns if item not in drop_set]
+        existing = set(mutated_columns)
+        for item in add_columns:
+            if item not in existing:
+                mutated_columns.append(item)
+                existing.add(item)
+        merged["selected_columns"] = mutated_columns
+
+    merged["path"] = source_path
+    merged["name"] = profile_name
+    return merged
+
+
+def resolve_feature_profile(
+    cfg: dict | None = None,
+    *,
+    profile_name: str | None = None,
+    profile_config_path: str = DEFAULT_PROFILE_CONFIG_PATH,
+) -> dict[str, Any]:
     cfg = cfg or {}
     features_cfg = cfg.get("features", {})
     profile_data = load_feature_profiles(profile_config_path)
@@ -84,7 +165,7 @@ def resolve_feature_profile(
 
     profile = _resolve_profile_definition(
         resolved_profile_name,
-        deepcopy(profiles[resolved_profile_name]),
+        profiles=profiles,
         profile_config_path=profile_config_path,
     )
     alpha = str(profile.get("alpha", features_cfg.get("alpha", cfg.get("alpha_version", 158))))
@@ -95,17 +176,7 @@ def resolve_feature_profile(
         data_source,
         factor_store_name=factor_store_name,
     )
-    if "selected_columns" in profile:
-        profile_selected_columns = list(profile["selected_columns"])
-    elif alpha == "158":
-        profile_selected_columns = get_alpha158_feature_config(profile.get("alpha158"))[1]
-    elif alpha == "lgbm_purified":
-        profile_selected_columns = [
-            f"{ALL_FACTORS_LGBM_PREFIX}{name}"
-            for name in get_lgbm_purified_feature_names(profile.get("lgbm_purified"))
-        ]
-    else:
-        profile_selected_columns = None
+    profile_selected_columns = _materialize_profile_selected_columns(profile)
 
     return {
         "name": resolved_profile_name,

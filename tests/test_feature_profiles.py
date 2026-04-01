@@ -1,4 +1,8 @@
 import unittest
+import tempfile
+from pathlib import Path
+
+import yaml
 
 from src.feature_profiles import resolve_feature_profile
 from src.gen_feature import (
@@ -163,9 +167,44 @@ class FeatureProfilesTest(unittest.TestCase):
     def test_core_v4_ablation_profiles_are_registered(self):
         no_ret120 = resolve_feature_profile({"features": {"profile": "core_v4_techlite_no_ret120"}})
 
-        self.assertTrue(str(no_ret120["profile_path"]).endswith("configs/features/core_v4_techlite_no_ret120.yaml"))
+        self.assertTrue(str(no_ret120["profile_path"]).endswith("configs/feature_profiles.yaml::core_v4_techlite_no_ret120"))
         self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", no_ret120["selected_columns"])
         self.assertEqual(len(no_ret120["selected_columns"]), 45)
+
+    def test_inline_feature_profile_extends_with_drop_and_add_columns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "feature_profiles.yaml"
+            config_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "default_profile": "base",
+                        "profiles": {
+                            "base": {
+                                "alpha": "all_factors",
+                                "generation_space": "full_factor_space",
+                                "factor_store_name": "full_factor_space",
+                                "selected_columns": ["A", "B", "C"],
+                            },
+                            "derived": {
+                                "extends": "base",
+                                "drop_columns": ["B"],
+                                "add_columns": ["D", "A"],
+                            },
+                        },
+                    },
+                    sort_keys=False,
+                    allow_unicode=True,
+                ),
+                encoding="utf-8",
+            )
+
+            profile = resolve_feature_profile(
+                {"features": {"profile": "derived"}},
+                profile_config_path=str(config_path),
+            )
+
+            self.assertEqual(profile["selected_columns"], ["A", "C", "D"])
+            self.assertTrue(str(profile["profile_path"]).endswith("feature_profiles.yaml::derived"))
 
     def test_removed_duplicate_v3_no_rank20_profile_is_rejected(self):
         with self.assertRaises(ValueError):

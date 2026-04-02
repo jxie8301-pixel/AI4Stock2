@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 import time
 
@@ -25,7 +24,6 @@ from src.collector_tushare import (
     _fetch_daily_basic_chunk,
     _fetch_dividend_chunk,
     _fetch_fina_indicator_chunk,
-    _configure_tushare_network,
     _fetch_market_table_in_chunks,
     _fetch_stk_limit_chunk,
     fetch_stock_basic_by_status,
@@ -70,28 +68,6 @@ def test_endpoint_rate_limiter_zero_interval_bypasses_wait(monkeypatch: pytest.M
     monkeypatch.setattr("src.collector_tushare.time.monotonic", fail_monotonic)
 
     limiter.wait()
-
-
-def test_configure_tushare_network_bypasses_loopback_proxy_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
-    monkeypatch.setenv("HTTPS_PROXY", "http://localhost:7897")
-    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
-    monkeypatch.delenv("TUSHARE_KEEP_PROXY", raising=False)
-
-    _configure_tushare_network()
-
-    assert "HTTP_PROXY" not in os.environ
-    assert "HTTPS_PROXY" not in os.environ
-    assert "api.waditu.com" in os.environ["NO_PROXY"]
-
-
-def test_configure_tushare_network_respects_keep_proxy_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
-    monkeypatch.setenv("TUSHARE_KEEP_PROXY", "1")
-
-    _configure_tushare_network()
-
-    assert os.environ["HTTP_PROXY"] == "http://127.0.0.1:7897"
 
 
 def test_normalize_symbol_cache_frame_handles_missing_optional_columns() -> None:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import os
-from urllib.parse import urlparse
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -41,6 +40,9 @@ PRECHECK_WORKERS = 16
 MARKET_CHUNK_YEARS = 12
 STK_LIMIT_COVERAGE_START = pd.Timestamp("2007-01-04")
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+DEFAULT_MARKET_STAGE_NAMES = ("daily", "daily_basic", "adj_factor", "stk_limit")
+AUX_STAGE_NAMES = ("fina_indicator", "dividend")
+OPTIONAL_STAGE_NAMES = DEFAULT_MARKET_STAGE_NAMES + AUX_STAGE_NAMES + ("processed",)
 
 STOCK_BASIC_API_FIELDS = [
     "ts_code",
@@ -318,7 +320,6 @@ class StageUpdatePlan:
 
 
 _THREAD_STATE = threading.local()
-TUSHARE_API_HOST = "api.waditu.com"
 
 
 class EndpointRateLimiter:
@@ -592,42 +593,9 @@ def load_symbol_lifecycle() -> pd.DataFrame | None:
 
 
 def configure_tushare(token_env: str = DEFAULT_TOKEN_ENV) -> None:
-    _configure_tushare_network()
     token = os.environ.get(token_env, "").strip()
     if token:
         ts.set_token(token)
-
-
-def _is_loopback_proxy(value: str | None) -> bool:
-    raw = str(value or "").strip()
-    if not raw:
-        return False
-    try:
-        host = (urlparse(raw).hostname or "").strip().lower()
-    except Exception:
-        return False
-    return host in {"127.0.0.1", "localhost", "::1"}
-
-
-def _append_no_proxy_host(host: str) -> None:
-    existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
-    parts = [item.strip() for item in existing.split(",") if item.strip()]
-    if host not in parts:
-        parts.append(host)
-    joined = ",".join(parts)
-    os.environ["NO_PROXY"] = joined
-    os.environ["no_proxy"] = joined
-
-
-def _configure_tushare_network() -> None:
-    if str(os.environ.get("TUSHARE_KEEP_PROXY", "")).strip() == "1":
-        return
-    proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]
-    if not any(_is_loopback_proxy(os.environ.get(key)) for key in proxy_keys):
-        return
-    for key in proxy_keys:
-        os.environ.pop(key, None)
-    _append_no_proxy_host(TUSHARE_API_HOST)
 
 
 def get_tushare_client():
@@ -1868,9 +1836,12 @@ def run_tushare_update_pipeline(
     target_end_date: pd.Timestamp,
     max_workers: int,
     effective_end_dates: dict[str, pd.Timestamp] | None = None,
+    selected_stage_names: tuple[str, ...] = DEFAULT_MARKET_STAGE_NAMES,
 ) -> list[TaskResult]:
     exhaustion_frame = load_backfill_exhaustion()
     exhaustion_lookup = build_backfill_exhaustion_lookup(exhaustion_frame)
+    aux_stage_frame = load_aux_empty_results()
+    aux_stage_lookup = build_aux_empty_lookup(aux_stage_frame)
     cached = load_symbol_cache()
     expected_start_dates: dict[str, pd.Timestamp] = {}
     if cached is not None and not cached.empty:
@@ -1878,14 +1849,13 @@ def run_tushare_update_pipeline(
             list_date = _normalize_optional_timestamp(row.get("list_date"))
             if list_date is not None:
                 expected_start_dates[str(row["local_symbol"])] = list_date
-
-    stage_specs: list[
-        tuple[str, Path, Callable[[str, pd.Timestamp | None, pd.Timestamp, pd.Timestamp | None], UpdateResult]]
-    ] = [
-        (
-            "daily",
-            RAW_DAILY_DIR,
-            lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+    all_stage_specs: dict[str, dict[str, Any]] = {
+        "daily": {
+            "stage_dir": RAW_DAILY_DIR,
+            "date_column": "trade_date",
+            "required_columns": DAILY_RAW_COLS,
+            "precheck_kind": "market",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_DAILY_DIR / f"{symbol}.parquet",
                 _fetch_daily,
@@ -1894,11 +1864,13 @@ def run_tushare_update_pipeline(
                 expected_start_date=expected_start_date,
                 required_columns=DAILY_RAW_COLS,
             ),
-        ),
-        (
-            "daily_basic",
-            RAW_DAILY_BASIC_DIR,
-            lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+        },
+        "daily_basic": {
+            "stage_dir": RAW_DAILY_BASIC_DIR,
+            "date_column": "trade_date",
+            "required_columns": DAILY_BASIC_API_FIELDS,
+            "precheck_kind": "market",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_DAILY_BASIC_DIR / f"{symbol}.parquet",
                 _fetch_daily_basic,
@@ -1907,11 +1879,13 @@ def run_tushare_update_pipeline(
                 expected_start_date=expected_start_date,
                 required_columns=DAILY_BASIC_API_FIELDS,
             ),
-        ),
-        (
-            "adj_factor",
-            RAW_ADJ_FACTOR_DIR,
-            lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+        },
+        "adj_factor": {
+            "stage_dir": RAW_ADJ_FACTOR_DIR,
+            "date_column": "trade_date",
+            "required_columns": ADJ_FACTOR_API_FIELDS,
+            "precheck_kind": "market",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_ADJ_FACTOR_DIR / f"{symbol}.parquet",
                 _fetch_adj_factor,
@@ -1920,11 +1894,13 @@ def run_tushare_update_pipeline(
                 expected_start_date=expected_start_date,
                 required_columns=ADJ_FACTOR_API_FIELDS,
             ),
-        ),
-        (
-            "stk_limit",
-            RAW_STK_LIMIT_DIR,
-            lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+        },
+        "stk_limit": {
+            "stage_dir": RAW_STK_LIMIT_DIR,
+            "date_column": "trade_date",
+            "required_columns": STK_LIMIT_API_FIELDS,
+            "precheck_kind": "market",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_STK_LIMIT_DIR / f"{symbol}.parquet",
                 _fetch_stk_limit,
@@ -1933,33 +1909,91 @@ def run_tushare_update_pipeline(
                 required_columns=STK_LIMIT_API_FIELDS,
                 refetch_on_schema_mismatch=True,
             ),
-        ),
-    ]
+        },
+        "fina_indicator": {
+            "stage_dir": RAW_FINA_INDICATOR_DIR,
+            "date_column": "ann_date",
+            "required_columns": FINA_INDICATOR_API_FIELDS,
+            "precheck_kind": "aux",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+                symbol,
+                RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet",
+                _fetch_fina_indicator,
+                symbol_target_end_date,
+                latest=latest,
+                expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
+                required_columns=FINA_INDICATOR_API_FIELDS,
+                date_column="ann_date",
+                allow_empty_success=True,
+            ),
+        },
+        "dividend": {
+            "stage_dir": RAW_DIVIDEND_DIR,
+            "date_column": "ann_date",
+            "required_columns": DIVIDEND_API_FIELDS,
+            "precheck_kind": "aux",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+                symbol,
+                RAW_DIVIDEND_DIR / f"{symbol}.parquet",
+                _fetch_dividend,
+                symbol_target_end_date,
+                latest=latest,
+                expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
+                required_columns=DIVIDEND_API_FIELDS,
+                date_column="ann_date",
+                allow_empty_success=True,
+            ),
+        },
+    }
+    stage_specs = [(name, all_stage_specs[name]) for name in selected_stage_names if name != "processed"]
 
     print(f"[*] Prechecking local Tushare raw shards with {PRECHECK_WORKERS} workers...")
-    stage_plans = {
-        stage_name: precheck_stage_updates(
-            symbols,
-            stage_name,
-            stage_dir,
-            target_end_date,
-            effective_end_dates=effective_end_dates,
-            expected_start_dates=expected_start_dates if stage_name in {"daily", "daily_basic", "adj_factor"} else None,
-            coverage_start_date=STK_LIMIT_COVERAGE_START if stage_name == "stk_limit" else None,
-            exhaustion_lookup=exhaustion_lookup,
-            required_columns={
-                "daily": DAILY_RAW_COLS,
-                "daily_basic": DAILY_BASIC_API_FIELDS,
-                "adj_factor": ADJ_FACTOR_API_FIELDS,
-                "stk_limit": STK_LIMIT_API_FIELDS,
-            }[stage_name],
-            max_workers=PRECHECK_WORKERS,
-        )
-        for stage_name, stage_dir, _ in stage_specs
-    }
+    stage_plans: dict[str, StageUpdatePlan] = {}
+    for stage_name, spec in stage_specs:
+        stage_dir = spec["stage_dir"]
+        if spec["precheck_kind"] == "market":
+            stage_plans[stage_name] = precheck_stage_updates(
+                symbols,
+                stage_name,
+                stage_dir,
+                target_end_date,
+                effective_end_dates=effective_end_dates,
+                expected_start_dates=expected_start_dates if stage_name in {"daily", "daily_basic", "adj_factor"} else None,
+                coverage_start_date=STK_LIMIT_COVERAGE_START if stage_name == "stk_limit" else None,
+                exhaustion_lookup=exhaustion_lookup,
+                required_columns=spec["required_columns"],
+                max_workers=PRECHECK_WORKERS,
+            )
+        else:
+            pending_symbols, ready_symbols = precheck_aux_stage_symbols(
+                symbols,
+                stage_name=stage_name,
+                stage_dir=stage_dir,
+                target_end_date=target_end_date,
+                date_column=spec["date_column"],
+                empty_lookup=aux_stage_lookup,
+            )
+            latest_by_symbol = {
+                symbol: infer_latest_date(stage_dir / f"{symbol}.parquet", spec["date_column"]) for symbol in symbols
+            }
+            ready_outputs = {
+                symbol: UpdateResult(
+                    status=f"{stage_name} checked through {target_end_date.date()}",
+                    changed=False,
+                    latest=latest_by_symbol.get(symbol),
+                )
+                for symbol in ready_symbols
+            }
+            stage_plans[stage_name] = StageUpdatePlan(
+                stage_name=stage_name,
+                latest_by_symbol=latest_by_symbol,
+                earliest_by_symbol={},
+                pending_symbols=pending_symbols,
+                ready_outputs=ready_outputs,
+            )
 
     stage_details: dict[str, list[str]] = {symbol: [] for symbol in symbols}
-    stage_outputs: dict[str, dict[str, UpdateResult]] = {name: {} for name, _, _ in stage_specs}
+    stage_outputs: dict[str, dict[str, UpdateResult]] = {name: {} for name, _ in stage_specs}
     failed_symbols: set[str] = set()
     stage_pending: dict[str, deque[str]] = {}
     stage_cooldown_until: dict[str, float] = {}
@@ -1970,7 +2004,7 @@ def run_tushare_update_pipeline(
     backfill_updates: list[dict[str, Any]] = []
     backfill_removals: set[tuple[str, str]] = set()
 
-    for stage_name, _, _ in stage_specs:
+    for stage_name, _ in stage_specs:
         plan = stage_plans[stage_name]
         stage_outputs[stage_name].update(plan.ready_outputs)
         for symbol, output in plan.ready_outputs.items():
@@ -1982,10 +2016,12 @@ def run_tushare_update_pipeline(
         stage_done[stage_name] = len(plan.ready_outputs)
         stage_total[stage_name] = len(plan.pending_symbols) + len(plan.ready_outputs)
 
-    while any(stage_pending[name] for name, _, _ in stage_specs):
+    while any(stage_pending[name] for name, _ in stage_specs):
         progressed = False
         now = time.monotonic()
-        for stage_name, stage_dir, worker in stage_specs:
+        for stage_name, spec in stage_specs:
+            stage_dir = spec["stage_dir"]
+            worker = spec["worker"]
             queue = stage_pending[stage_name]
             if not queue:
                 continue
@@ -2021,9 +2057,9 @@ def run_tushare_update_pipeline(
                     stage_details[item.symbol].append(f"{stage_name}: {item.detail}")
                     if isinstance(item.payload, UpdateResult):
                         stage_outputs[stage_name][item.symbol] = item.payload
-                        if item.payload.changed:
+                        if spec["precheck_kind"] == "market" and item.payload.changed:
                             backfill_removals.add((stage_name, item.symbol))
-                        elif item.payload.backfill_exhausted:
+                        elif spec["precheck_kind"] == "market" and item.payload.backfill_exhausted:
                             backfill_updates.append(
                                 {
                                     "stage_name": stage_name,
@@ -2035,11 +2071,25 @@ def run_tushare_update_pipeline(
                                     "recorded_at": pd.Timestamp.now().normalize(),
                                 }
                             )
+                        elif spec["precheck_kind"] == "aux":
+                            aux_stage_frame = merge_aux_empty_records(
+                                aux_stage_frame,
+                                updates=[
+                                    {
+                                        "stage_name": stage_name,
+                                        "local_symbol": item.symbol,
+                                        "checked_end_date": target_end_date,
+                                        "recorded_at": pd.Timestamp.now().normalize(),
+                                    }
+                                ],
+                                removals=set(),
+                            )
+                            save_aux_empty_results(aux_stage_frame)
                     else:
                         stage_outputs[stage_name][item.symbol] = UpdateResult(
                             status=item.detail,
                             changed=" saved to " in item.detail,
-                            latest=infer_latest_date(stage_dir / f"{item.symbol}.parquet", "trade_date"),
+                            latest=infer_latest_date(stage_dir / f"{item.symbol}.parquet", spec["date_column"]),
                         )
                     stage_success[stage_name] += 1
                     stage_done[stage_name] += 1
@@ -2082,7 +2132,7 @@ def run_tushare_update_pipeline(
 
         waiting_stages = [
             (name, stage_cooldown_until[name])
-            for name, _, _ in stage_specs
+            for name, _ in stage_specs
             if stage_pending[name] and stage_cooldown_until[name] > now
         ]
         if not waiting_stages:
@@ -2103,17 +2153,19 @@ def run_tushare_update_pipeline(
         )
         save_backfill_exhaustion(exhaustion_frame)
 
+    market_stage_names = [name for name, spec in stage_specs if spec["precheck_kind"] == "market"]
+    should_run_processed = "processed" in selected_stage_names or any(name in DEFAULT_MARKET_STAGE_NAMES for name in selected_stage_names)
     build_symbols = [
         symbol
         for symbol in symbols
         if symbol not in failed_symbols
-        and all(symbol in stage_outputs[name] for name, _, _ in stage_specs)
+        and all(symbol in stage_outputs[name] for name in market_stage_names)
     ]
-    if build_symbols:
+    if should_run_processed and build_symbols and market_stage_names:
         print("[*] Raw Tushare downloads finished. Rebuilding processed parquet...")
 
         def rebuild_if_needed(symbol: str) -> str:
-            updates = [stage_outputs[name][symbol] for name, _, _ in stage_specs]
+            updates = [stage_outputs[name][symbol] for name in market_stage_names]
             if should_rebuild_processed(symbol, updates):
                 return rebuild_processed_from_local(symbol)
             processed_latest = infer_latest_date(PROCESSED_DIR / f"{symbol}.parquet", "date")
@@ -2132,9 +2184,10 @@ def run_tushare_update_pipeline(
 
     final_results: list[TaskResult] = []
     for symbol in symbols:
-        ok = symbol not in failed_symbols and any(
-            detail.startswith("processed: ") for detail in stage_details[symbol]
-        )
+        if should_run_processed and market_stage_names:
+            ok = symbol not in failed_symbols and any(detail.startswith("processed: ") for detail in stage_details[symbol])
+        else:
+            ok = symbol not in failed_symbols and all(symbol in stage_outputs[name] for name, _ in stage_specs)
         final_results.append(TaskResult(symbol=symbol, ok=ok, detail="; ".join(stage_details[symbol])))
     return final_results
 
@@ -2189,11 +2242,11 @@ def precheck_aux_stage_symbols(
     empty_lookup = empty_lookup or {}
     for symbol in symbols:
         latest = infer_latest_date(stage_dir / f"{symbol}.parquet", date_column)
-        empty_until = empty_lookup.get((stage_name, symbol))
+        checked_until = empty_lookup.get((stage_name, symbol))
         if latest is not None and latest >= target_end_date:
             ready.append(symbol)
             continue
-        if empty_until is not None and empty_until >= target_end_date:
+        if checked_until is not None and checked_until >= target_end_date:
             ready.append(symbol)
             continue
         pending.append(symbol)
@@ -2210,6 +2263,19 @@ def parse_symbols_arg(symbols: str | None) -> list[str]:
     if not symbols:
         return []
     return sorted({ts_symbol_to_local(item.strip()) for item in symbols.split(",") if item.strip()})
+
+
+def parse_stage_names_arg(raw: str | None) -> tuple[str, ...]:
+    if raw is None or not str(raw).strip():
+        return DEFAULT_MARKET_STAGE_NAMES
+    requested = tuple(dict.fromkeys(item.strip() for item in str(raw).split(",") if item.strip()))
+    invalid = [item for item in requested if item not in OPTIONAL_STAGE_NAMES]
+    if invalid:
+        raise ValueError(
+            f"Unsupported stage(s): {', '.join(invalid)}. "
+            f"Available: {', '.join(OPTIONAL_STAGE_NAMES)}"
+        )
+    return requested
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2229,14 +2295,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rebuild Tushare processed parquet from local raw files.",
     )
     parser.add_argument(
-        "--fina-indicator",
-        action="store_true",
-        help="Fetch/update raw Tushare fina_indicator parquet only for the resolved symbols.",
-    )
-    parser.add_argument(
-        "--dividend",
-        action="store_true",
-        help="Fetch/update raw Tushare dividend parquet only for the resolved symbols.",
+        "--stages",
+        help=(
+            "Comma-separated stage list to update. "
+            f"Available: {', '.join(OPTIONAL_STAGE_NAMES)}. "
+            f"Default: {', '.join(DEFAULT_MARKET_STAGE_NAMES)}"
+        ),
     )
     parser.add_argument(
         "--refresh-symbols",
@@ -2265,6 +2329,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    try:
+        selected_stage_names = parse_stage_names_arg(args.stages)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not args.rebuild_processed and selected_stage_names == ("processed",):
+        parser.error("Use --rebuild-processed to rebuild processed parquet only.")
 
     configure_tushare(args.token_env)
 
@@ -2287,138 +2357,6 @@ def main() -> None:
             f"[*] Rebuilding Tushare processed parquet for {len(symbols)} symbols from local raw files..."
         )
         results = collect_symbols(symbols, rebuild_symbol, max_workers=args.workers)
-    elif args.fina_indicator:
-        if args.all:
-            symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)
-        elif args.update and not symbols:
-            symbols = resolve_incremental_symbols(refresh_live=args.refresh_symbols)
-        elif not symbols:
-            parser.error("Provide one of --all, --update, or --symbols together with --fina-indicator.")
-
-        if not symbols:
-            raise SystemExit("[!] No Tushare symbols to process.")
-
-        aux_empty_frame = load_aux_empty_results()
-        aux_empty_lookup = build_aux_empty_lookup(aux_empty_frame)
-        symbols, completed_symbols = precheck_aux_stage_symbols(
-            symbols,
-            stage_name="fina_indicator",
-            stage_dir=RAW_FINA_INDICATOR_DIR,
-            target_end_date=latest_trading_date,
-            date_column="ann_date",
-            empty_lookup=aux_empty_lookup,
-        )
-        if completed_symbols:
-            print(f"[*] Skipping {len(completed_symbols)} already-complete/empty fina_indicator symbols.")
-        if not symbols:
-            print("[+] All fina_indicator symbols are already complete. Nothing to update.")
-            return
-
-        print(
-            f"[*] Updating raw fina_indicator for {len(symbols)} symbols with {args.workers} workers "
-            f"(end_date={latest_trading_date.date()})..."
-        )
-
-        aux_empty_updates: list[dict[str, Any]] = []
-        aux_empty_removals: set[tuple[str, str]] = set()
-
-        def _fina_indicator_worker(symbol: str) -> TaskResult:
-            try:
-                latest = infer_latest_date(RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet", "ann_date")
-                result = update_raw_table(
-                    symbol,
-                    RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet",
-                    _fetch_fina_indicator,
-                    latest_trading_date,
-                    latest=latest,
-                    expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
-                    required_columns=FINA_INDICATOR_API_FIELDS,
-                    date_column="ann_date",
-                    allow_empty_success=True,
-                )
-                if " empty through " in result.status:
-                    aux_empty_updates.append(
-                        {
-                            "stage_name": "fina_indicator",
-                            "local_symbol": symbol,
-                            "checked_end_date": latest_trading_date,
-                            "recorded_at": pd.Timestamp.now().normalize(),
-                        }
-                    )
-                else:
-                    aux_empty_removals.add(("fina_indicator", symbol))
-                return TaskResult(symbol=symbol, ok=True, detail=result.status)
-            except Exception as exc:
-                return TaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
-
-        results = collect_symbols(symbols, _fina_indicator_worker, max_workers=args.workers)
-        save_aux_empty_results(merge_aux_empty_records(aux_empty_frame, aux_empty_updates, aux_empty_removals))
-    elif args.dividend:
-        if args.all:
-            symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)
-        elif args.update and not symbols:
-            symbols = resolve_incremental_symbols(refresh_live=args.refresh_symbols)
-        elif not symbols:
-            parser.error("Provide one of --all, --update, or --symbols together with --dividend.")
-
-        if not symbols:
-            raise SystemExit("[!] No Tushare symbols to process.")
-
-        aux_empty_frame = load_aux_empty_results()
-        aux_empty_lookup = build_aux_empty_lookup(aux_empty_frame)
-        symbols, completed_symbols = precheck_aux_stage_symbols(
-            symbols,
-            stage_name="dividend",
-            stage_dir=RAW_DIVIDEND_DIR,
-            target_end_date=latest_trading_date,
-            date_column="ann_date",
-            empty_lookup=aux_empty_lookup,
-        )
-        if completed_symbols:
-            print(f"[*] Skipping {len(completed_symbols)} already-complete/empty dividend symbols.")
-        if not symbols:
-            print("[+] All dividend symbols are already complete. Nothing to update.")
-            return
-
-        print(
-            f"[*] Updating raw dividend for {len(symbols)} symbols with {args.workers} workers "
-            f"(end_date={latest_trading_date.date()})..."
-        )
-
-        aux_empty_updates: list[dict[str, Any]] = []
-        aux_empty_removals: set[tuple[str, str]] = set()
-
-        def _dividend_worker(symbol: str) -> TaskResult:
-            try:
-                latest = infer_latest_date(RAW_DIVIDEND_DIR / f"{symbol}.parquet", "ann_date")
-                result = update_raw_table(
-                    symbol,
-                    RAW_DIVIDEND_DIR / f"{symbol}.parquet",
-                    _fetch_dividend,
-                    latest_trading_date,
-                    latest=latest,
-                    expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
-                    required_columns=DIVIDEND_API_FIELDS,
-                    date_column="ann_date",
-                    allow_empty_success=True,
-                )
-                if " empty through " in result.status:
-                    aux_empty_updates.append(
-                        {
-                            "stage_name": "dividend",
-                            "local_symbol": symbol,
-                            "checked_end_date": latest_trading_date,
-                            "recorded_at": pd.Timestamp.now().normalize(),
-                        }
-                    )
-                else:
-                    aux_empty_removals.add(("dividend", symbol))
-                return TaskResult(symbol=symbol, ok=True, detail=result.status)
-            except Exception as exc:
-                return TaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
-
-        results = collect_symbols(symbols, _dividend_worker, max_workers=args.workers)
-        save_aux_empty_results(merge_aux_empty_records(aux_empty_frame, aux_empty_updates, aux_empty_removals))
     else:
         if args.all:
             symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)
@@ -2429,29 +2367,32 @@ def main() -> None:
 
         if not symbols:
             raise SystemExit("[!] No Tushare symbols to process.")
-
-        symbols, completed_symbols, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
-            symbols, target_end_date=latest_trading_date
-        )
-        if not lifecycle_registry.empty:
-            lifecycle_counts = lifecycle_registry["lifecycle_status"].value_counts().to_dict()
-            counts_text = ", ".join(f"{key}={value}" for key, value in sorted(lifecycle_counts.items()))
-            print(f"[*] Tushare lifecycle snapshot: {counts_text}")
-        if completed_symbols:
-            print(f"[*] Skipping {len(completed_symbols)} already-complete Tushare symbols.")
-        if not symbols:
-            print("[+] All Tushare symbols are already complete. Nothing to update.")
-            return
+        effective_end_dates: dict[str, pd.Timestamp] | None = None
+        market_selected = any(stage in DEFAULT_MARKET_STAGE_NAMES for stage in selected_stage_names)
+        if market_selected:
+            symbols, completed_symbols, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
+                symbols, target_end_date=latest_trading_date
+            )
+            if not lifecycle_registry.empty:
+                lifecycle_counts = lifecycle_registry["lifecycle_status"].value_counts().to_dict()
+                counts_text = ", ".join(f"{key}={value}" for key, value in sorted(lifecycle_counts.items()))
+                print(f"[*] Tushare lifecycle snapshot: {counts_text}")
+            if completed_symbols:
+                print(f"[*] Skipping {len(completed_symbols)} already-complete Tushare symbols.")
+            if not symbols:
+                print("[+] All Tushare symbols are already complete. Nothing to update.")
+                return
 
         print(
-            f"[*] Updating {len(symbols)} pending Tushare symbols with {args.workers} workers "
-            f"(end_date={latest_trading_date.date()})..."
+            f"[*] Updating {len(symbols)} Tushare symbols with {args.workers} workers "
+            f"(end_date={latest_trading_date.date()}, stages={','.join(selected_stage_names)})..."
         )
         results = run_tushare_update_pipeline(
             symbols,
             target_end_date=latest_trading_date,
             max_workers=args.workers,
             effective_end_dates=effective_end_dates,
+            selected_stage_names=selected_stage_names,
         )
 
     success = sum(1 for item in results if item.ok)

@@ -23,6 +23,19 @@ profiles:
   core_v4_techlite:
     path: configs/features/core_v4_techlite.yaml
 
+  core_v4_techlite_tushare_plus:
+    extends: core_v4_techlite
+    add_columns:
+      - TS_gap_up_limit
+      - TS_gap_down_limit
+      - TS_limit_band_pos
+      - TS_hit_up_limit
+      - TS_hit_down_limit
+      - TS_free_float_ratio
+      - TS_free_turnover_ratio
+      - TS_sp_ttm
+      - TS_dividend_yield_ttm
+
   core_v4_techlite_no_aroon:
     extends: core_v4_techlite
     drop_columns: [TECH_aroon_osc_25]

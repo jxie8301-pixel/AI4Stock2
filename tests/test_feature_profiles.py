@@ -8,6 +8,7 @@ from src.feature_profiles import resolve_feature_profile
 from src.gen_feature import (
     TECHNICAL_FACTOR_PREFIX,
     TEMPORAL_FACTOR_PREFIX,
+    TUSHARE_FACTOR_PREFIX,
     get_all_factor_feature_names,
     get_alpha158_feature_config,
     get_lgbm_purified_feature_names,
@@ -170,6 +171,21 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertTrue(str(no_ret120["profile_path"]).endswith("configs/feature_profiles.yaml::core_v4_techlite_no_ret120"))
         self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", no_ret120["selected_columns"])
         self.assertEqual(len(no_ret120["selected_columns"]), 45)
+
+    def test_core_v4_tushare_plus_profile_adds_ts_columns(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v4_techlite_tushare_plus"},
+            }
+        )
+
+        self.assertTrue(
+            str(profile["profile_path"]).endswith("configs/feature_profiles.yaml::core_v4_techlite_tushare_plus")
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_ratio", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_ttm", profile["selected_columns"])
 
     def test_inline_feature_profile_extends_with_drop_and_add_columns(self):
         with tempfile.TemporaryDirectory() as tmpdir:

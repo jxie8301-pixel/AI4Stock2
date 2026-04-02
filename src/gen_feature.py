@@ -28,6 +28,7 @@ try:
     from src.data_source import (
         SUPPORTED_DATA_SOURCES,
         get_default_factor_store_dir,
+        normalize_data_source_name,
         resolve_data_source_name,
         resolve_source_parquet_dir,
     )
@@ -35,6 +36,7 @@ except ModuleNotFoundError:
     from data_source import (  # type: ignore
         SUPPORTED_DATA_SOURCES,
         get_default_factor_store_dir,
+        normalize_data_source_name,
         resolve_data_source_name,
         resolve_source_parquet_dir,
     )
@@ -119,10 +121,15 @@ DEFAULT_TECHNICAL_FACTOR_CONFIG: dict[str, Any] = {
     "obv_windows": [20, 60],
 }
 
+DEFAULT_TUSHARE_FACTOR_CONFIG: dict[str, Any] = {
+    "free_turnover_windows": [5, 20],
+}
+
 ALL_FACTORS_ALPHA360_PREFIX = "A360_"
 ALL_FACTORS_LGBM_PREFIX = "LGBM_"
 TEMPORAL_FACTOR_PREFIX = "TEMP_"
 TECHNICAL_FACTOR_PREFIX = "TECH_"
+TUSHARE_FACTOR_PREFIX = "TS_"
 SHARD_DIRNAME = "_shards"
 
 
@@ -332,13 +339,21 @@ def get_all_factor_feature_names(
     alpha158_config: dict[str, Any] | None = None,
     lgbm_purified_config: dict[str, Any] | None = None,
     technical_config: dict[str, Any] | None = None,
+    data_source: str | None = None,
+    tushare_config: dict[str, Any] | None = None,
 ) -> list[str]:
     """Return the comprehensive feature-space names used by the unified cache."""
     alpha158_names = get_alpha158_feature_config(alpha158_config)[1]
     lgbm_names = [f"{ALL_FACTORS_LGBM_PREFIX}{name}" for name in get_lgbm_purified_feature_names(lgbm_purified_config)]
     temporal_names = [f"{TEMPORAL_FACTOR_PREFIX}{name}" for name in get_temporal_factor_feature_names()]
     technical_names = [f"{TECHNICAL_FACTOR_PREFIX}{name}" for name in get_technical_factor_feature_names(technical_config)]
-    return alpha158_names + lgbm_names + temporal_names + technical_names
+    feature_names = alpha158_names + lgbm_names + temporal_names + technical_names
+    if data_source is not None and normalize_data_source_name(data_source) == "tushare":
+        feature_names += [
+            f"{TUSHARE_FACTOR_PREFIX}{name}"
+            for name in get_tushare_factor_feature_names(tushare_config)
+        ]
+    return feature_names
 
 
 def get_lgbm_purified_feature_names(config: dict[str, Any] | None = None) -> list[str]:
@@ -431,6 +446,34 @@ def get_technical_factor_feature_names(config: dict[str, Any] | None = None) -> 
         names += [f"trix_{window}", f"trix_signal_{window}_{trix_signal}", f"trix_hist_{window}_{trix_signal}"]
     for window in cfg["obv_windows"]:
         names.append(f"obv_flow_{int(window)}")
+    return names
+
+
+def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> list[str]:
+    cfg = deepcopy(DEFAULT_TUSHARE_FACTOR_CONFIG)
+    if config is not None:
+        cfg.update(config)
+
+    names = [
+        "gap_up_limit",
+        "gap_down_limit",
+        "limit_band_pct",
+        "limit_band_pos",
+        "hit_up_limit",
+        "hit_down_limit",
+        "free_float_ratio",
+        "circ_float_ratio",
+        "free_to_circ_ratio",
+        "free_turnover_ratio",
+        "free_turnover_spread",
+        "volume_ratio_raw",
+        "sp",
+        "sp_ttm",
+        "dividend_yield",
+        "dividend_yield_ttm",
+        "has_dividend",
+    ]
+    names += [f"free_turnover_mean_{int(window)}" for window in cfg["free_turnover_windows"]]
     return names
 
 
@@ -1120,11 +1163,93 @@ def compute_temporal_factor_features(
     return feat
 
 
+def compute_tushare_factor_features(
+    df: pd.DataFrame,
+    config: dict[str, Any] | None = None,
+    _base: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    """Compute Tushare-specific market-structure and valuation features."""
+    cfg = deepcopy(DEFAULT_TUSHARE_FACTOR_CONFIG)
+    if config is not None:
+        cfg.update(config)
+
+    base = _base if _base is not None else _prepare_ohlcv(df)
+    close = base["close"].replace(0, np.nan)
+    up_limit = base["up_limit"] if "up_limit" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    down_limit = base["down_limit"] if "down_limit" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    limit_pre_close = (
+        base["limit_pre_close"]
+        if "limit_pre_close" in base.columns
+        else base.get("pre_close", pd.Series(np.nan, index=base.index, dtype=float))
+    )
+    limit_pre_close = limit_pre_close.replace(0, np.nan)
+
+    total_share = base["total_share"] if "total_share" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    circ_share = base["circ_share"] if "circ_share" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    free_share = base["free_share"] if "free_share" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    turnover = base["turnover"] if "turnover" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    turnover_free = (
+        base["turnover_free"] if "turnover_free" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    volume_ratio = (
+        base["volume_ratio"] if "volume_ratio" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    ps = base["ps"] if "ps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    ps_ttm = base["ps_ttm"] if "ps_ttm" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    dv_ratio = (
+        base["dv_ratio"] if "dv_ratio" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    dv_ttm = base["dv_ttm"] if "dv_ttm" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+
+    out: dict[str, pd.Series] = {}
+    out["gap_up_limit"] = up_limit / close - 1.0
+    out["gap_down_limit"] = close / down_limit - 1.0
+    out["limit_band_pct"] = (up_limit - down_limit) / (limit_pre_close + EPS)
+    out["limit_band_pos"] = (close - down_limit) / (up_limit - down_limit + EPS)
+    out["hit_up_limit"] = np.where(
+        np.isfinite(close) & np.isfinite(up_limit),
+        (close >= up_limit * (1.0 - 1e-6)).astype(float),
+        np.nan,
+    )
+    out["hit_down_limit"] = np.where(
+        np.isfinite(close) & np.isfinite(down_limit),
+        (close <= down_limit * (1.0 + 1e-6)).astype(float),
+        np.nan,
+    )
+
+    total_share_safe = total_share.replace(0, np.nan)
+    circ_share_safe = circ_share.replace(0, np.nan)
+    out["free_float_ratio"] = free_share / total_share_safe
+    out["circ_float_ratio"] = circ_share / total_share_safe
+    out["free_to_circ_ratio"] = free_share / circ_share_safe
+
+    turnover_safe = turnover.replace(0, np.nan)
+    out["free_turnover_ratio"] = turnover_free / turnover_safe
+    out["free_turnover_spread"] = turnover_free - turnover
+    for window in cfg["free_turnover_windows"]:
+        window = int(window)
+        out[f"free_turnover_mean_{window}"] = turnover_free.rolling(window, min_periods=1).mean()
+
+    out["volume_ratio_raw"] = volume_ratio
+    out["sp"] = np.where(ps > 0, 1.0 / ps, -1.0)
+    out["sp_ttm"] = np.where(ps_ttm > 0, 1.0 / ps_ttm, -1.0)
+    out["dividend_yield"] = dv_ratio
+    out["dividend_yield_ttm"] = dv_ttm
+    out["has_dividend"] = np.where(np.isfinite(dv_ttm), (dv_ttm > 0).astype(float), np.nan)
+
+    feat = pd.DataFrame(out, index=base.index)
+    ordered_names = get_tushare_factor_feature_names(cfg)
+    feat = feat.reindex(columns=ordered_names)
+    return feat
+
+
 def compute_all_factor_features(
     df: pd.DataFrame,
     alpha158_config: dict[str, Any] | None = None,
     lgbm_purified_config: dict[str, Any] | None = None,
     technical_config: dict[str, Any] | None = None,
+    data_source: str | None = None,
+    tushare_config: dict[str, Any] | None = None,
 ) -> pd.DataFrame:
     """Compute a single comprehensive factor frame for training-time sub-selection."""
     base = _prepare_ohlcv(df)
@@ -1136,8 +1261,21 @@ def compute_all_factor_features(
     technical_feat = compute_technical_factor_features(df, config=technical_config, _base=base).rename(
         columns=lambda name: f"{TECHNICAL_FACTOR_PREFIX}{name}"
     )
-    feat = pd.concat([alpha158_feat, lgbm_feat, temporal_feat, technical_feat], axis=1)
-    ordered_names = get_all_factor_feature_names(alpha158_config, lgbm_purified_config, technical_config)
+    parts = [alpha158_feat, lgbm_feat, temporal_feat, technical_feat]
+    normalized_data_source = normalize_data_source_name(data_source) if data_source is not None else None
+    if normalized_data_source == "tushare":
+        tushare_feat = compute_tushare_factor_features(df, config=tushare_config, _base=base).rename(
+            columns=lambda name: f"{TUSHARE_FACTOR_PREFIX}{name}"
+        )
+        parts.append(tushare_feat)
+    feat = pd.concat(parts, axis=1)
+    ordered_names = get_all_factor_feature_names(
+        alpha158_config,
+        lgbm_purified_config,
+        technical_config,
+        data_source=normalized_data_source,
+        tushare_config=tushare_config,
+    )
     feat = feat.reindex(columns=ordered_names)
     return feat
 
@@ -1199,11 +1337,13 @@ def _to_panel_arrays(feat: pd.DataFrame, label: pd.Series) -> tuple[np.ndarray, 
 
 def _compute_symbol_feat_label(
     file_path: str,
+    *,
+    data_source: str | None = None,
 ) -> tuple[str, pd.DataFrame, pd.Series]:
     """Load one parquet and compute features + label."""
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
-    feat = compute_all_factor_features(df)
+    feat = compute_all_factor_features(df, data_source=data_source)
     label = build_open_to_open_label(df, horizon_days=1)
     return symbol, feat, label
 
@@ -1212,17 +1352,19 @@ def _compute_symbol_feat_labels(
     file_path: str,
     *,
     label_horizons: list[int],
+    data_source: str | None = None,
 ) -> tuple[str, pd.DataFrame, dict[str, pd.Series]]:
     """Load one parquet and compute features plus all configured labels."""
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
-    feat = compute_all_factor_features(df)
+    feat = compute_all_factor_features(df, data_source=data_source)
     labels = build_open_to_open_labels(df, label_horizons)
     return symbol, feat, labels
 
 
 def _count_file_worker(
     file_path: str,
+    data_source: str | None = None,
 ) -> tuple[str, int, int]:
     """Worker for panel-cache counting pass (fast metadata path)."""
     symbol = Path(file_path).stem
@@ -1232,14 +1374,15 @@ def _count_file_worker(
     except Exception:
         # Fallback for corrupted/unusual parquet metadata.
         n_rows = int(len(pd.read_parquet(file_path, columns=["date"])))
-    return file_path, symbol, len(get_full_factor_space_feature_names()), n_rows
+    return file_path, symbol, len(get_full_factor_space_feature_names(data_source=data_source)), n_rows
 
 
 def _build_file_payload_worker(
     file_path: str,
+    data_source: str | None = None,
 ) -> tuple[str, int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """Worker for panel-cache payload pass."""
-    symbol, feat, label = _compute_symbol_feat_label(file_path)
+    symbol, feat, label = _compute_symbol_feat_label(file_path, data_source=data_source)
     payload = _to_panel_arrays(feat, label)
     return symbol, feat.shape[1], payload
 
@@ -1255,9 +1398,10 @@ def _write_panel_file_slice_process(
     symbol_path: str,
     total_rows: int,
     n_feat: int,
+    data_source: str | None = None,
 ) -> int:
     """Process worker: compute one file and write to fixed memmap slice."""
-    symbol, feat, label = _compute_symbol_feat_label(file_path)
+    symbol, feat, label = _compute_symbol_feat_label(file_path, data_source=data_source)
     x_arr, y_arr, d_arr = _to_panel_arrays(feat, label)
     if x_arr.shape[0] != count:
         raise RuntimeError(
@@ -1291,9 +1435,9 @@ def _source_file_signature(file_path: str | Path) -> dict[str, Any]:
     }
 
 
-def get_full_factor_space_feature_names() -> list[str]:
+def get_full_factor_space_feature_names(data_source: str | None = None) -> list[str]:
     """Return the canonical unified feature-space column order."""
-    return get_all_factor_feature_names()
+    return get_all_factor_feature_names(data_source=data_source)
 
 
 def _shard_base_name(file_path: str | Path) -> str:
@@ -1370,8 +1514,17 @@ def _save_shard(
     return shard_meta
 
 
-def _build_shard_frame(file_path: str | Path, *, label_horizons: list[int]) -> tuple[str, pd.DataFrame]:
-    symbol, feat, labels = _compute_symbol_feat_labels(str(file_path), label_horizons=label_horizons)
+def _build_shard_frame(
+    file_path: str | Path,
+    *,
+    label_horizons: list[int],
+    data_source: str | None = None,
+) -> tuple[str, pd.DataFrame]:
+    symbol, feat, labels = _compute_symbol_feat_labels(
+        str(file_path),
+        label_horizons=label_horizons,
+        data_source=data_source,
+    )
     frame = feat.copy()
     frame = frame.astype(np.float32)
     frame.insert(0, "date", pd.to_datetime(frame.index))
@@ -1392,8 +1545,13 @@ def _write_factor_shard_worker(
     meta_path: str,
     feature_names: list[str],
     label_horizons: list[int],
+    data_source: str | None = None,
 ) -> dict[str, Any]:
-    symbol, shard_frame = _build_shard_frame(file_path, label_horizons=label_horizons)
+    symbol, shard_frame = _build_shard_frame(
+        file_path,
+        label_horizons=label_horizons,
+        data_source=data_source,
+    )
     shard_root = Path(shard_path).parent
     shard_meta_root = Path(meta_path).parent
     return _save_shard(
@@ -1464,7 +1622,7 @@ def generate_factor_store(
 
     _remove_orphan_shards(shard_root=shard_root, shard_meta_root=shard_meta_root, source_files=files)
 
-    feature_names = get_full_factor_space_feature_names()
+    feature_names = get_full_factor_space_feature_names(data_source=data_source)
     label_horizons = resolve_label_horizons({"label": {"horizons": label_horizons}} if label_horizons is not None else {})
     label_columns = [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]
     workers = max(1, int(workers))
@@ -1513,6 +1671,7 @@ def generate_factor_store(
                     str(meta_path),
                     feature_names,
                     label_horizons,
+                    data_source,
                 )
                 written_shard_metas.append(shard_meta)
                 elapsed = time.perf_counter() - t1
@@ -1533,6 +1692,7 @@ def generate_factor_store(
                             str(meta_path),
                             feature_names,
                             label_horizons,
+                            data_source,
                         )
                     )
                 pbar = tqdm(total=len(files_to_recompute), desc="shards", unit="file")
@@ -1697,11 +1857,12 @@ def main() -> None:
         or cfg.get("features", {}).get("cache_dir")
         or get_default_factor_store_dir(data_source, FULL_FACTOR_SPACE_NAME)
     )
-    feature_names = get_full_factor_space_feature_names()
+    feature_names = get_full_factor_space_feature_names(data_source=data_source)
     alpha158_count = len(get_alpha158_feature_config()[1])
     lgbm_count = len(get_lgbm_purified_feature_names())
     temporal_count = len(get_temporal_factor_feature_names())
     technical_count = len(get_technical_factor_feature_names())
+    tushare_count = len(get_tushare_factor_feature_names()) if data_source == "tushare" else 0
 
     print(
         "storage_format=parquet, "
@@ -1718,6 +1879,7 @@ def main() -> None:
         f"lgbm_purified:{lgbm_count}, "
         f"temporal:{temporal_count}, "
         f"technical:{technical_count}, "
+        f"tushare:{tushare_count}, "
         f"total:{len(feature_names)}"
     )
     generate_factor_store(

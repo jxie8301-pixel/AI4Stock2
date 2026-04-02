@@ -38,6 +38,80 @@ MARKET_CHUNK_YEARS = 12
 STK_LIMIT_COVERAGE_START = pd.Timestamp("2007-01-04")
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 
+STOCK_BASIC_API_FIELDS = [
+    "ts_code",
+    "symbol",
+    "name",
+    "area",
+    "industry",
+    "fullname",
+    "enname",
+    "cnspell",
+    "market",
+    "exchange",
+    "curr_type",
+    "list_status",
+    "list_date",
+    "delist_date",
+    "is_hs",
+    "act_name",
+    "act_ent",
+]
+
+TRADE_CAL_API_FIELDS = ["exchange", "cal_date", "is_open", "pretrade_date"]
+
+DAILY_API_FIELDS = [
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+]
+
+DAILY_RAW_COLS = [
+    "ts_code",
+    "trade_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "volume",
+    "amount",
+]
+
+DAILY_BASIC_API_FIELDS = [
+    "ts_code",
+    "trade_date",
+    "close",
+    "turnover_rate",
+    "turnover_rate_f",
+    "volume_ratio",
+    "pe",
+    "pe_ttm",
+    "pb",
+    "ps",
+    "ps_ttm",
+    "dv_ratio",
+    "dv_ttm",
+    "total_share",
+    "float_share",
+    "free_share",
+    "total_mv",
+    "circ_mv",
+]
+
+ADJ_FACTOR_API_FIELDS = ["ts_code", "trade_date", "adj_factor"]
+STK_LIMIT_API_FIELDS = ["ts_code", "trade_date", "pre_close", "up_limit", "down_limit"]
+
 SYMBOL_CACHE_COLS = [
     "local_symbol",
     "ts_code",
@@ -45,10 +119,18 @@ SYMBOL_CACHE_COLS = [
     "name",
     "area",
     "industry",
+    "fullname",
+    "enname",
+    "cnspell",
     "market",
+    "exchange",
+    "curr_type",
     "list_date",
     "delist_date",
     "list_status",
+    "is_hs",
+    "act_name",
+    "act_ent",
     "fetched_at",
 ]
 
@@ -108,6 +190,7 @@ TS_PROCESSED_CANONICAL_COLS = [
     "ps_ttm",
     "dv_ratio",
     "dv_ttm",
+    "limit_pre_close",
     "up_limit",
     "down_limit",
     "adj_factor",
@@ -282,6 +365,20 @@ def _read_parquet_safe(path: Path, columns: list[str] | None = None) -> pd.DataF
         return None
 
 
+def _parquet_missing_columns(path: Path, required_columns: list[str]) -> list[str]:
+    if not path.exists():
+        return list(required_columns)
+    try:
+        meta = pq.read_metadata(str(path))
+        present = set(meta.schema.names)
+    except Exception:
+        frame = _read_parquet_safe(path)
+        if frame is None:
+            return list(required_columns)
+        present = set(frame.columns)
+    return [col for col in required_columns if col not in present]
+
+
 def load_parquet_if_exists(path: Path) -> pd.DataFrame | None:
     return _read_parquet_safe(path)
 
@@ -357,17 +454,24 @@ def normalize_symbol_cache_frame(
     out["symbol"] = out["symbol"].astype(str).str.strip()
     out["local_symbol"] = out["symbol"]
     out["name"] = out["name"].fillna("").astype(str).str.strip()
-    out["area"] = (
-        out["area"].fillna("").astype(str).str.strip()
-        if "area" in out.columns
-        else pd.Series("", index=out.index, dtype=object)
-    )
-    out["industry"] = (
-        out["industry"].fillna("").astype(str).str.strip()
-        if "industry" in out.columns
-        else pd.Series("", index=out.index, dtype=object)
-    )
-    out["market"] = out["market"].fillna("").astype(str).str.strip()
+    for field in [
+        "area",
+        "industry",
+        "fullname",
+        "enname",
+        "cnspell",
+        "market",
+        "exchange",
+        "curr_type",
+        "is_hs",
+        "act_name",
+        "act_ent",
+    ]:
+        out[field] = (
+            out[field].fillna("").astype(str).str.strip()
+            if field in out.columns
+            else pd.Series("", index=out.index, dtype=object)
+        )
     out["list_date"] = pd.to_datetime(out["list_date"], format="%Y%m%d", errors="coerce")
     if "delist_date" in out.columns:
         out["delist_date"] = pd.to_datetime(out["delist_date"], format="%Y%m%d", errors="coerce")
@@ -393,6 +497,8 @@ def save_symbol_cache(df: pd.DataFrame) -> None:
 def load_symbol_cache() -> pd.DataFrame | None:
     frame = _read_parquet_safe(SYMBOL_CACHE_PATH)
     if frame is None or frame.empty:
+        return None
+    if _parquet_missing_columns(SYMBOL_CACHE_PATH, SYMBOL_CACHE_COLS):
         return None
     out = frame.copy()
     for col in ["list_date", "delist_date", "fetched_at"]:
@@ -456,23 +562,11 @@ def fetch_stock_basic_by_status(list_status: str) -> pd.DataFrame:
     frame = pro.stock_basic(
         exchange="",
         list_status=list_status,
-        fields="ts_code,symbol,name,area,industry,market,list_date,delist_date,list_status",
+        fields=",".join(STOCK_BASIC_API_FIELDS),
     )
     if frame is None:
-        return pd.DataFrame(
-            columns=[
-                "ts_code",
-                "symbol",
-                "name",
-                "area",
-                "industry",
-                "market",
-                "list_date",
-                "delist_date",
-                "list_status",
-            ]
-        )
-    return frame
+        return pd.DataFrame(columns=STOCK_BASIC_API_FIELDS)
+    return frame.reindex(columns=STOCK_BASIC_API_FIELDS)
 
 
 def refresh_symbol_cache() -> pd.DataFrame:
@@ -505,11 +599,12 @@ def refresh_trade_calendar(target_end_date: pd.Timestamp) -> pd.DataFrame:
         exchange="SSE",
         start_date=start_date,
         end_date=end_date,
-        fields="exchange,cal_date,is_open,pretrade_date",
+        fields=",".join(TRADE_CAL_API_FIELDS),
     )
     if frame is None or frame.empty:
         raise RuntimeError("Tushare trade_cal returned empty data")
     out = frame.copy()
+    out = out.reindex(columns=TRADE_CAL_API_FIELDS)
     out["cal_date"] = pd.to_datetime(out["cal_date"], format="%Y%m%d", errors="coerce")
     out["pretrade_date"] = pd.to_datetime(out["pretrade_date"], format="%Y%m%d", errors="coerce")
     out = out.dropna(subset=["cal_date"]).sort_values("cal_date").reset_index(drop=True)
@@ -757,6 +852,24 @@ def load_symbol_state(symbol: str) -> SymbolState:
     )
 
 
+def _is_symbol_schema_complete(symbol: str, target_end_date: pd.Timestamp) -> bool:
+    required_raw = [
+        (RAW_DAILY_DIR / f"{symbol}.parquet", DAILY_RAW_COLS),
+        (RAW_DAILY_BASIC_DIR / f"{symbol}.parquet", DAILY_BASIC_API_FIELDS),
+        (RAW_ADJ_FACTOR_DIR / f"{symbol}.parquet", ADJ_FACTOR_API_FIELDS),
+    ]
+    if any(_parquet_missing_columns(path, columns) for path, columns in required_raw):
+        return False
+    if target_end_date >= STK_LIMIT_COVERAGE_START and _parquet_missing_columns(
+        RAW_STK_LIMIT_DIR / f"{symbol}.parquet",
+        STK_LIMIT_API_FIELDS,
+    ):
+        return False
+    if _parquet_missing_columns(PROCESSED_DIR / f"{symbol}.parquet", TS_PROCESSED_CANONICAL_COLS):
+        return False
+    return True
+
+
 def is_symbol_complete(
     state: SymbolState,
     target_end_date: pd.Timestamp,
@@ -928,7 +1041,7 @@ def split_symbols_by_completion(
             effective_end,
             expected_start_date=expected_start_date,
             backfill_ready=backfill_ready,
-        ):
+        ) and _is_symbol_schema_complete(symbol, effective_end):
             completed.append(symbol)
         else:
             pending.append(symbol)
@@ -968,6 +1081,7 @@ def precheck_stage_updates(
     expected_start_dates: dict[str, pd.Timestamp] | None = None,
     coverage_start_date: pd.Timestamp | None = None,
     exhaustion_lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None = None,
+    required_columns: list[str] | None = None,
     max_workers: int = PRECHECK_WORKERS,
 ) -> StageUpdatePlan:
     if not symbols:
@@ -1020,7 +1134,8 @@ def precheck_stage_updates(
             earliest,
             exhaustion_lookup,
         )
-        if latest is not None and latest >= required_end_date and is_backfilled:
+        schema_complete = not _parquet_missing_columns(stage_dir / f"{symbol}.parquet", required_columns or [])
+        if latest is not None and latest >= required_end_date and is_backfilled and schema_complete:
             ready_outputs[symbol] = UpdateResult(
                 status=f"{stage_name} up-to-date at {latest.date()}",
                 changed=False,
@@ -1061,9 +1176,7 @@ def _fetch_market_table_in_chunks(
         frame = per_chunk_fetcher(symbol, chunk_start, chunk_end)
         if frame is None or frame.empty:
             continue
-        # Drop chunk-local columns that are entirely NA to avoid concat dtype warnings.
-        keep_cols = [col for col in frame.columns if col in {"ts_code", "trade_date"} or not frame[col].isna().all()]
-        frame = frame.loc[:, keep_cols]
+        frame = frame.reindex(columns=empty_columns)
         if not frame.empty:
             frames.append(frame)
     if not frames:
@@ -1080,10 +1193,12 @@ def _fetch_daily_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFr
         ts_code=local_symbol_to_ts(symbol),
         start_date=start_date,
         end_date=end_date,
+        fields=",".join(DAILY_API_FIELDS),
     )
     if frame is None or frame.empty:
-        return pd.DataFrame(columns=["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "volume", "amount"])
+        return pd.DataFrame(columns=DAILY_RAW_COLS)
     out = frame.copy().rename(columns={"vol": "volume"})
+    out = out.reindex(columns=DAILY_RAW_COLS)
     return _normalize_symbol_date_frame(out, "trade_date", "ts_code")
 
 
@@ -1093,7 +1208,7 @@ def _fetch_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
         start_date,
         end_date,
         _fetch_daily_chunk,
-        ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "volume", "amount"],
+        DAILY_RAW_COLS,
     )
 
 
@@ -1105,31 +1220,12 @@ def _fetch_daily_basic_chunk(symbol: str, start_date: str, end_date: str) -> pd.
         ts_code=local_symbol_to_ts(symbol),
         start_date=start_date,
         end_date=end_date,
+        fields=",".join(DAILY_BASIC_API_FIELDS),
     )
     if frame is None or frame.empty:
-        return pd.DataFrame(
-            columns=[
-                "ts_code",
-                "trade_date",
-                "close",
-                "turnover_rate",
-                "turnover_rate_f",
-                "volume_ratio",
-                "pe",
-                "pe_ttm",
-                "pb",
-                "ps",
-                "ps_ttm",
-                "dv_ratio",
-                "dv_ttm",
-                "total_share",
-                "float_share",
-                "free_share",
-                "total_mv",
-                "circ_mv",
-            ]
-        )
-    return _normalize_symbol_date_frame(frame, "trade_date", "ts_code")
+        return pd.DataFrame(columns=DAILY_BASIC_API_FIELDS)
+    out = frame.reindex(columns=DAILY_BASIC_API_FIELDS)
+    return _normalize_symbol_date_frame(out, "trade_date", "ts_code")
 
 
 def _fetch_daily_basic(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1138,26 +1234,7 @@ def _fetch_daily_basic(symbol: str, start_date: str, end_date: str) -> pd.DataFr
         start_date,
         end_date,
         _fetch_daily_basic_chunk,
-        [
-            "ts_code",
-            "trade_date",
-            "close",
-            "turnover_rate",
-            "turnover_rate_f",
-            "volume_ratio",
-            "pe",
-            "pe_ttm",
-            "pb",
-            "ps",
-            "ps_ttm",
-            "dv_ratio",
-            "dv_ttm",
-            "total_share",
-            "float_share",
-            "free_share",
-            "total_mv",
-            "circ_mv",
-        ],
+        DAILY_BASIC_API_FIELDS,
     )
 
 
@@ -1169,10 +1246,12 @@ def _fetch_adj_factor_chunk(symbol: str, start_date: str, end_date: str) -> pd.D
         ts_code=local_symbol_to_ts(symbol),
         start_date=start_date,
         end_date=end_date,
+        fields=",".join(ADJ_FACTOR_API_FIELDS),
     )
     if frame is None or frame.empty:
-        return pd.DataFrame(columns=["ts_code", "trade_date", "adj_factor"])
-    return _normalize_symbol_date_frame(frame, "trade_date", "ts_code")
+        return pd.DataFrame(columns=ADJ_FACTOR_API_FIELDS)
+    out = frame.reindex(columns=ADJ_FACTOR_API_FIELDS)
+    return _normalize_symbol_date_frame(out, "trade_date", "ts_code")
 
 
 def _fetch_adj_factor(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1181,7 +1260,7 @@ def _fetch_adj_factor(symbol: str, start_date: str, end_date: str) -> pd.DataFra
         start_date,
         end_date,
         _fetch_adj_factor_chunk,
-        ["ts_code", "trade_date", "adj_factor"],
+        ADJ_FACTOR_API_FIELDS,
     )
 
 
@@ -1193,10 +1272,12 @@ def _fetch_stk_limit_chunk(symbol: str, start_date: str, end_date: str) -> pd.Da
         ts_code=local_symbol_to_ts(symbol),
         start_date=start_date,
         end_date=end_date,
+        fields=",".join(STK_LIMIT_API_FIELDS),
     )
     if frame is None or frame.empty:
-        return pd.DataFrame(columns=["ts_code", "trade_date", "up_limit", "down_limit"])
-    return _normalize_symbol_date_frame(frame, "trade_date", "ts_code")
+        return pd.DataFrame(columns=STK_LIMIT_API_FIELDS)
+    out = frame.reindex(columns=STK_LIMIT_API_FIELDS)
+    return _normalize_symbol_date_frame(out, "trade_date", "ts_code")
 
 
 def _fetch_stk_limit(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1205,8 +1286,36 @@ def _fetch_stk_limit(symbol: str, start_date: str, end_date: str) -> pd.DataFram
         start_date,
         end_date,
         _fetch_stk_limit_chunk,
-        ["ts_code", "trade_date", "up_limit", "down_limit"],
+        STK_LIMIT_API_FIELDS,
     )
+
+
+def _concat_schema_preserving_frames(
+    frames: list[pd.DataFrame | None],
+    *,
+    ordered_columns: list[str] | None = None,
+) -> pd.DataFrame:
+    valid_frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not valid_frames:
+        return pd.DataFrame(columns=ordered_columns or [])
+
+    prepared: list[pd.DataFrame] = []
+    key_cols = {"ts_code", "trade_date"}
+    for frame in valid_frames:
+        current = frame.copy()
+        if ordered_columns is not None:
+            current = current.reindex(columns=ordered_columns)
+        keep_cols = [
+            col
+            for col in current.columns
+            if col in key_cols or not current[col].isna().all()
+        ]
+        prepared.append(current.loc[:, keep_cols])
+
+    combined = pd.concat(prepared, ignore_index=True)
+    if ordered_columns is not None:
+        combined = combined.reindex(columns=ordered_columns)
+    return combined
 
 
 def update_raw_table(
@@ -1216,15 +1325,18 @@ def update_raw_table(
     target_end_date: pd.Timestamp,
     latest: pd.Timestamp | None | object = ...,
     expected_start_date: pd.Timestamp | None = None,
+    required_columns: list[str] | None = None,
+    refetch_on_schema_mismatch: bool = False,
 ) -> UpdateResult:
     if latest is ...:
         latest = infer_latest_date(path, "trade_date")
     earliest = infer_earliest_date(path, "trade_date")
+    schema_missing = _parquet_missing_columns(path, required_columns or [])
     needs_future = latest is None or latest < target_end_date
     needs_backfill = expected_start_date is not None and (
         earliest is None or earliest > expected_start_date
     )
-    if not needs_future and not needs_backfill:
+    if not needs_future and not needs_backfill and not schema_missing:
         return UpdateResult(
             status=f"{path.parent.name} up-to-date at {latest.date()}",
             changed=False,
@@ -1233,10 +1345,25 @@ def update_raw_table(
         )
 
     existing = load_parquet_if_exists(path)
+    if existing is not None and required_columns:
+        existing = existing.reindex(columns=required_columns)
+    if existing is not None and not existing.empty and schema_missing and not refetch_on_schema_mismatch:
+        if not needs_future and not needs_backfill:
+            save_optimized_parquet(existing, path)
+            return UpdateResult(
+                status=f"{path.parent.name} schema normalized at {latest.date()}",
+                changed=True,
+                latest=latest,
+                earliest=earliest,
+            )
+
     fetch_start = expected_start_date or pd.Timestamp(DEFAULT_START_DATE)
     fetch_end = target_end_date
     if existing is not None and not existing.empty:
-        if needs_backfill and not needs_future and earliest is not None:
+        if schema_missing and refetch_on_schema_mismatch:
+            fetch_start = earliest or fetch_start
+            existing = None
+        elif needs_backfill and not needs_future and earliest is not None:
             fetch_end = earliest - pd.Timedelta(days=1)
         elif needs_future and not needs_backfill and latest is not None:
             fetch_start = latest + pd.Timedelta(days=1)
@@ -1269,7 +1396,12 @@ def update_raw_table(
             )
         raise RuntimeError(f"{path.parent.name} fetch returned empty data")
 
-    combined = fetched if existing is None else pd.concat([existing, fetched], ignore_index=True)
+    if required_columns:
+        fetched = fetched.reindex(columns=required_columns)
+    combined = _concat_schema_preserving_frames(
+        [existing, fetched],
+        ordered_columns=required_columns,
+    )
     combined = _normalize_symbol_date_frame(combined, "trade_date", "ts_code")
     save_optimized_parquet(combined, path)
     latest = combined["trade_date"].max()
@@ -1314,6 +1446,8 @@ def build_processed_symbol_frame_from_raw(
     daily_basic = _prepare_optional_market_frame(daily_basic)
     adj_factor = _prepare_optional_market_frame(adj_factor)
     stk_limit = _prepare_optional_market_frame(stk_limit)
+    if stk_limit is not None and not stk_limit.empty and "pre_close" in stk_limit.columns:
+        stk_limit = stk_limit.rename(columns={"pre_close": "limit_pre_close"})
     out = _merge_left(
         out,
         daily_basic,
@@ -1343,7 +1477,7 @@ def build_processed_symbol_frame_from_raw(
     out = _merge_left(
         out,
         stk_limit,
-        ["up_limit", "down_limit"],
+        ["limit_pre_close", "up_limit", "down_limit"],
     )
 
     out["adj_factor"] = pd.to_numeric(out.get("adj_factor"), errors="coerce").fillna(1.0)
@@ -1387,6 +1521,7 @@ def build_processed_symbol_frame_from_raw(
     out["ps_ttm"] = pd.to_numeric(out.get("ps_ttm"), errors="coerce")
     out["dv_ratio"] = pd.to_numeric(out.get("dv_ratio"), errors="coerce")
     out["dv_ttm"] = pd.to_numeric(out.get("dv_ttm"), errors="coerce")
+    out["limit_pre_close"] = pd.to_numeric(out.get("limit_pre_close"), errors="coerce") * factor
     out["total_share"] = pd.to_numeric(out.get("total_share"), errors="coerce") * 10000.0
     out["circ_share"] = pd.to_numeric(out.get("float_share"), errors="coerce") * 10000.0
     out["free_share"] = pd.to_numeric(out.get("free_share"), errors="coerce") * 10000.0
@@ -1431,6 +1566,8 @@ def should_rebuild_processed(symbol: str, updates: list[UpdateResult]) -> bool:
     if any(item.changed for item in updates):
         return True
     path = PROCESSED_DIR / f"{symbol}.parquet"
+    if _parquet_missing_columns(path, TS_PROCESSED_CANONICAL_COLS):
+        return True
     processed_latest = infer_latest_date(path, "date")
     daily_latest = infer_latest_date(RAW_DAILY_DIR / f"{symbol}.parquet", "trade_date")
     if processed_latest is None or daily_latest is None:
@@ -1553,6 +1690,7 @@ def run_tushare_update_pipeline(
                 symbol_target_end_date,
                 latest=latest,
                 expected_start_date=expected_start_date,
+                required_columns=DAILY_RAW_COLS,
             ),
         ),
         (
@@ -1565,6 +1703,7 @@ def run_tushare_update_pipeline(
                 symbol_target_end_date,
                 latest=latest,
                 expected_start_date=expected_start_date,
+                required_columns=DAILY_BASIC_API_FIELDS,
             ),
         ),
         (
@@ -1577,6 +1716,7 @@ def run_tushare_update_pipeline(
                 symbol_target_end_date,
                 latest=latest,
                 expected_start_date=expected_start_date,
+                required_columns=ADJ_FACTOR_API_FIELDS,
             ),
         ),
         (
@@ -1588,6 +1728,8 @@ def run_tushare_update_pipeline(
                 _fetch_stk_limit,
                 symbol_target_end_date,
                 latest=latest,
+                required_columns=STK_LIMIT_API_FIELDS,
+                refetch_on_schema_mismatch=True,
             ),
         ),
     ]
@@ -1603,6 +1745,12 @@ def run_tushare_update_pipeline(
             expected_start_dates=expected_start_dates if stage_name in {"daily", "daily_basic", "adj_factor"} else None,
             coverage_start_date=STK_LIMIT_COVERAGE_START if stage_name == "stk_limit" else None,
             exhaustion_lookup=exhaustion_lookup,
+            required_columns={
+                "daily": DAILY_RAW_COLS,
+                "daily_basic": DAILY_BASIC_API_FIELDS,
+                "adj_factor": ADJ_FACTOR_API_FIELDS,
+                "stk_limit": STK_LIMIT_API_FIELDS,
+            }[stage_name],
             max_workers=PRECHECK_WORKERS,
         )
         for stage_name, stage_dir, _ in stage_specs

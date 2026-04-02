@@ -38,6 +38,7 @@ from src.collector_tushare import (
     is_backfill_satisfied,
     is_symbol_complete,
     merge_aux_empty_records,
+    parse_stage_names_arg,
     precheck_aux_stage_symbols,
     local_symbol_to_ts,
     normalize_symbol_cache_frame,
@@ -57,6 +58,15 @@ def test_symbol_conversion_round_trip_for_a_share_codes() -> None:
     assert local_symbol_to_ts("000001") == "000001.SZ"
     assert ts_symbol_to_local("600000.SH") == "600000"
     assert ts_symbol_to_local("000001.SZ") == "000001"
+
+
+def test_parse_stage_names_arg_supports_all_alias() -> None:
+    stages = parse_stage_names_arg("all")
+    assert "daily" in stages
+    assert "fina_indicator" in stages
+    assert "forecast" in stages
+    assert "express" in stages
+    assert "processed" in stages
 
 
 def test_endpoint_rate_limiter_zero_interval_bypasses_wait(monkeypatch: pytest.MonkeyPatch) -> None:

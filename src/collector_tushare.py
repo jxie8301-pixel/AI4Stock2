@@ -2382,6 +2382,8 @@ def parse_symbols_arg(symbols: str | None) -> list[str]:
 def parse_stage_names_arg(raw: str | None) -> tuple[str, ...]:
     if raw is None or not str(raw).strip():
         return DEFAULT_MARKET_STAGE_NAMES
+    if str(raw).strip().lower() == "all":
+        return OPTIONAL_STAGE_NAMES
     requested = tuple(dict.fromkeys(item.strip() for item in str(raw).split(",") if item.strip()))
     invalid = [item for item in requested if item not in OPTIONAL_STAGE_NAMES]
     if invalid:
@@ -2396,7 +2398,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Fetch Tushare market data into raw parquet and processed hfq-adjusted combined parquet."
     )
-    parser.add_argument("--all", action="store_true", help="Process all symbols from Tushare symbol cache.")
     parser.add_argument("--symbols", help="Comma-separated symbols, supports bare code or ts_code.")
     parser.add_argument(
         "--update",
@@ -2412,7 +2413,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--stages",
         help=(
             "Comma-separated stage list to update. "
-            f"Available: {', '.join(OPTIONAL_STAGE_NAMES)}. "
+            f"Available: all, {', '.join(OPTIONAL_STAGE_NAMES)}. "
             f"Default: {', '.join(DEFAULT_MARKET_STAGE_NAMES)}"
         ),
     )
@@ -2472,12 +2473,10 @@ def main() -> None:
         )
         results = collect_symbols(symbols, rebuild_symbol, max_workers=args.workers)
     else:
-        if args.all:
-            symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)
-        elif args.update and not symbols:
+        if args.update and not symbols:
             symbols = resolve_incremental_symbols(refresh_live=args.refresh_symbols)
         elif not symbols:
-            parser.error("Provide one of --all, --update, --rebuild-processed, or --symbols.")
+            parser.error("Provide one of --update, --rebuild-processed, or --symbols.")
 
         if not symbols:
             raise SystemExit("[!] No Tushare symbols to process.")

@@ -415,6 +415,27 @@ def _normalize_symbol_date_frame(
     return out.sort_values(sort_cols).reset_index(drop=True)
 
 
+def _normalize_symbol_event_frame(
+    df: pd.DataFrame,
+    *,
+    date_column: str,
+    symbol_column: str = "ts_code",
+    dedupe_columns: list[str] | None = None,
+) -> pd.DataFrame:
+    out = df.copy()
+    out[date_column] = _normalize_date_series(out[date_column])
+    out = out.dropna(subset=[date_column])
+    dedupe_cols = [col for col in (dedupe_columns or [symbol_column, date_column]) if col in out.columns]
+    if dedupe_cols:
+        out = out.drop_duplicates(subset=dedupe_cols, keep="last")
+    sort_cols = [date_column]
+    if symbol_column in out.columns:
+        sort_cols.append(symbol_column)
+    extra_sort = [col for col in (dedupe_columns or []) if col not in sort_cols and col in out.columns]
+    sort_cols.extend(extra_sort)
+    return out.sort_values(sort_cols).reset_index(drop=True)
+
+
 def _optimize_numeric_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col in out.columns:
@@ -1325,6 +1346,10 @@ def _fetch_market_table_in_chunks(
     end_date: str,
     per_chunk_fetcher: Callable[[str, str, str], pd.DataFrame],
     empty_columns: list[str],
+    *,
+    date_column: str = "trade_date",
+    symbol_column: str = "ts_code",
+    dedupe_columns: list[str] | None = None,
 ) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     for chunk_start, chunk_end in _iter_market_date_chunks(start_date, end_date):
@@ -1336,8 +1361,15 @@ def _fetch_market_table_in_chunks(
             frames.append(frame)
     if not frames:
         return pd.DataFrame(columns=empty_columns)
-    merged = pd.concat(frames, ignore_index=True)
-    return _normalize_symbol_date_frame(merged, "trade_date", "ts_code")
+    merged = _concat_schema_preserving_frames(frames, ordered_columns=empty_columns)
+    if dedupe_columns is not None:
+        return _normalize_symbol_event_frame(
+            merged,
+            date_column=date_column,
+            symbol_column=symbol_column,
+            dedupe_columns=dedupe_columns,
+        )
+    return _normalize_symbol_date_frame(merged, date_column, symbol_column)
 
 
 def _fetch_daily_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1458,7 +1490,12 @@ def _fetch_fina_indicator_chunk(symbol: str, start_date: str, end_date: str) -> 
     if out is None:
         return pd.DataFrame(columns=FINA_INDICATOR_API_FIELDS)
     out = out.reindex(columns=FINA_INDICATOR_API_FIELDS)
-    return _normalize_symbol_date_frame(out, "ann_date", "ts_code")
+    return _normalize_symbol_event_frame(
+        out,
+        date_column="ann_date",
+        symbol_column="ts_code",
+        dedupe_columns=["ts_code", "end_date", "ann_date"],
+    )
 
 
 def _fetch_fina_indicator(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1468,6 +1505,8 @@ def _fetch_fina_indicator(symbol: str, start_date: str, end_date: str) -> pd.Dat
         end_date,
         _fetch_fina_indicator_chunk,
         FINA_INDICATOR_API_FIELDS,
+        date_column="ann_date",
+        dedupe_columns=["ts_code", "end_date", "ann_date"],
     )
 
 
@@ -1483,7 +1522,12 @@ def _fetch_dividend_chunk(symbol: str, start_date: str, end_date: str) -> pd.Dat
     if out is None:
         return pd.DataFrame(columns=DIVIDEND_API_FIELDS)
     out = out.reindex(columns=DIVIDEND_API_FIELDS)
-    return _normalize_symbol_date_frame(out, "ann_date", "ts_code")
+    return _normalize_symbol_event_frame(
+        out,
+        date_column="ann_date",
+        symbol_column="ts_code",
+        dedupe_columns=["ts_code", "end_date", "ann_date"],
+    )
 
 
 def _fetch_dividend(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1503,7 +1547,12 @@ def _fetch_forecast_chunk(symbol: str, start_date: str, end_date: str) -> pd.Dat
     if out is None:
         return pd.DataFrame(columns=FORECAST_API_FIELDS)
     out = out.reindex(columns=FORECAST_API_FIELDS)
-    return _normalize_symbol_date_frame(out, "ann_date", "ts_code")
+    return _normalize_symbol_event_frame(
+        out,
+        date_column="ann_date",
+        symbol_column="ts_code",
+        dedupe_columns=["ts_code", "end_date", "ann_date"],
+    )
 
 
 def _fetch_forecast(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -1523,7 +1572,12 @@ def _fetch_express_chunk(symbol: str, start_date: str, end_date: str) -> pd.Data
     if out is None:
         return pd.DataFrame(columns=EXPRESS_API_FIELDS)
     out = out.reindex(columns=EXPRESS_API_FIELDS)
-    return _normalize_symbol_date_frame(out, "ann_date", "ts_code")
+    return _normalize_symbol_event_frame(
+        out,
+        date_column="ann_date",
+        symbol_column="ts_code",
+        dedupe_columns=["ts_code", "end_date", "ann_date"],
+    )
 
 
 def _fetch_express(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:

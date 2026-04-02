@@ -29,6 +29,7 @@ from src.collector_tushare import (
     _fetch_fina_indicator_chunk,
     _fetch_forecast_chunk,
     _fetch_market_table_in_chunks,
+    _normalize_symbol_event_frame,
     _fetch_stk_limit_chunk,
     fetch_stock_basic_by_status,
     build_backfill_exhaustion_lookup,
@@ -261,6 +262,28 @@ def test_fetch_dividend_chunk_requests_explicit_full_fields(monkeypatch: pytest.
 
     assert captured["fields"] == ",".join(DIVIDEND_API_FIELDS)
     assert list(out.columns) == DIVIDEND_API_FIELDS
+
+
+def test_normalize_symbol_event_frame_keeps_distinct_end_dates_under_same_ann_date() -> None:
+    frame = pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ", "000001.SZ", "000001.SZ"],
+            "ann_date": ["20260331", "20260331", "20260331"],
+            "end_date": ["20251231", "20260331", "20260331"],
+            "roe": [8.0, 9.0, 9.5],
+        }
+    )
+
+    out = _normalize_symbol_event_frame(
+        frame,
+        date_column="ann_date",
+        symbol_column="ts_code",
+        dedupe_columns=["ts_code", "end_date", "ann_date"],
+    )
+
+    assert len(out) == 2
+    assert out["end_date"].tolist() == ["20251231", "20260331"]
+    assert out["roe"].tolist() == [8.0, 9.5]
 
 
 def test_fetch_forecast_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:

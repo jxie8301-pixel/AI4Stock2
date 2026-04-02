@@ -11,6 +11,7 @@ from src.collector_tushare import (
     DAILY_API_FIELDS,
     DAILY_BASIC_API_FIELDS,
     EndpointRateLimiter,
+    FINA_INDICATOR_API_FIELDS,
     PRECHECK_WORKERS,
     STK_LIMIT_API_FIELDS,
     STOCK_BASIC_API_FIELDS,
@@ -19,6 +20,7 @@ from src.collector_tushare import (
     _fetch_adj_factor_chunk,
     _fetch_daily_chunk,
     _fetch_daily_basic_chunk,
+    _fetch_fina_indicator_chunk,
     _fetch_market_table_in_chunks,
     _fetch_stk_limit_chunk,
     fetch_stock_basic_by_status,
@@ -207,6 +209,22 @@ def test_fetch_stk_limit_chunk_requests_pre_close(monkeypatch: pytest.MonkeyPatc
 
     assert captured["fields"] == ",".join(STK_LIMIT_API_FIELDS)
     assert list(out.columns) == STK_LIMIT_API_FIELDS
+
+
+def test_fetch_fina_indicator_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyPro:
+        def fina_indicator(self, **kwargs):
+            captured.update(kwargs)
+            return pd.DataFrame(columns=FINA_INDICATOR_API_FIELDS)
+
+    monkeypatch.setattr("src.collector_tushare.get_tushare_client", lambda: DummyPro())
+
+    out = _fetch_fina_indicator_chunk("000001", "20200101", "20260331")
+
+    assert captured["fields"] == ",".join(FINA_INDICATOR_API_FIELDS)
+    assert list(out.columns) == FINA_INDICATOR_API_FIELDS
 
 
 def test_resolve_symbol_lifecycle_status_and_effective_end_date_for_delisted() -> None:

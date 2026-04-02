@@ -23,6 +23,7 @@ RAW_DAILY_DIR = RAW_ROOT / "daily"
 RAW_DAILY_BASIC_DIR = RAW_ROOT / "daily_basic"
 RAW_ADJ_FACTOR_DIR = RAW_ROOT / "adj_factor"
 RAW_STK_LIMIT_DIR = RAW_ROOT / "stk_limit"
+RAW_FINA_INDICATOR_DIR = RAW_ROOT / "fina_indicator"
 PROCESSED_DIR = TS_ROOT / "processed" / "combined"
 
 SYMBOL_CACHE_PATH = RAW_META_DIR / "symbol_cache.parquet"
@@ -111,6 +112,30 @@ DAILY_BASIC_API_FIELDS = [
 
 ADJ_FACTOR_API_FIELDS = ["ts_code", "trade_date", "adj_factor"]
 STK_LIMIT_API_FIELDS = ["ts_code", "trade_date", "pre_close", "up_limit", "down_limit"]
+FINA_INDICATOR_API_FIELDS = [
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "eps",
+    "dt_eps",
+    "bps",
+    "ocfps",
+    "roe",
+    "roe_dt",
+    "roa",
+    "grossprofit_margin",
+    "netprofit_margin",
+    "debt_to_assets",
+    "q_eps",
+    "q_dtprofit",
+    "q_roe",
+    "q_dt_roe",
+    "tr_yoy",
+    "or_yoy",
+    "op_yoy",
+    "netprofit_yoy",
+    "ocf_yoy",
+]
 
 SYMBOL_CACHE_COLS = [
     "local_symbol",
@@ -211,6 +236,7 @@ for directory in [
     RAW_DAILY_BASIC_DIR,
     RAW_ADJ_FACTOR_DIR,
     RAW_STK_LIMIT_DIR,
+    RAW_FINA_INDICATOR_DIR,
     PROCESSED_DIR,
 ]:
     directory.mkdir(parents=True, exist_ok=True)
@@ -636,6 +662,7 @@ def list_local_symbols() -> list[str]:
         RAW_DAILY_BASIC_DIR,
         RAW_ADJ_FACTOR_DIR,
         RAW_STK_LIMIT_DIR,
+        RAW_FINA_INDICATOR_DIR,
         PROCESSED_DIR,
     ]
     symbols = {path.stem for root in roots for path in root.glob("*.parquet")}
@@ -1290,6 +1317,32 @@ def _fetch_stk_limit(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     )
 
 
+def _fetch_fina_indicator_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    pro = get_tushare_client()
+    out = _ts_call(
+        "fina_indicator",
+        pro.fina_indicator,
+        ts_code=local_symbol_to_ts(symbol),
+        start_date=start_date,
+        end_date=end_date,
+        fields=",".join(FINA_INDICATOR_API_FIELDS),
+    )
+    if out is None:
+        return pd.DataFrame(columns=FINA_INDICATOR_API_FIELDS)
+    out = out.reindex(columns=FINA_INDICATOR_API_FIELDS)
+    return _normalize_symbol_date_frame(out, "ann_date", "ts_code")
+
+
+def _fetch_fina_indicator(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    return _fetch_market_table_in_chunks(
+        symbol,
+        start_date,
+        end_date,
+        _fetch_fina_indicator_chunk,
+        FINA_INDICATOR_API_FIELDS,
+    )
+
+
 def _concat_schema_preserving_frames(
     frames: list[pd.DataFrame | None],
     *,
@@ -1327,10 +1380,12 @@ def update_raw_table(
     expected_start_date: pd.Timestamp | None = None,
     required_columns: list[str] | None = None,
     refetch_on_schema_mismatch: bool = False,
+    date_column: str = "trade_date",
+    symbol_column: str = "ts_code",
 ) -> UpdateResult:
     if latest is ...:
-        latest = infer_latest_date(path, "trade_date")
-    earliest = infer_earliest_date(path, "trade_date")
+        latest = infer_latest_date(path, date_column)
+    earliest = infer_earliest_date(path, date_column)
     schema_missing = _parquet_missing_columns(path, required_columns or [])
     needs_future = latest is None or latest < target_end_date
     needs_backfill = expected_start_date is not None and (
@@ -1402,10 +1457,10 @@ def update_raw_table(
         [existing, fetched],
         ordered_columns=required_columns,
     )
-    combined = _normalize_symbol_date_frame(combined, "trade_date", "ts_code")
+    combined = _normalize_symbol_date_frame(combined, date_column, symbol_column)
     save_optimized_parquet(combined, path)
-    latest = combined["trade_date"].max()
-    earliest = combined["trade_date"].min()
+    latest = combined[date_column].max()
+    earliest = combined[date_column].min()
     return UpdateResult(
         status=f"{path.parent.name} saved to {latest.date()}",
         changed=True,
@@ -2002,6 +2057,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Rebuild Tushare processed parquet from local raw files.",
     )
     parser.add_argument(
+        "--fina-indicator",
+        action="store_true",
+        help="Fetch/update raw Tushare fina_indicator parquet only for the resolved symbols.",
+    )
+    parser.add_argument(
         "--refresh-symbols",
         action="store_true",
         help="Refresh Tushare symbol cache before resolving symbols.",
@@ -2050,6 +2110,40 @@ def main() -> None:
             f"[*] Rebuilding Tushare processed parquet for {len(symbols)} symbols from local raw files..."
         )
         results = collect_symbols(symbols, rebuild_symbol, max_workers=args.workers)
+    elif args.fina_indicator:
+        if args.all:
+            symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)
+        elif args.update and not symbols:
+            symbols = resolve_incremental_symbols(refresh_live=args.refresh_symbols)
+        elif not symbols:
+            parser.error("Provide one of --all, --update, or --symbols together with --fina-indicator.")
+
+        if not symbols:
+            raise SystemExit("[!] No Tushare symbols to process.")
+
+        print(
+            f"[*] Updating raw fina_indicator for {len(symbols)} symbols with {args.workers} workers "
+            f"(end_date={latest_trading_date.date()})..."
+        )
+
+        def _fina_indicator_worker(symbol: str) -> TaskResult:
+            try:
+                latest = infer_latest_date(RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet", "ann_date")
+                result = update_raw_table(
+                    symbol,
+                    RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet",
+                    _fetch_fina_indicator,
+                    latest_trading_date,
+                    latest=latest,
+                    expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
+                    required_columns=FINA_INDICATOR_API_FIELDS,
+                    date_column="ann_date",
+                )
+                return TaskResult(symbol=symbol, ok=True, detail=result.status)
+            except Exception as exc:
+                return TaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
+
+        results = collect_symbols(symbols, _fina_indicator_worker, max_workers=args.workers)
     else:
         if args.all:
             symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)

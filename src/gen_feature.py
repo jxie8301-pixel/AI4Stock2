@@ -63,6 +63,7 @@ except ModuleNotFoundError:
 EPS = 1e-12
 FULL_FACTOR_SPACE_NAME = "full_factor_space"
 DEFAULT_FULL_FACTOR_STORE_DIR = "data/factor_store/full_factor_space"
+TUSHARE_RAW_FINA_INDICATOR_DIR = Path("data/tushare/raw/fina_indicator")
 
 
 DEFAULT_ALPHA158_CONFIG: dict[str, Any] = {
@@ -130,6 +131,28 @@ DEFAULT_TUSHARE_FACTOR_CONFIG: dict[str, Any] = {
     "valuation_change_windows": [20, 60],
     "zscore_window": 20,
 }
+
+TUSHARE_FINA_INDICATOR_FEATURE_COLS = [
+    "fi_eps",
+    "fi_dt_eps",
+    "fi_bps",
+    "fi_ocfps",
+    "fi_roe",
+    "fi_roe_dt",
+    "fi_roa",
+    "fi_grossprofit_margin",
+    "fi_netprofit_margin",
+    "fi_debt_to_assets",
+    "fi_q_eps",
+    "fi_q_dtprofit",
+    "fi_q_roe",
+    "fi_q_dt_roe",
+    "fi_tr_yoy",
+    "fi_or_yoy",
+    "fi_op_yoy",
+    "fi_netprofit_yoy",
+    "fi_ocf_yoy",
+]
 
 ALL_FACTORS_ALPHA360_PREFIX = "A360_"
 ALL_FACTORS_LGBM_PREFIX = "LGBM_"
@@ -496,6 +519,27 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     names += [f"float_mv_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
     names += [f"sp_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
     names += [f"dividend_yield_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
+    names += [
+        "latest_eps",
+        "latest_dt_eps",
+        "latest_bps",
+        "latest_ocfps",
+        "latest_roe",
+        "latest_roe_dt",
+        "latest_roa",
+        "latest_grossprofit_margin",
+        "latest_netprofit_margin",
+        "latest_debt_to_assets",
+        "latest_q_eps",
+        "latest_q_dtprofit",
+        "latest_q_roe",
+        "latest_q_dt_roe",
+        "latest_tr_yoy",
+        "latest_or_yoy",
+        "latest_op_yoy",
+        "latest_netprofit_yoy",
+        "latest_ocf_yoy",
+    ]
     zscore_window = int(cfg["zscore_window"])
     names += [
         f"amplitude_zscore_{zscore_window}",
@@ -532,6 +576,83 @@ def _prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
         else:
             out["vwap"] = out["close"]
 
+    return out
+
+
+def _load_tushare_fina_indicator_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
+    path = TUSHARE_RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet"
+    if not path.exists():
+        return None
+
+    frame = pd.read_parquet(path)
+    if frame.empty or "ann_date" not in frame.columns:
+        return None
+
+    frame = frame.copy()
+    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
+    frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
+    if frame.empty:
+        return None
+
+    value_cols = [
+        "eps",
+        "dt_eps",
+        "bps",
+        "ocfps",
+        "roe",
+        "roe_dt",
+        "roa",
+        "grossprofit_margin",
+        "netprofit_margin",
+        "debt_to_assets",
+        "q_eps",
+        "q_dtprofit",
+        "q_roe",
+        "q_dt_roe",
+        "tr_yoy",
+        "or_yoy",
+        "op_yoy",
+        "netprofit_yoy",
+        "ocf_yoy",
+    ]
+    available = [col for col in value_cols if col in frame.columns]
+    if not available:
+        return None
+
+    right = frame[["ann_date", *available]].copy()
+    for col in available:
+        right[col] = pd.to_numeric(right[col], errors="coerce")
+    right = right.rename(columns={col: f"fi_{col}" for col in available})
+
+    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
+    merged = pd.merge_asof(
+        left,
+        right.sort_values("ann_date"),
+        left_on="date",
+        right_on="ann_date",
+        direction="backward",
+    )
+    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
+    for col in TUSHARE_FINA_INDICATOR_FEATURE_COLS:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    return merged.reindex(columns=TUSHARE_FINA_INDICATOR_FEATURE_COLS)
+
+
+def _augment_tushare_symbol_frame(
+    df: pd.DataFrame,
+    *,
+    symbol: str,
+) -> pd.DataFrame:
+    out = df.copy()
+    if "date" not in out.columns:
+        return out
+    date_index = pd.DatetimeIndex(pd.to_datetime(out["date"]))
+    fina_indicator = _load_tushare_fina_indicator_features(symbol, date_index)
+    if fina_indicator is not None and not fina_indicator.empty:
+        aligned = fina_indicator.reindex(date_index)
+        for col in aligned.columns:
+            out[col] = aligned[col].to_numpy()
     return out
 
 
@@ -1235,6 +1356,45 @@ def compute_tushare_factor_features(
     dv_ttm = base["dv_ttm"] if "dv_ttm" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     amplitude = base["amplitude"] if "amplitude" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     pct_chg = base["pct_chg"] if "pct_chg" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_eps = base["fi_eps"] if "fi_eps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_dt_eps = base["fi_dt_eps"] if "fi_dt_eps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_bps = base["fi_bps"] if "fi_bps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_ocfps = base["fi_ocfps"] if "fi_ocfps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_roe = base["fi_roe"] if "fi_roe" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_roe_dt = base["fi_roe_dt"] if "fi_roe_dt" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_roa = base["fi_roa"] if "fi_roa" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_gpm = (
+        base["fi_grossprofit_margin"]
+        if "fi_grossprofit_margin" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fi_npm = (
+        base["fi_netprofit_margin"]
+        if "fi_netprofit_margin" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fi_debt_to_assets = (
+        base["fi_debt_to_assets"]
+        if "fi_debt_to_assets" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fi_q_eps = base["fi_q_eps"] if "fi_q_eps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_q_dtprofit = (
+        base["fi_q_dtprofit"] if "fi_q_dtprofit" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fi_q_roe = base["fi_q_roe"] if "fi_q_roe" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_q_dt_roe = (
+        base["fi_q_dt_roe"] if "fi_q_dt_roe" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fi_tr_yoy = base["fi_tr_yoy"] if "fi_tr_yoy" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_or_yoy = base["fi_or_yoy"] if "fi_or_yoy" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_op_yoy = base["fi_op_yoy"] if "fi_op_yoy" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    fi_netprofit_yoy = (
+        base["fi_netprofit_yoy"]
+        if "fi_netprofit_yoy" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fi_ocf_yoy = base["fi_ocf_yoy"] if "fi_ocf_yoy" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
 
     out: dict[str, pd.Series] = {}
     out["gap_up_limit"] = up_limit / close - 1.0
@@ -1324,6 +1484,25 @@ def compute_tushare_factor_features(
         pd.Series(out["free_turnover_ratio"], index=base.index) - free_turnover_mean
     ) / (free_turnover_std + EPS)
     out[f"volume_ratio_raw_zscore_{zscore_window}"] = (volume_ratio - volume_ratio_mean) / (volume_ratio_std + EPS)
+    out["latest_eps"] = fi_eps
+    out["latest_dt_eps"] = fi_dt_eps
+    out["latest_bps"] = fi_bps
+    out["latest_ocfps"] = fi_ocfps
+    out["latest_roe"] = fi_roe
+    out["latest_roe_dt"] = fi_roe_dt
+    out["latest_roa"] = fi_roa
+    out["latest_grossprofit_margin"] = fi_gpm
+    out["latest_netprofit_margin"] = fi_npm
+    out["latest_debt_to_assets"] = fi_debt_to_assets
+    out["latest_q_eps"] = fi_q_eps
+    out["latest_q_dtprofit"] = fi_q_dtprofit
+    out["latest_q_roe"] = fi_q_roe
+    out["latest_q_dt_roe"] = fi_q_dt_roe
+    out["latest_tr_yoy"] = fi_tr_yoy
+    out["latest_or_yoy"] = fi_or_yoy
+    out["latest_op_yoy"] = fi_op_yoy
+    out["latest_netprofit_yoy"] = fi_netprofit_yoy
+    out["latest_ocf_yoy"] = fi_ocf_yoy
 
     feat = pd.DataFrame(out, index=base.index)
     ordered_names = get_tushare_factor_feature_names(cfg)
@@ -1431,6 +1610,8 @@ def _compute_symbol_feat_label(
     """Load one parquet and compute features + label."""
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
+    if data_source is not None and normalize_data_source_name(data_source) == "tushare":
+        df = _augment_tushare_symbol_frame(df, symbol=symbol)
     feat = compute_all_factor_features(df, data_source=data_source)
     label = build_open_to_open_label(df, horizon_days=1)
     return symbol, feat, label
@@ -1445,6 +1626,8 @@ def _compute_symbol_feat_labels(
     """Load one parquet and compute features plus all configured labels."""
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
+    if data_source is not None and normalize_data_source_name(data_source) == "tushare":
+        df = _augment_tushare_symbol_frame(df, symbol=symbol)
     feat = compute_all_factor_features(df, data_source=data_source)
     labels = build_open_to_open_labels(df, label_horizons)
     return symbol, feat, labels

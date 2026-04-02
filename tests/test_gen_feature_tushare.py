@@ -1,9 +1,13 @@
 import unittest
+import tempfile
+from pathlib import Path
 
 import pandas as pd
 
 from src.gen_feature import (
     TUSHARE_FACTOR_PREFIX,
+    TUSHARE_RAW_FINA_INDICATOR_DIR,
+    _augment_tushare_symbol_frame,
     compute_all_factor_features,
     compute_tushare_factor_features,
     get_all_factor_feature_names,
@@ -129,6 +133,95 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}amplitude_mean_5", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}limit_band_pos_mean_5", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_ratio_zscore_20", tushare_feat.columns)
+
+    def test_augment_tushare_symbol_frame_loads_fina_indicator_sidecar(self):
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31", "2026-04-01"]),
+                "symbol": ["000001", "000001", "000001"],
+                "open": [10.0, 11.0, 12.0],
+                "high": [10.5, 11.5, 12.5],
+                "low": [9.8, 10.8, 11.8],
+                "close": [10.0, 11.0, 12.0],
+                "volume": [100.0, 120.0, 140.0],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            sidecar = pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "ann_date": ["20260330", "20260331"],
+                    "end_date": ["20251231", "20260331"],
+                    "roe": [8.0, 9.0],
+                    "roe_dt": [7.5, 8.5],
+                    "or_yoy": [10.0, 12.0],
+                    "netprofit_yoy": [15.0, 18.0],
+                }
+            )
+            sidecar.to_parquet(raw_dir / "000001.parquet", index=False)
+
+            from src import gen_feature as gen_feature_module
+
+            original_dir = gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR
+            gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR = raw_dir
+            try:
+                out = _augment_tushare_symbol_frame(df, symbol="000001")
+            finally:
+                gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR = original_dir
+
+        self.assertAlmostEqual(float(out.loc[0, "fi_roe"]), 8.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "fi_roe"]), 9.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "fi_roe_dt"]), 8.5, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "fi_or_yoy"]), 12.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "fi_netprofit_yoy"]), 18.0, places=6)
+
+    def test_compute_all_factor_features_uses_side_loaded_fina_indicator_columns(self):
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+                "symbol": ["000001", "000001"],
+                "open": [10.0, 11.0],
+                "high": [10.5, 11.5],
+                "low": [9.8, 10.8],
+                "close": [10.0, 11.0],
+                "pre_close": [9.5, 10.0],
+                "volume": [100.0, 120.0],
+                "amount": [1000.0, 1400.0],
+                "turnover": [1.0, 2.0],
+                "turnover_free": [1.5, 3.0],
+                "volume_ratio": [1.2, 1.3],
+                "total_mv": [1000.0, 1100.0],
+                "circ_mv": [1000.0, 1100.0],
+                "total_share": [100.0, 100.0],
+                "circ_share": [80.0, 80.0],
+                "free_share": [60.0, 60.0],
+                "pe": [10.0, 11.0],
+                "pe_ttm": [10.0, 11.0],
+                "pb": [1.0, 1.1],
+                "ps": [2.0, 4.0],
+                "ps_ttm": [2.5, 5.0],
+                "dv_ratio": [0.5, 0.0],
+                "dv_ttm": [0.8, 0.0],
+                "amplitude": [7.0, 8.0],
+                "pct_chg": [5.0, 10.0],
+                "limit_pre_close": [10.0, 11.0],
+                "up_limit": [11.0, 12.1],
+                "down_limit": [9.0, 9.9],
+                "fi_roe": [8.0, 9.0],
+                "fi_roe_dt": [7.5, 8.5],
+                "fi_or_yoy": [10.0, 12.0],
+                "fi_netprofit_yoy": [15.0, 18.0],
+            }
+        )
+
+        tushare_feat = compute_all_factor_features(df, data_source="tushare")
+
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_roe", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_or_yoy", tushare_feat.columns)
+        self.assertAlmostEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}latest_roe"]), 9.0, places=6)
+        self.assertAlmostEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}latest_or_yoy"]), 12.0, places=6)
 
 
 if __name__ == "__main__":

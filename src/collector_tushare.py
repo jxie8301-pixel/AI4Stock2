@@ -25,6 +25,8 @@ RAW_ADJ_FACTOR_DIR = RAW_ROOT / "adj_factor"
 RAW_STK_LIMIT_DIR = RAW_ROOT / "stk_limit"
 RAW_FINA_INDICATOR_DIR = RAW_ROOT / "fina_indicator"
 RAW_DIVIDEND_DIR = RAW_ROOT / "dividend"
+RAW_FORECAST_DIR = RAW_ROOT / "forecast"
+RAW_EXPRESS_DIR = RAW_ROOT / "express"
 PROCESSED_DIR = TS_ROOT / "processed" / "combined"
 
 SYMBOL_CACHE_PATH = RAW_META_DIR / "symbol_cache.parquet"
@@ -41,7 +43,7 @@ MARKET_CHUNK_YEARS = 12
 STK_LIMIT_COVERAGE_START = pd.Timestamp("2007-01-04")
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 DEFAULT_MARKET_STAGE_NAMES = ("daily", "daily_basic", "adj_factor", "stk_limit")
-AUX_STAGE_NAMES = ("fina_indicator", "dividend")
+AUX_STAGE_NAMES = ("fina_indicator", "dividend", "forecast", "express")
 OPTIONAL_STAGE_NAMES = DEFAULT_MARKET_STAGE_NAMES + AUX_STAGE_NAMES + ("processed",)
 
 STOCK_BASIC_API_FIELDS = [
@@ -159,6 +161,40 @@ DIVIDEND_API_FIELDS = [
     "base_date",
     "base_share",
 ]
+FORECAST_API_FIELDS = [
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "type",
+    "p_change_min",
+    "p_change_max",
+    "net_profit_min",
+    "net_profit_max",
+    "last_parent_net",
+    "first_ann_date",
+    "summary",
+    "change_reason",
+]
+EXPRESS_API_FIELDS = [
+    "ts_code",
+    "ann_date",
+    "end_date",
+    "revenue",
+    "operate_profit",
+    "total_profit",
+    "n_income",
+    "total_assets",
+    "diluted_eps",
+    "diluted_roe",
+    "yoy_sales",
+    "yoy_op",
+    "yoy_tp",
+    "yoy_dedu_np",
+    "yoy_eps",
+    "yoy_roe",
+    "growth_assets",
+    "yoy_assets",
+]
 
 SYMBOL_CACHE_COLS = [
     "local_symbol",
@@ -268,6 +304,8 @@ for directory in [
     RAW_STK_LIMIT_DIR,
     RAW_FINA_INDICATOR_DIR,
     RAW_DIVIDEND_DIR,
+    RAW_FORECAST_DIR,
+    RAW_EXPRESS_DIR,
     PROCESSED_DIR,
 ]:
     directory.mkdir(parents=True, exist_ok=True)
@@ -695,6 +733,8 @@ def list_local_symbols() -> list[str]:
         RAW_STK_LIMIT_DIR,
         RAW_FINA_INDICATOR_DIR,
         RAW_DIVIDEND_DIR,
+        RAW_FORECAST_DIR,
+        RAW_EXPRESS_DIR,
         PROCESSED_DIR,
     ]
     symbols = {path.stem for root in roots for path in root.glob("*.parquet")}
@@ -1450,6 +1490,46 @@ def _fetch_dividend(symbol: str, start_date: str, end_date: str) -> pd.DataFrame
     return _fetch_dividend_chunk(symbol, start_date, end_date)
 
 
+def _fetch_forecast_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    pro = get_tushare_client()
+    out = _ts_call(
+        "forecast",
+        pro.forecast,
+        ts_code=local_symbol_to_ts(symbol),
+        start_date=start_date,
+        end_date=end_date,
+        fields=",".join(FORECAST_API_FIELDS),
+    )
+    if out is None:
+        return pd.DataFrame(columns=FORECAST_API_FIELDS)
+    out = out.reindex(columns=FORECAST_API_FIELDS)
+    return _normalize_symbol_date_frame(out, "ann_date", "ts_code")
+
+
+def _fetch_forecast(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    return _fetch_forecast_chunk(symbol, start_date, end_date)
+
+
+def _fetch_express_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    pro = get_tushare_client()
+    out = _ts_call(
+        "express",
+        pro.express,
+        ts_code=local_symbol_to_ts(symbol),
+        start_date=start_date,
+        end_date=end_date,
+        fields=",".join(EXPRESS_API_FIELDS),
+    )
+    if out is None:
+        return pd.DataFrame(columns=EXPRESS_API_FIELDS)
+    out = out.reindex(columns=EXPRESS_API_FIELDS)
+    return _normalize_symbol_date_frame(out, "ann_date", "ts_code")
+
+
+def _fetch_express(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+    return _fetch_express_chunk(symbol, start_date, end_date)
+
+
 def _concat_schema_preserving_frames(
     frames: list[pd.DataFrame | None],
     *,
@@ -1940,6 +2020,40 @@ def run_tushare_update_pipeline(
                 latest=latest,
                 expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
                 required_columns=DIVIDEND_API_FIELDS,
+                date_column="ann_date",
+                allow_empty_success=True,
+            ),
+        },
+        "forecast": {
+            "stage_dir": RAW_FORECAST_DIR,
+            "date_column": "ann_date",
+            "required_columns": FORECAST_API_FIELDS,
+            "precheck_kind": "aux",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+                symbol,
+                RAW_FORECAST_DIR / f"{symbol}.parquet",
+                _fetch_forecast,
+                symbol_target_end_date,
+                latest=latest,
+                expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
+                required_columns=FORECAST_API_FIELDS,
+                date_column="ann_date",
+                allow_empty_success=True,
+            ),
+        },
+        "express": {
+            "stage_dir": RAW_EXPRESS_DIR,
+            "date_column": "ann_date",
+            "required_columns": EXPRESS_API_FIELDS,
+            "precheck_kind": "aux",
+            "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
+                symbol,
+                RAW_EXPRESS_DIR / f"{symbol}.parquet",
+                _fetch_express,
+                symbol_target_end_date,
+                latest=latest,
+                expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
+                required_columns=EXPRESS_API_FIELDS,
                 date_column="ann_date",
                 allow_empty_success=True,
             ),

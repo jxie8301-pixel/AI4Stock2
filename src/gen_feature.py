@@ -65,6 +65,8 @@ FULL_FACTOR_SPACE_NAME = "full_factor_space"
 DEFAULT_FULL_FACTOR_STORE_DIR = "data/factor_store/full_factor_space"
 TUSHARE_RAW_FINA_INDICATOR_DIR = Path("data/tushare/raw/fina_indicator")
 TUSHARE_RAW_DIVIDEND_DIR = Path("data/tushare/raw/dividend")
+TUSHARE_RAW_FORECAST_DIR = Path("data/tushare/raw/forecast")
+TUSHARE_RAW_EXPRESS_DIR = Path("data/tushare/raw/express")
 
 
 DEFAULT_ALPHA158_CONFIG: dict[str, Any] = {
@@ -162,6 +164,32 @@ TUSHARE_DIVIDEND_FEATURE_COLS = [
     "div_stk_bo_rate",
     "div_stk_co_rate",
     "div_base_share",
+]
+
+TUSHARE_FORECAST_FEATURE_COLS = [
+    "fc_p_change_min",
+    "fc_p_change_max",
+    "fc_net_profit_min",
+    "fc_net_profit_max",
+    "fc_last_parent_net",
+]
+
+TUSHARE_EXPRESS_FEATURE_COLS = [
+    "exp_revenue",
+    "exp_operate_profit",
+    "exp_total_profit",
+    "exp_n_income",
+    "exp_total_assets",
+    "exp_diluted_eps",
+    "exp_diluted_roe",
+    "exp_yoy_sales",
+    "exp_yoy_op",
+    "exp_yoy_tp",
+    "exp_yoy_dedu_np",
+    "exp_yoy_eps",
+    "exp_yoy_roe",
+    "exp_growth_assets",
+    "exp_yoy_assets",
 ]
 
 ALL_FACTORS_ALPHA360_PREFIX = "A360_"
@@ -558,6 +586,26 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "latest_div_cash_yield_proxy",
         "latest_div_stock_ratio",
         "has_stock_dividend",
+        "latest_fc_p_change_min",
+        "latest_fc_p_change_max",
+        "latest_fc_net_profit_min",
+        "latest_fc_net_profit_max",
+        "latest_fc_last_parent_net",
+        "latest_exp_revenue",
+        "latest_exp_operate_profit",
+        "latest_exp_total_profit",
+        "latest_exp_n_income",
+        "latest_exp_total_assets",
+        "latest_exp_diluted_eps",
+        "latest_exp_diluted_roe",
+        "latest_exp_yoy_sales",
+        "latest_exp_yoy_op",
+        "latest_exp_yoy_tp",
+        "latest_exp_yoy_dedu_np",
+        "latest_exp_yoy_eps",
+        "latest_exp_yoy_roe",
+        "latest_exp_growth_assets",
+        "latest_exp_yoy_assets",
     ]
     zscore_window = int(cfg["zscore_window"])
     names += [
@@ -705,6 +753,96 @@ def _load_tushare_dividend_features(symbol: str, date_index: pd.DatetimeIndex) -
     return merged.reindex(columns=TUSHARE_DIVIDEND_FEATURE_COLS)
 
 
+def _load_tushare_forecast_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
+    path = TUSHARE_RAW_FORECAST_DIR / f"{symbol}.parquet"
+    if not path.exists():
+        return None
+
+    frame = pd.read_parquet(path)
+    if frame.empty or "ann_date" not in frame.columns:
+        return None
+
+    frame = frame.copy()
+    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
+    frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
+    if frame.empty:
+        return None
+
+    value_cols = [
+        "p_change_min",
+        "p_change_max",
+        "net_profit_min",
+        "net_profit_max",
+        "last_parent_net",
+    ]
+    available = [col for col in value_cols if col in frame.columns]
+    if not available:
+        return None
+
+    right = frame[["ann_date", *available]].copy()
+    for col in available:
+        right[col] = pd.to_numeric(right[col], errors="coerce")
+    right = right.rename(columns={col: f"fc_{col}" for col in available})
+
+    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
+    merged = pd.merge_asof(left, right.sort_values("ann_date"), left_on="date", right_on="ann_date", direction="backward")
+    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
+    for col in TUSHARE_FORECAST_FEATURE_COLS:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    return merged.reindex(columns=TUSHARE_FORECAST_FEATURE_COLS)
+
+
+def _load_tushare_express_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
+    path = TUSHARE_RAW_EXPRESS_DIR / f"{symbol}.parquet"
+    if not path.exists():
+        return None
+
+    frame = pd.read_parquet(path)
+    if frame.empty or "ann_date" not in frame.columns:
+        return None
+
+    frame = frame.copy()
+    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
+    frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
+    if frame.empty:
+        return None
+
+    value_cols = [
+        "revenue",
+        "operate_profit",
+        "total_profit",
+        "n_income",
+        "total_assets",
+        "diluted_eps",
+        "diluted_roe",
+        "yoy_sales",
+        "yoy_op",
+        "yoy_tp",
+        "yoy_dedu_np",
+        "yoy_eps",
+        "yoy_roe",
+        "growth_assets",
+        "yoy_assets",
+    ]
+    available = [col for col in value_cols if col in frame.columns]
+    if not available:
+        return None
+
+    right = frame[["ann_date", *available]].copy()
+    for col in available:
+        right[col] = pd.to_numeric(right[col], errors="coerce")
+    right = right.rename(columns={col: f"exp_{col}" for col in available})
+
+    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
+    merged = pd.merge_asof(left, right.sort_values("ann_date"), left_on="date", right_on="ann_date", direction="backward")
+    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
+    for col in TUSHARE_EXPRESS_FEATURE_COLS:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    return merged.reindex(columns=TUSHARE_EXPRESS_FEATURE_COLS)
+
+
 def _augment_tushare_symbol_frame(
     df: pd.DataFrame,
     *,
@@ -722,6 +860,16 @@ def _augment_tushare_symbol_frame(
     dividend = _load_tushare_dividend_features(symbol, date_index)
     if dividend is not None and not dividend.empty:
         aligned = dividend.reindex(date_index)
+        for col in aligned.columns:
+            out[col] = aligned[col].to_numpy()
+    forecast = _load_tushare_forecast_features(symbol, date_index)
+    if forecast is not None and not forecast.empty:
+        aligned = forecast.reindex(date_index)
+        for col in aligned.columns:
+            out[col] = aligned[col].to_numpy()
+    express = _load_tushare_express_features(symbol, date_index)
+    if express is not None and not express.empty:
+        aligned = express.reindex(date_index)
         for col in aligned.columns:
             out[col] = aligned[col].to_numpy()
     return out
@@ -1492,6 +1640,74 @@ def compute_tushare_factor_features(
         if "div_base_share" in base.columns
         else pd.Series(np.nan, index=base.index, dtype=float)
     )
+    fc_p_change_min = (
+        base["fc_p_change_min"] if "fc_p_change_min" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fc_p_change_max = (
+        base["fc_p_change_max"] if "fc_p_change_max" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fc_net_profit_min = (
+        base["fc_net_profit_min"]
+        if "fc_net_profit_min" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fc_net_profit_max = (
+        base["fc_net_profit_max"]
+        if "fc_net_profit_max" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    fc_last_parent_net = (
+        base["fc_last_parent_net"]
+        if "fc_last_parent_net" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_revenue = base["exp_revenue"] if "exp_revenue" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    exp_operate_profit = (
+        base["exp_operate_profit"]
+        if "exp_operate_profit" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_total_profit = (
+        base["exp_total_profit"]
+        if "exp_total_profit" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_n_income = base["exp_n_income"] if "exp_n_income" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    exp_total_assets = (
+        base["exp_total_assets"]
+        if "exp_total_assets" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_diluted_eps = (
+        base["exp_diluted_eps"]
+        if "exp_diluted_eps" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_diluted_roe = (
+        base["exp_diluted_roe"]
+        if "exp_diluted_roe" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_yoy_sales = (
+        base["exp_yoy_sales"] if "exp_yoy_sales" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_yoy_op = base["exp_yoy_op"] if "exp_yoy_op" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    exp_yoy_tp = base["exp_yoy_tp"] if "exp_yoy_tp" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    exp_yoy_dedu_np = (
+        base["exp_yoy_dedu_np"]
+        if "exp_yoy_dedu_np" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_yoy_eps = base["exp_yoy_eps"] if "exp_yoy_eps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    exp_yoy_roe = base["exp_yoy_roe"] if "exp_yoy_roe" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    exp_growth_assets = (
+        base["exp_growth_assets"]
+        if "exp_growth_assets" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    exp_yoy_assets = (
+        base["exp_yoy_assets"] if "exp_yoy_assets" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
 
     out: dict[str, pd.Series] = {}
     out["gap_up_limit"] = up_limit / close - 1.0
@@ -1613,6 +1829,26 @@ def compute_tushare_factor_features(
         (out["latest_div_stock_ratio"] > 0).astype(float),
         np.nan,
     )
+    out["latest_fc_p_change_min"] = fc_p_change_min
+    out["latest_fc_p_change_max"] = fc_p_change_max
+    out["latest_fc_net_profit_min"] = fc_net_profit_min
+    out["latest_fc_net_profit_max"] = fc_net_profit_max
+    out["latest_fc_last_parent_net"] = fc_last_parent_net
+    out["latest_exp_revenue"] = exp_revenue
+    out["latest_exp_operate_profit"] = exp_operate_profit
+    out["latest_exp_total_profit"] = exp_total_profit
+    out["latest_exp_n_income"] = exp_n_income
+    out["latest_exp_total_assets"] = exp_total_assets
+    out["latest_exp_diluted_eps"] = exp_diluted_eps
+    out["latest_exp_diluted_roe"] = exp_diluted_roe
+    out["latest_exp_yoy_sales"] = exp_yoy_sales
+    out["latest_exp_yoy_op"] = exp_yoy_op
+    out["latest_exp_yoy_tp"] = exp_yoy_tp
+    out["latest_exp_yoy_dedu_np"] = exp_yoy_dedu_np
+    out["latest_exp_yoy_eps"] = exp_yoy_eps
+    out["latest_exp_yoy_roe"] = exp_yoy_roe
+    out["latest_exp_growth_assets"] = exp_growth_assets
+    out["latest_exp_yoy_assets"] = exp_yoy_assets
 
     feat = pd.DataFrame(out, index=base.index)
     ordered_names = get_tushare_factor_feature_names(cfg)

@@ -13,7 +13,9 @@ from src.collector_tushare import (
     DAILY_BASIC_API_FIELDS,
     DIVIDEND_API_FIELDS,
     EndpointRateLimiter,
+    EXPRESS_API_FIELDS,
     FINA_INDICATOR_API_FIELDS,
+    FORECAST_API_FIELDS,
     PRECHECK_WORKERS,
     STK_LIMIT_API_FIELDS,
     STOCK_BASIC_API_FIELDS,
@@ -23,7 +25,9 @@ from src.collector_tushare import (
     _fetch_daily_chunk,
     _fetch_daily_basic_chunk,
     _fetch_dividend_chunk,
+    _fetch_express_chunk,
     _fetch_fina_indicator_chunk,
+    _fetch_forecast_chunk,
     _fetch_market_table_in_chunks,
     _fetch_stk_limit_chunk,
     fetch_stock_basic_by_status,
@@ -247,6 +251,38 @@ def test_fetch_dividend_chunk_requests_explicit_full_fields(monkeypatch: pytest.
 
     assert captured["fields"] == ",".join(DIVIDEND_API_FIELDS)
     assert list(out.columns) == DIVIDEND_API_FIELDS
+
+
+def test_fetch_forecast_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyPro:
+        def forecast(self, **kwargs):
+            captured.update(kwargs)
+            return pd.DataFrame(columns=FORECAST_API_FIELDS)
+
+    monkeypatch.setattr("src.collector_tushare.get_tushare_client", lambda: DummyPro())
+
+    out = _fetch_forecast_chunk("000001", "20200101", "20260331")
+
+    assert captured["fields"] == ",".join(FORECAST_API_FIELDS)
+    assert list(out.columns) == FORECAST_API_FIELDS
+
+
+def test_fetch_express_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyPro:
+        def express(self, **kwargs):
+            captured.update(kwargs)
+            return pd.DataFrame(columns=EXPRESS_API_FIELDS)
+
+    monkeypatch.setattr("src.collector_tushare.get_tushare_client", lambda: DummyPro())
+
+    out = _fetch_express_chunk("000001", "20200101", "20260331")
+
+    assert captured["fields"] == ",".join(EXPRESS_API_FIELDS)
+    assert list(out.columns) == EXPRESS_API_FIELDS
 
 
 def test_merge_aux_empty_records_upserts_and_removes() -> None:

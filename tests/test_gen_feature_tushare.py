@@ -7,7 +7,9 @@ import pandas as pd
 from src.gen_feature import (
     TUSHARE_FACTOR_PREFIX,
     TUSHARE_RAW_DIVIDEND_DIR,
+    TUSHARE_RAW_EXPRESS_DIR,
     TUSHARE_RAW_FINA_INDICATOR_DIR,
+    TUSHARE_RAW_FORECAST_DIR,
     _augment_tushare_symbol_frame,
     compute_all_factor_features,
     compute_tushare_factor_features,
@@ -320,6 +322,114 @@ class TushareFeatureTest(unittest.TestCase):
             places=6,
         )
         self.assertEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}has_stock_dividend"]), 1.0)
+
+    def test_augment_tushare_symbol_frame_loads_forecast_and_express_sidecars(self):
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31", "2026-04-01"]),
+                "symbol": ["000001", "000001", "000001"],
+                "open": [10.0, 11.0, 12.0],
+                "high": [10.5, 11.5, 12.5],
+                "low": [9.8, 10.8, 11.8],
+                "close": [10.0, 11.0, 12.0],
+                "volume": [100.0, 120.0, 140.0],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            forecast_dir = Path(tmpdir) / "forecast"
+            express_dir = Path(tmpdir) / "express"
+            forecast_dir.mkdir()
+            express_dir.mkdir()
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "ann_date": ["20260330", "20260331"],
+                    "p_change_min": [10.0, 20.0],
+                    "p_change_max": [30.0, 40.0],
+                    "net_profit_min": [100.0, 200.0],
+                    "net_profit_max": [300.0, 400.0],
+                    "last_parent_net": [50.0, 60.0],
+                }
+            ).to_parquet(forecast_dir / "000001.parquet", index=False)
+            pd.DataFrame(
+                {
+                    "ts_code": ["000001.SZ", "000001.SZ"],
+                    "ann_date": ["20260330", "20260331"],
+                    "revenue": [1000.0, 1100.0],
+                    "operate_profit": [100.0, 120.0],
+                    "n_income": [80.0, 90.0],
+                    "yoy_sales": [15.0, 18.0],
+                }
+            ).to_parquet(express_dir / "000001.parquet", index=False)
+
+            from src import gen_feature as gen_feature_module
+
+            original_forecast = gen_feature_module.TUSHARE_RAW_FORECAST_DIR
+            original_express = gen_feature_module.TUSHARE_RAW_EXPRESS_DIR
+            gen_feature_module.TUSHARE_RAW_FORECAST_DIR = forecast_dir
+            gen_feature_module.TUSHARE_RAW_EXPRESS_DIR = express_dir
+            try:
+                out = _augment_tushare_symbol_frame(df, symbol="000001")
+            finally:
+                gen_feature_module.TUSHARE_RAW_FORECAST_DIR = original_forecast
+                gen_feature_module.TUSHARE_RAW_EXPRESS_DIR = original_express
+
+        self.assertAlmostEqual(float(out.loc[2, "fc_p_change_max"]), 40.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "fc_net_profit_min"]), 200.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "exp_revenue"]), 1100.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "exp_yoy_sales"]), 18.0, places=6)
+
+    def test_compute_all_factor_features_uses_side_loaded_forecast_and_express_columns(self):
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+                "symbol": ["000001", "000001"],
+                "open": [10.0, 11.0],
+                "high": [10.5, 11.5],
+                "low": [9.8, 10.8],
+                "close": [10.0, 11.0],
+                "pre_close": [9.5, 10.0],
+                "volume": [100.0, 120.0],
+                "amount": [1000.0, 1400.0],
+                "turnover": [1.0, 2.0],
+                "turnover_free": [1.5, 3.0],
+                "volume_ratio": [1.2, 1.3],
+                "total_mv": [1000.0, 1100.0],
+                "circ_mv": [1000.0, 1100.0],
+                "total_share": [100.0, 100.0],
+                "circ_share": [80.0, 80.0],
+                "free_share": [60.0, 60.0],
+                "pe": [10.0, 11.0],
+                "pe_ttm": [10.0, 11.0],
+                "pb": [1.0, 1.1],
+                "ps": [2.0, 4.0],
+                "ps_ttm": [2.5, 5.0],
+                "dv_ratio": [0.5, 0.0],
+                "dv_ttm": [0.8, 0.0],
+                "amplitude": [7.0, 8.0],
+                "pct_chg": [5.0, 10.0],
+                "limit_pre_close": [10.0, 11.0],
+                "up_limit": [11.0, 12.1],
+                "down_limit": [9.0, 9.9],
+                "fc_p_change_min": [10.0, 20.0],
+                "fc_p_change_max": [30.0, 40.0],
+                "fc_net_profit_min": [100.0, 200.0],
+                "fc_net_profit_max": [300.0, 400.0],
+                "fc_last_parent_net": [50.0, 60.0],
+                "exp_revenue": [1000.0, 1100.0],
+                "exp_operate_profit": [100.0, 120.0],
+                "exp_n_income": [80.0, 90.0],
+                "exp_yoy_sales": [15.0, 18.0],
+            }
+        )
+
+        tushare_feat = compute_all_factor_features(df, data_source="tushare")
+
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_fc_p_change_max", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_exp_revenue", tushare_feat.columns)
+        self.assertAlmostEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}latest_fc_p_change_max"]), 40.0, places=6)
+        self.assertAlmostEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}latest_exp_revenue"]), 1100.0, places=6)
 
 
 if __name__ == "__main__":

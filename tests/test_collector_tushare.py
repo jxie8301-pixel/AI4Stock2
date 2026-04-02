@@ -68,6 +68,7 @@ def test_parse_stage_names_arg_supports_all_alias() -> None:
     assert "forecast" in stages
     assert "express" in stages
     assert "processed" in stages
+    assert "dividend" in stages
 
 
 def test_endpoint_rate_limiter_zero_interval_bypasses_wait(monkeypatch: pytest.MonkeyPatch) -> None:

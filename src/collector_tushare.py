@@ -42,9 +42,11 @@ PRECHECK_WORKERS = 16
 MARKET_CHUNK_YEARS = 12
 STK_LIMIT_COVERAGE_START = pd.Timestamp("2007-01-04")
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
-DEFAULT_MARKET_STAGE_NAMES = ("daily", "daily_basic", "adj_factor", "stk_limit")
-AUX_STAGE_NAMES = ("fina_indicator", "dividend", "forecast", "express")
-OPTIONAL_STAGE_NAMES = DEFAULT_MARKET_STAGE_NAMES + AUX_STAGE_NAMES + ("processed",)
+DEFAULT_STAGE_NAMES = ("daily", "daily_basic", "adj_factor", "stk_limit")
+EVENT_STAGE_NAMES = ("fina_indicator", "dividend", "forecast", "express")
+RAW_STAGE_NAMES = DEFAULT_STAGE_NAMES + EVENT_STAGE_NAMES
+PROCESSED_DEPENDENCY_STAGE_NAMES = ("daily", "daily_basic", "adj_factor", "stk_limit")
+OPTIONAL_STAGE_NAMES = RAW_STAGE_NAMES + ("processed",)
 
 STOCK_BASIC_API_FIELDS = [
     "ts_code",
@@ -1970,7 +1972,7 @@ def run_tushare_update_pipeline(
     target_end_date: pd.Timestamp,
     max_workers: int,
     effective_end_dates: dict[str, pd.Timestamp] | None = None,
-    selected_stage_names: tuple[str, ...] = DEFAULT_MARKET_STAGE_NAMES,
+    selected_stage_names: tuple[str, ...] = DEFAULT_STAGE_NAMES,
 ) -> list[TaskResult]:
     exhaustion_frame = load_backfill_exhaustion()
     exhaustion_lookup = build_backfill_exhaustion_lookup(exhaustion_frame)
@@ -1984,11 +1986,13 @@ def run_tushare_update_pipeline(
             if list_date is not None:
                 expected_start_dates[str(row["local_symbol"])] = list_date
     all_stage_specs: dict[str, dict[str, Any]] = {
+        # completion_policy controls how a raw stage is prechecked.
+        # processed rebuild remains a separate concern and depends only on daily market stages.
         "daily": {
             "stage_dir": RAW_DAILY_DIR,
             "date_column": "trade_date",
             "required_columns": DAILY_RAW_COLS,
-            "precheck_kind": "market",
+            "completion_policy": "lifecycle_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_DAILY_DIR / f"{symbol}.parquet",
@@ -2003,7 +2007,7 @@ def run_tushare_update_pipeline(
             "stage_dir": RAW_DAILY_BASIC_DIR,
             "date_column": "trade_date",
             "required_columns": DAILY_BASIC_API_FIELDS,
-            "precheck_kind": "market",
+            "completion_policy": "lifecycle_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_DAILY_BASIC_DIR / f"{symbol}.parquet",
@@ -2018,7 +2022,7 @@ def run_tushare_update_pipeline(
             "stage_dir": RAW_ADJ_FACTOR_DIR,
             "date_column": "trade_date",
             "required_columns": ADJ_FACTOR_API_FIELDS,
-            "precheck_kind": "market",
+            "completion_policy": "lifecycle_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_ADJ_FACTOR_DIR / f"{symbol}.parquet",
@@ -2033,7 +2037,7 @@ def run_tushare_update_pipeline(
             "stage_dir": RAW_STK_LIMIT_DIR,
             "date_column": "trade_date",
             "required_columns": STK_LIMIT_API_FIELDS,
-            "precheck_kind": "market",
+            "completion_policy": "lifecycle_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_STK_LIMIT_DIR / f"{symbol}.parquet",
@@ -2048,7 +2052,7 @@ def run_tushare_update_pipeline(
             "stage_dir": RAW_FINA_INDICATOR_DIR,
             "date_column": "ann_date",
             "required_columns": FINA_INDICATOR_API_FIELDS,
-            "precheck_kind": "aux",
+            "completion_policy": "checked_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet",
@@ -2065,7 +2069,7 @@ def run_tushare_update_pipeline(
             "stage_dir": RAW_DIVIDEND_DIR,
             "date_column": "ann_date",
             "required_columns": DIVIDEND_API_FIELDS,
-            "precheck_kind": "aux",
+            "completion_policy": "checked_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_DIVIDEND_DIR / f"{symbol}.parquet",
@@ -2082,7 +2086,7 @@ def run_tushare_update_pipeline(
             "stage_dir": RAW_FORECAST_DIR,
             "date_column": "ann_date",
             "required_columns": FORECAST_API_FIELDS,
-            "precheck_kind": "aux",
+            "completion_policy": "checked_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_FORECAST_DIR / f"{symbol}.parquet",
@@ -2099,7 +2103,7 @@ def run_tushare_update_pipeline(
             "stage_dir": RAW_EXPRESS_DIR,
             "date_column": "ann_date",
             "required_columns": EXPRESS_API_FIELDS,
-            "precheck_kind": "aux",
+            "completion_policy": "checked_end_date",
             "worker": lambda symbol, latest, symbol_target_end_date, expected_start_date: update_raw_table(
                 symbol,
                 RAW_EXPRESS_DIR / f"{symbol}.parquet",
@@ -2119,7 +2123,7 @@ def run_tushare_update_pipeline(
     stage_plans: dict[str, StageUpdatePlan] = {}
     for stage_name, spec in stage_specs:
         stage_dir = spec["stage_dir"]
-        if spec["precheck_kind"] == "market":
+        if spec["completion_policy"] == "lifecycle_end_date":
             stage_plans[stage_name] = precheck_stage_updates(
                 symbols,
                 stage_name,
@@ -2225,9 +2229,9 @@ def run_tushare_update_pipeline(
                     stage_details[item.symbol].append(f"{stage_name}: {item.detail}")
                     if isinstance(item.payload, UpdateResult):
                         stage_outputs[stage_name][item.symbol] = item.payload
-                        if spec["precheck_kind"] == "market" and item.payload.changed:
+                        if spec["completion_policy"] == "lifecycle_end_date" and item.payload.changed:
                             backfill_removals.add((stage_name, item.symbol))
-                        elif spec["precheck_kind"] == "market" and item.payload.backfill_exhausted:
+                        elif spec["completion_policy"] == "lifecycle_end_date" and item.payload.backfill_exhausted:
                             backfill_updates.append(
                                 {
                                     "stage_name": stage_name,
@@ -2239,7 +2243,7 @@ def run_tushare_update_pipeline(
                                     "recorded_at": pd.Timestamp.now().normalize(),
                                 }
                             )
-                        elif spec["precheck_kind"] == "aux":
+                        elif spec["completion_policy"] == "checked_end_date":
                             aux_stage_frame = merge_aux_empty_records(
                                 aux_stage_frame,
                                 updates=[
@@ -2321,19 +2325,21 @@ def run_tushare_update_pipeline(
         )
         save_backfill_exhaustion(exhaustion_frame)
 
-    market_stage_names = [name for name, spec in stage_specs if spec["precheck_kind"] == "market"]
-    should_run_processed = "processed" in selected_stage_names or any(name in DEFAULT_MARKET_STAGE_NAMES for name in selected_stage_names)
+    processed_source_stage_names = [name for name, _ in stage_specs if name in PROCESSED_DEPENDENCY_STAGE_NAMES]
+    should_run_processed = "processed" in selected_stage_names or any(
+        name in PROCESSED_DEPENDENCY_STAGE_NAMES for name in selected_stage_names
+    )
     build_symbols = [
         symbol
         for symbol in symbols
         if symbol not in failed_symbols
-        and all(symbol in stage_outputs[name] for name in market_stage_names)
+        and all(symbol in stage_outputs[name] for name in processed_source_stage_names)
     ]
-    if should_run_processed and build_symbols and market_stage_names:
+    if should_run_processed and build_symbols and processed_source_stage_names:
         print("[*] Raw Tushare downloads finished. Rebuilding processed parquet...")
 
         def rebuild_if_needed(symbol: str) -> str:
-            updates = [stage_outputs[name][symbol] for name in market_stage_names]
+            updates = [stage_outputs[name][symbol] for name in processed_source_stage_names]
             if should_rebuild_processed(symbol, updates):
                 return rebuild_processed_from_local(symbol)
             processed_latest = infer_latest_date(PROCESSED_DIR / f"{symbol}.parquet", "date")
@@ -2352,7 +2358,7 @@ def run_tushare_update_pipeline(
 
     final_results: list[TaskResult] = []
     for symbol in symbols:
-        if should_run_processed and market_stage_names:
+        if should_run_processed and processed_source_stage_names:
             ok = symbol not in failed_symbols and any(detail.startswith("processed: ") for detail in stage_details[symbol])
         else:
             ok = symbol not in failed_symbols and all(symbol in stage_outputs[name] for name, _ in stage_specs)
@@ -2435,7 +2441,7 @@ def parse_symbols_arg(symbols: str | None) -> list[str]:
 
 def parse_stage_names_arg(raw: str | None) -> tuple[str, ...]:
     if raw is None or not str(raw).strip():
-        return DEFAULT_MARKET_STAGE_NAMES
+        return DEFAULT_STAGE_NAMES
     if str(raw).strip().lower() == "all":
         return OPTIONAL_STAGE_NAMES
     requested = tuple(dict.fromkeys(item.strip() for item in str(raw).split(",") if item.strip()))
@@ -2468,7 +2474,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Comma-separated stage list to update. "
             f"Available: all, {', '.join(OPTIONAL_STAGE_NAMES)}. "
-            f"Default: {', '.join(DEFAULT_MARKET_STAGE_NAMES)}"
+            f"Default: {', '.join(DEFAULT_STAGE_NAMES)}"
         ),
     )
     parser.add_argument(
@@ -2535,9 +2541,11 @@ def main() -> None:
         if not symbols:
             raise SystemExit("[!] No Tushare symbols to process.")
         effective_end_dates: dict[str, pd.Timestamp] | None = None
-        market_selected = any(stage in DEFAULT_MARKET_STAGE_NAMES for stage in selected_stage_names)
-        if market_selected:
-            symbols, completed_symbols, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
+        lifecycle_selected = any(stage in PROCESSED_DEPENDENCY_STAGE_NAMES for stage in selected_stage_names)
+        event_stage_selected = any(stage in EVENT_STAGE_NAMES for stage in selected_stage_names)
+        requested_symbols = list(symbols)
+        if lifecycle_selected:
+            pending_lifecycle_symbols, completed_symbols, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
                 symbols, target_end_date=latest_trading_date
             )
             if not lifecycle_registry.empty:
@@ -2546,6 +2554,10 @@ def main() -> None:
                 print(f"[*] Tushare lifecycle snapshot: {counts_text}")
             if completed_symbols:
                 print(f"[*] Skipping {len(completed_symbols)} already-complete Tushare symbols.")
+            if event_stage_selected:
+                symbols = requested_symbols
+            else:
+                symbols = pending_lifecycle_symbols
             if not symbols:
                 print("[+] All Tushare symbols are already complete. Nothing to update.")
                 return

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import os
+from urllib.parse import urlparse
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -31,6 +32,7 @@ SYMBOL_CACHE_PATH = RAW_META_DIR / "symbol_cache.parquet"
 TRADE_CALENDAR_PATH = RAW_META_DIR / "trade_calendar.parquet"
 SYMBOL_LIFECYCLE_PATH = RAW_META_DIR / "symbol_lifecycle.parquet"
 BACKFILL_EXHAUSTION_PATH = RAW_META_DIR / "backfill_exhaustion.parquet"
+AUX_EMPTY_RESULTS_PATH = RAW_META_DIR / "aux_empty_results.parquet"
 
 DEFAULT_TOKEN_ENV = "TUSHARE_TOKEN"
 DEFAULT_START_DATE = "19900101"
@@ -205,6 +207,13 @@ BACKFILL_EXHAUSTION_COLS = [
     "recorded_at",
 ]
 
+AUX_EMPTY_RESULT_COLS = [
+    "stage_name",
+    "local_symbol",
+    "checked_end_date",
+    "recorded_at",
+]
+
 TS_PROCESSED_CANONICAL_COLS = [
     "date",
     "symbol",
@@ -309,6 +318,7 @@ class StageUpdatePlan:
 
 
 _THREAD_STATE = threading.local()
+TUSHARE_API_HOST = "api.waditu.com"
 
 
 class EndpointRateLimiter:
@@ -582,9 +592,42 @@ def load_symbol_lifecycle() -> pd.DataFrame | None:
 
 
 def configure_tushare(token_env: str = DEFAULT_TOKEN_ENV) -> None:
+    _configure_tushare_network()
     token = os.environ.get(token_env, "").strip()
     if token:
         ts.set_token(token)
+
+
+def _is_loopback_proxy(value: str | None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    try:
+        host = (urlparse(raw).hostname or "").strip().lower()
+    except Exception:
+        return False
+    return host in {"127.0.0.1", "localhost", "::1"}
+
+
+def _append_no_proxy_host(host: str) -> None:
+    existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    parts = [item.strip() for item in existing.split(",") if item.strip()]
+    if host not in parts:
+        parts.append(host)
+    joined = ",".join(parts)
+    os.environ["NO_PROXY"] = joined
+    os.environ["no_proxy"] = joined
+
+
+def _configure_tushare_network() -> None:
+    if str(os.environ.get("TUSHARE_KEEP_PROXY", "")).strip() == "1":
+        return
+    proxy_keys = ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"]
+    if not any(_is_loopback_proxy(os.environ.get(key)) for key in proxy_keys):
+        return
+    for key in proxy_keys:
+        os.environ.pop(key, None)
+    _append_no_proxy_host(TUSHARE_API_HOST)
 
 
 def get_tushare_client():
@@ -754,6 +797,62 @@ def load_backfill_exhaustion() -> pd.DataFrame:
 
 def save_backfill_exhaustion(df: pd.DataFrame) -> None:
     save_optimized_parquet(df.reindex(columns=BACKFILL_EXHAUSTION_COLS), BACKFILL_EXHAUSTION_PATH)
+
+
+def load_aux_empty_results() -> pd.DataFrame:
+    frame = _read_parquet_safe(AUX_EMPTY_RESULTS_PATH)
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=AUX_EMPTY_RESULT_COLS)
+    out = frame.copy()
+    for col in ["checked_end_date", "recorded_at"]:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce")
+    return out.reindex(columns=AUX_EMPTY_RESULT_COLS)
+
+
+def save_aux_empty_results(df: pd.DataFrame) -> None:
+    save_optimized_parquet(df.reindex(columns=AUX_EMPTY_RESULT_COLS), AUX_EMPTY_RESULTS_PATH)
+
+
+def build_aux_empty_lookup(frame: pd.DataFrame) -> dict[tuple[str, str], pd.Timestamp | None]:
+    if frame is None or frame.empty:
+        return {}
+    lookup: dict[tuple[str, str], pd.Timestamp | None] = {}
+    for _, row in frame.iterrows():
+        lookup[(str(row.get("stage_name") or ""), str(row.get("local_symbol") or ""))] = _normalize_optional_timestamp(
+            row.get("checked_end_date")
+        )
+    return lookup
+
+
+def merge_aux_empty_records(
+    existing: pd.DataFrame,
+    updates: list[dict[str, Any]],
+    removals: set[tuple[str, str]],
+) -> pd.DataFrame:
+    out = existing.copy()
+    if removals and not out.empty:
+        removal_keys = {(stage, symbol) for stage, symbol in removals}
+        keep_mask = [
+            (str(row.get("stage_name") or "").strip(), str(row.get("local_symbol") or "").strip())
+            not in removal_keys
+            for _, row in out.iterrows()
+        ]
+        out = out.loc[keep_mask].copy()
+    if updates:
+        updates_df = pd.DataFrame(updates).reindex(columns=AUX_EMPTY_RESULT_COLS)
+        if out.empty:
+            out = updates_df.copy()
+        else:
+            out = pd.concat([out, updates_df], ignore_index=True)
+        out = (
+            out.drop_duplicates(subset=["stage_name", "local_symbol"], keep="last")
+            .sort_values(["stage_name", "local_symbol"])
+            .reset_index(drop=True)
+        )
+    elif not out.empty:
+        out = out.sort_values(["stage_name", "local_symbol"]).reset_index(drop=True)
+    return out.reindex(columns=AUX_EMPTY_RESULT_COLS)
 
 
 def build_backfill_exhaustion_lookup(
@@ -1422,6 +1521,7 @@ def update_raw_table(
     refetch_on_schema_mismatch: bool = False,
     date_column: str = "trade_date",
     symbol_column: str = "ts_code",
+    allow_empty_success: bool = False,
 ) -> UpdateResult:
     if latest is ...:
         latest = infer_latest_date(path, date_column)
@@ -1474,6 +1574,13 @@ def update_raw_table(
     fetched = fetcher(symbol, fetch_start.strftime("%Y%m%d"), fetch_end.strftime("%Y%m%d"))
 
     if fetched.empty:
+        if allow_empty_success:
+            return UpdateResult(
+                status=f"{path.parent.name} empty through {target_end_date.date()}",
+                changed=False,
+                latest=latest,
+                earliest=earliest,
+            )
         if needs_backfill and not needs_future and existing is not None and not existing.empty and earliest is not None:
             return UpdateResult(
                 status=f"{path.parent.name} backfill exhausted at {earliest.date()}",
@@ -2068,6 +2175,31 @@ def collect_symbols(
     return results
 
 
+def precheck_aux_stage_symbols(
+    symbols: list[str],
+    *,
+    stage_name: str,
+    stage_dir: Path,
+    target_end_date: pd.Timestamp,
+    date_column: str,
+    empty_lookup: dict[tuple[str, str], pd.Timestamp | None] | None = None,
+) -> tuple[list[str], list[str]]:
+    pending: list[str] = []
+    ready: list[str] = []
+    empty_lookup = empty_lookup or {}
+    for symbol in symbols:
+        latest = infer_latest_date(stage_dir / f"{symbol}.parquet", date_column)
+        empty_until = empty_lookup.get((stage_name, symbol))
+        if latest is not None and latest >= target_end_date:
+            ready.append(symbol)
+            continue
+        if empty_until is not None and empty_until >= target_end_date:
+            ready.append(symbol)
+            continue
+        pending.append(symbol)
+    return pending, ready
+
+
 def resolve_target_end_date(end_date: str | None = None) -> pd.Timestamp:
     if end_date:
         return pd.Timestamp(end_date).normalize()
@@ -2166,10 +2298,29 @@ def main() -> None:
         if not symbols:
             raise SystemExit("[!] No Tushare symbols to process.")
 
+        aux_empty_frame = load_aux_empty_results()
+        aux_empty_lookup = build_aux_empty_lookup(aux_empty_frame)
+        symbols, completed_symbols = precheck_aux_stage_symbols(
+            symbols,
+            stage_name="fina_indicator",
+            stage_dir=RAW_FINA_INDICATOR_DIR,
+            target_end_date=latest_trading_date,
+            date_column="ann_date",
+            empty_lookup=aux_empty_lookup,
+        )
+        if completed_symbols:
+            print(f"[*] Skipping {len(completed_symbols)} already-complete/empty fina_indicator symbols.")
+        if not symbols:
+            print("[+] All fina_indicator symbols are already complete. Nothing to update.")
+            return
+
         print(
             f"[*] Updating raw fina_indicator for {len(symbols)} symbols with {args.workers} workers "
             f"(end_date={latest_trading_date.date()})..."
         )
+
+        aux_empty_updates: list[dict[str, Any]] = []
+        aux_empty_removals: set[tuple[str, str]] = set()
 
         def _fina_indicator_worker(symbol: str) -> TaskResult:
             try:
@@ -2183,12 +2334,25 @@ def main() -> None:
                     expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
                     required_columns=FINA_INDICATOR_API_FIELDS,
                     date_column="ann_date",
+                    allow_empty_success=True,
                 )
+                if " empty through " in result.status:
+                    aux_empty_updates.append(
+                        {
+                            "stage_name": "fina_indicator",
+                            "local_symbol": symbol,
+                            "checked_end_date": latest_trading_date,
+                            "recorded_at": pd.Timestamp.now().normalize(),
+                        }
+                    )
+                else:
+                    aux_empty_removals.add(("fina_indicator", symbol))
                 return TaskResult(symbol=symbol, ok=True, detail=result.status)
             except Exception as exc:
                 return TaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
 
         results = collect_symbols(symbols, _fina_indicator_worker, max_workers=args.workers)
+        save_aux_empty_results(merge_aux_empty_records(aux_empty_frame, aux_empty_updates, aux_empty_removals))
     elif args.dividend:
         if args.all:
             symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)
@@ -2200,10 +2364,29 @@ def main() -> None:
         if not symbols:
             raise SystemExit("[!] No Tushare symbols to process.")
 
+        aux_empty_frame = load_aux_empty_results()
+        aux_empty_lookup = build_aux_empty_lookup(aux_empty_frame)
+        symbols, completed_symbols = precheck_aux_stage_symbols(
+            symbols,
+            stage_name="dividend",
+            stage_dir=RAW_DIVIDEND_DIR,
+            target_end_date=latest_trading_date,
+            date_column="ann_date",
+            empty_lookup=aux_empty_lookup,
+        )
+        if completed_symbols:
+            print(f"[*] Skipping {len(completed_symbols)} already-complete/empty dividend symbols.")
+        if not symbols:
+            print("[+] All dividend symbols are already complete. Nothing to update.")
+            return
+
         print(
             f"[*] Updating raw dividend for {len(symbols)} symbols with {args.workers} workers "
             f"(end_date={latest_trading_date.date()})..."
         )
+
+        aux_empty_updates: list[dict[str, Any]] = []
+        aux_empty_removals: set[tuple[str, str]] = set()
 
         def _dividend_worker(symbol: str) -> TaskResult:
             try:
@@ -2217,12 +2400,25 @@ def main() -> None:
                     expected_start_date=pd.Timestamp(DEFAULT_START_DATE),
                     required_columns=DIVIDEND_API_FIELDS,
                     date_column="ann_date",
+                    allow_empty_success=True,
                 )
+                if " empty through " in result.status:
+                    aux_empty_updates.append(
+                        {
+                            "stage_name": "dividend",
+                            "local_symbol": symbol,
+                            "checked_end_date": latest_trading_date,
+                            "recorded_at": pd.Timestamp.now().normalize(),
+                        }
+                    )
+                else:
+                    aux_empty_removals.add(("dividend", symbol))
                 return TaskResult(symbol=symbol, ok=True, detail=result.status)
             except Exception as exc:
                 return TaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
 
         results = collect_symbols(symbols, _dividend_worker, max_workers=args.workers)
+        save_aux_empty_results(merge_aux_empty_records(aux_empty_frame, aux_empty_updates, aux_empty_removals))
     else:
         if args.all:
             symbols = resolve_all_symbols(refresh_live=args.refresh_symbols)

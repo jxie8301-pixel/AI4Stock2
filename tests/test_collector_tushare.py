@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import time
 
@@ -7,6 +8,7 @@ import pandas as pd
 import pytest
 
 from src.collector_tushare import (
+    AUX_EMPTY_RESULT_COLS,
     ADJ_FACTOR_API_FIELDS,
     DAILY_API_FIELDS,
     DAILY_BASIC_API_FIELDS,
@@ -23,14 +25,18 @@ from src.collector_tushare import (
     _fetch_daily_basic_chunk,
     _fetch_dividend_chunk,
     _fetch_fina_indicator_chunk,
+    _configure_tushare_network,
     _fetch_market_table_in_chunks,
     _fetch_stk_limit_chunk,
     fetch_stock_basic_by_status,
     build_backfill_exhaustion_lookup,
+    build_aux_empty_lookup,
     build_processed_symbol_frame_from_raw,
     collect_stage,
     is_backfill_satisfied,
     is_symbol_complete,
+    merge_aux_empty_records,
+    precheck_aux_stage_symbols,
     local_symbol_to_ts,
     normalize_symbol_cache_frame,
     precheck_pending_symbols,
@@ -64,6 +70,28 @@ def test_endpoint_rate_limiter_zero_interval_bypasses_wait(monkeypatch: pytest.M
     monkeypatch.setattr("src.collector_tushare.time.monotonic", fail_monotonic)
 
     limiter.wait()
+
+
+def test_configure_tushare_network_bypasses_loopback_proxy_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("HTTPS_PROXY", "http://localhost:7897")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.delenv("TUSHARE_KEEP_PROXY", raising=False)
+
+    _configure_tushare_network()
+
+    assert "HTTP_PROXY" not in os.environ
+    assert "HTTPS_PROXY" not in os.environ
+    assert "api.waditu.com" in os.environ["NO_PROXY"]
+
+
+def test_configure_tushare_network_respects_keep_proxy_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setenv("TUSHARE_KEEP_PROXY", "1")
+
+    _configure_tushare_network()
+
+    assert os.environ["HTTP_PROXY"] == "http://127.0.0.1:7897"
 
 
 def test_normalize_symbol_cache_frame_handles_missing_optional_columns() -> None:
@@ -243,6 +271,56 @@ def test_fetch_dividend_chunk_requests_explicit_full_fields(monkeypatch: pytest.
 
     assert captured["fields"] == ",".join(DIVIDEND_API_FIELDS)
     assert list(out.columns) == DIVIDEND_API_FIELDS
+
+
+def test_merge_aux_empty_records_upserts_and_removes() -> None:
+    existing = pd.DataFrame(
+        {
+            "stage_name": ["dividend"],
+            "local_symbol": ["000001"],
+            "checked_end_date": [pd.Timestamp("2026-03-31")],
+            "recorded_at": [pd.Timestamp("2026-04-03")],
+        }
+    )
+    updates = [
+        {
+            "stage_name": "dividend",
+            "local_symbol": "000002",
+            "checked_end_date": pd.Timestamp("2026-03-31"),
+            "recorded_at": pd.Timestamp("2026-04-03"),
+        }
+    ]
+    removals = {("dividend", "000001")}
+
+    out = merge_aux_empty_records(existing, updates, removals)
+
+    assert list(out.columns) == AUX_EMPTY_RESULT_COLS
+    assert out["local_symbol"].tolist() == ["000002"]
+
+
+def test_precheck_aux_stage_symbols_skips_fresh_file_and_empty_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    stage_dir = Path("/tmp/dividend")
+
+    def fake_latest(path: Path, date_column: str):
+        if path.stem == "000001":
+            return pd.Timestamp("2026-03-31")
+        return None
+
+    monkeypatch.setattr("src.collector_tushare.infer_latest_date", fake_latest)
+
+    pending, ready = precheck_aux_stage_symbols(
+        ["000001", "000002", "000003"],
+        stage_name="dividend",
+        stage_dir=stage_dir,
+        target_end_date=pd.Timestamp("2026-03-31"),
+        date_column="ann_date",
+        empty_lookup={
+            ("dividend", "000002"): pd.Timestamp("2026-03-31"),
+        },
+    )
+
+    assert ready == ["000001", "000002"]
+    assert pending == ["000003"]
 
 
 def test_resolve_symbol_lifecycle_status_and_effective_end_date_for_delisted() -> None:

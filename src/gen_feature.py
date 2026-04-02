@@ -126,6 +126,8 @@ DEFAULT_TUSHARE_FACTOR_CONFIG: dict[str, Any] = {
     "limit_stat_windows": [5, 20],
     "amplitude_windows": [5, 20],
     "pct_chg_windows": [5, 20],
+    "ratio_change_windows": [20, 60],
+    "valuation_change_windows": [20, 60],
     "zscore_window": 20,
 }
 
@@ -482,14 +484,24 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     ]
     names += [f"free_turnover_mean_{int(window)}" for window in cfg["free_turnover_windows"]]
     names += [f"limit_band_pct_mean_{int(window)}" for window in cfg["limit_stat_windows"]]
+    names += [f"limit_band_pos_mean_{int(window)}" for window in cfg["limit_stat_windows"]]
+    names += [f"gap_up_limit_mean_{int(window)}" for window in cfg["limit_stat_windows"]]
+    names += [f"gap_down_limit_mean_{int(window)}" for window in cfg["limit_stat_windows"]]
     names += [f"hit_up_limit_count_{int(window)}" for window in cfg["limit_stat_windows"]]
     names += [f"hit_down_limit_count_{int(window)}" for window in cfg["limit_stat_windows"]]
     names += [f"amplitude_mean_{int(window)}" for window in cfg["amplitude_windows"]]
     names += [f"pct_chg_mean_{int(window)}" for window in cfg["pct_chg_windows"]]
+    names += [f"free_float_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
+    names += [f"free_to_circ_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
+    names += [f"float_mv_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
+    names += [f"sp_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
+    names += [f"dividend_yield_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
     zscore_window = int(cfg["zscore_window"])
     names += [
         f"amplitude_zscore_{zscore_window}",
         f"pct_chg_zscore_{zscore_window}",
+        f"free_turnover_ratio_zscore_{zscore_window}",
+        f"volume_ratio_raw_zscore_{zscore_window}",
     ]
     return names
 
@@ -1275,6 +1287,9 @@ def compute_tushare_factor_features(
     for window in cfg["limit_stat_windows"]:
         window = int(window)
         out[f"limit_band_pct_mean_{window}"] = out["limit_band_pct"].rolling(window, min_periods=1).mean()
+        out[f"limit_band_pos_mean_{window}"] = out["limit_band_pos"].rolling(window, min_periods=1).mean()
+        out[f"gap_up_limit_mean_{window}"] = out["gap_up_limit"].rolling(window, min_periods=1).mean()
+        out[f"gap_down_limit_mean_{window}"] = out["gap_down_limit"].rolling(window, min_periods=1).mean()
         out[f"hit_up_limit_count_{window}"] = hit_up_limit.rolling(window, min_periods=1).sum()
         out[f"hit_down_limit_count_{window}"] = hit_down_limit.rolling(window, min_periods=1).sum()
     for window in cfg["amplitude_windows"]:
@@ -1283,13 +1298,32 @@ def compute_tushare_factor_features(
     for window in cfg["pct_chg_windows"]:
         window = int(window)
         out[f"pct_chg_mean_{window}"] = pct_chg.rolling(window, min_periods=1).mean()
+    for window in cfg["ratio_change_windows"]:
+        window = int(window)
+        out[f"free_float_ratio_change_{window}"] = out["free_float_ratio"].pct_change(window, fill_method=None)
+        out[f"free_to_circ_ratio_change_{window}"] = out["free_to_circ_ratio"].pct_change(window, fill_method=None)
+        out[f"float_mv_ratio_change_{window}"] = out["float_mv_ratio"].pct_change(window, fill_method=None)
+    for window in cfg["valuation_change_windows"]:
+        window = int(window)
+        out[f"sp_ttm_change_{window}"] = pd.Series(out["sp_ttm"], index=base.index).pct_change(window, fill_method=None)
+        out[f"dividend_yield_ttm_change_{window}"] = (
+            pd.Series(out["dividend_yield_ttm"], index=base.index).pct_change(window, fill_method=None)
+        )
     zscore_window = int(cfg["zscore_window"])
     amplitude_mean = amplitude.rolling(zscore_window, min_periods=1).mean()
     amplitude_std = amplitude.rolling(zscore_window, min_periods=1).std()
     pct_chg_mean = pct_chg.rolling(zscore_window, min_periods=1).mean()
     pct_chg_std = pct_chg.rolling(zscore_window, min_periods=1).std()
+    free_turnover_mean = pd.Series(out["free_turnover_ratio"], index=base.index).rolling(zscore_window, min_periods=1).mean()
+    free_turnover_std = pd.Series(out["free_turnover_ratio"], index=base.index).rolling(zscore_window, min_periods=1).std()
+    volume_ratio_mean = volume_ratio.rolling(zscore_window, min_periods=1).mean()
+    volume_ratio_std = volume_ratio.rolling(zscore_window, min_periods=1).std()
     out[f"amplitude_zscore_{zscore_window}"] = (amplitude - amplitude_mean) / (amplitude_std + EPS)
     out[f"pct_chg_zscore_{zscore_window}"] = (pct_chg - pct_chg_mean) / (pct_chg_std + EPS)
+    out[f"free_turnover_ratio_zscore_{zscore_window}"] = (
+        pd.Series(out["free_turnover_ratio"], index=base.index) - free_turnover_mean
+    ) / (free_turnover_std + EPS)
+    out[f"volume_ratio_raw_zscore_{zscore_window}"] = (volume_ratio - volume_ratio_mean) / (volume_ratio_std + EPS)
 
     feat = pd.DataFrame(out, index=base.index)
     ordered_names = get_tushare_factor_feature_names(cfg)

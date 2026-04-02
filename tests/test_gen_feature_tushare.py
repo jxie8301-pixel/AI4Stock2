@@ -72,11 +72,17 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertEqual(float(feat.iloc[0]["has_dividend"]), 1.0)
         self.assertEqual(float(feat.iloc[1]["has_dividend"]), 0.0)
         self.assertAlmostEqual(float(feat.iloc[2]["limit_band_pct_mean_5"]), 0.2, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["limit_band_pos_mean_5"]), 0.5, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["gap_up_limit_mean_5"]), 0.1, places=6)
         self.assertAlmostEqual(float(feat.iloc[0]["hit_up_limit_count_5"]), 0.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["amplitude_mean_5"]), 8.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["pct_chg_mean_5"]), 4.0, places=6)
         self.assertTrue(pd.notna(feat.iloc[2]["amplitude_zscore_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["pct_chg_zscore_20"]))
+        self.assertTrue(pd.isna(feat.iloc[0]["free_float_ratio_change_20"]))
+        self.assertTrue(pd.isna(feat.iloc[0]["sp_ttm_change_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["free_turnover_ratio_zscore_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["volume_ratio_raw_zscore_20"]))
 
     def test_compute_all_factor_features_adds_tushare_columns_only_for_tushare_source(self):
         df = pd.DataFrame(
@@ -121,6 +127,8 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_ttm", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}float_mv_ratio", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}amplitude_mean_5", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}limit_band_pos_mean_5", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_ratio_zscore_20", tushare_feat.columns)
 
 
 if __name__ == "__main__":

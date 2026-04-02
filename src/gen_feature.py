@@ -64,6 +64,7 @@ EPS = 1e-12
 FULL_FACTOR_SPACE_NAME = "full_factor_space"
 DEFAULT_FULL_FACTOR_STORE_DIR = "data/factor_store/full_factor_space"
 TUSHARE_RAW_FINA_INDICATOR_DIR = Path("data/tushare/raw/fina_indicator")
+TUSHARE_RAW_DIVIDEND_DIR = Path("data/tushare/raw/dividend")
 
 
 DEFAULT_ALPHA158_CONFIG: dict[str, Any] = {
@@ -152,6 +153,15 @@ TUSHARE_FINA_INDICATOR_FEATURE_COLS = [
     "fi_op_yoy",
     "fi_netprofit_yoy",
     "fi_ocf_yoy",
+]
+
+TUSHARE_DIVIDEND_FEATURE_COLS = [
+    "div_cash_div",
+    "div_cash_div_tax",
+    "div_stk_div",
+    "div_stk_bo_rate",
+    "div_stk_co_rate",
+    "div_base_share",
 ]
 
 ALL_FACTORS_ALPHA360_PREFIX = "A360_"
@@ -539,6 +549,15 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "latest_op_yoy",
         "latest_netprofit_yoy",
         "latest_ocf_yoy",
+        "latest_div_cash",
+        "latest_div_cash_tax",
+        "latest_div_stock",
+        "latest_div_bo_rate",
+        "latest_div_co_rate",
+        "latest_div_base_share",
+        "latest_div_cash_yield_proxy",
+        "latest_div_stock_ratio",
+        "has_stock_dividend",
     ]
     zscore_window = int(cfg["zscore_window"])
     names += [
@@ -639,6 +658,53 @@ def _load_tushare_fina_indicator_features(symbol: str, date_index: pd.DatetimeIn
     return merged.reindex(columns=TUSHARE_FINA_INDICATOR_FEATURE_COLS)
 
 
+def _load_tushare_dividend_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
+    path = TUSHARE_RAW_DIVIDEND_DIR / f"{symbol}.parquet"
+    if not path.exists():
+        return None
+
+    frame = pd.read_parquet(path)
+    if frame.empty or "ann_date" not in frame.columns:
+        return None
+
+    frame = frame.copy()
+    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
+    frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
+    if frame.empty:
+        return None
+
+    value_cols = [
+        "cash_div",
+        "cash_div_tax",
+        "stk_div",
+        "stk_bo_rate",
+        "stk_co_rate",
+        "base_share",
+    ]
+    available = [col for col in value_cols if col in frame.columns]
+    if not available:
+        return None
+
+    right = frame[["ann_date", *available]].copy()
+    for col in available:
+        right[col] = pd.to_numeric(right[col], errors="coerce")
+    right = right.rename(columns={col: f"div_{col}" for col in available})
+
+    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
+    merged = pd.merge_asof(
+        left,
+        right.sort_values("ann_date"),
+        left_on="date",
+        right_on="ann_date",
+        direction="backward",
+    )
+    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
+    for col in TUSHARE_DIVIDEND_FEATURE_COLS:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    return merged.reindex(columns=TUSHARE_DIVIDEND_FEATURE_COLS)
+
+
 def _augment_tushare_symbol_frame(
     df: pd.DataFrame,
     *,
@@ -651,6 +717,11 @@ def _augment_tushare_symbol_frame(
     fina_indicator = _load_tushare_fina_indicator_features(symbol, date_index)
     if fina_indicator is not None and not fina_indicator.empty:
         aligned = fina_indicator.reindex(date_index)
+        for col in aligned.columns:
+            out[col] = aligned[col].to_numpy()
+    dividend = _load_tushare_dividend_features(symbol, date_index)
+    if dividend is not None and not dividend.empty:
+        aligned = dividend.reindex(date_index)
         for col in aligned.columns:
             out[col] = aligned[col].to_numpy()
     return out
@@ -1395,6 +1466,32 @@ def compute_tushare_factor_features(
         else pd.Series(np.nan, index=base.index, dtype=float)
     )
     fi_ocf_yoy = base["fi_ocf_yoy"] if "fi_ocf_yoy" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    div_cash_div = (
+        base["div_cash_div"] if "div_cash_div" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    div_cash_div_tax = (
+        base["div_cash_div_tax"]
+        if "div_cash_div_tax" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    div_stk_div = (
+        base["div_stk_div"] if "div_stk_div" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    div_stk_bo_rate = (
+        base["div_stk_bo_rate"]
+        if "div_stk_bo_rate" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    div_stk_co_rate = (
+        base["div_stk_co_rate"]
+        if "div_stk_co_rate" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
+    div_base_share = (
+        base["div_base_share"]
+        if "div_base_share" in base.columns
+        else pd.Series(np.nan, index=base.index, dtype=float)
+    )
 
     out: dict[str, pd.Series] = {}
     out["gap_up_limit"] = up_limit / close - 1.0
@@ -1503,6 +1600,19 @@ def compute_tushare_factor_features(
     out["latest_op_yoy"] = fi_op_yoy
     out["latest_netprofit_yoy"] = fi_netprofit_yoy
     out["latest_ocf_yoy"] = fi_ocf_yoy
+    out["latest_div_cash"] = div_cash_div
+    out["latest_div_cash_tax"] = div_cash_div_tax
+    out["latest_div_stock"] = div_stk_div
+    out["latest_div_bo_rate"] = div_stk_bo_rate
+    out["latest_div_co_rate"] = div_stk_co_rate
+    out["latest_div_base_share"] = div_base_share
+    out["latest_div_cash_yield_proxy"] = div_cash_div / (close + EPS)
+    out["latest_div_stock_ratio"] = div_stk_div + div_stk_bo_rate + div_stk_co_rate
+    out["has_stock_dividend"] = np.where(
+        np.isfinite(out["latest_div_stock_ratio"]),
+        (out["latest_div_stock_ratio"] > 0).astype(float),
+        np.nan,
+    )
 
     feat = pd.DataFrame(out, index=base.index)
     ordered_names = get_tushare_factor_feature_names(cfg)

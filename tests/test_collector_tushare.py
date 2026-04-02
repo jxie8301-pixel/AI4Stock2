@@ -10,6 +10,7 @@ from src.collector_tushare import (
     ADJ_FACTOR_API_FIELDS,
     DAILY_API_FIELDS,
     DAILY_BASIC_API_FIELDS,
+    DIVIDEND_API_FIELDS,
     EndpointRateLimiter,
     FINA_INDICATOR_API_FIELDS,
     PRECHECK_WORKERS,
@@ -20,6 +21,7 @@ from src.collector_tushare import (
     _fetch_adj_factor_chunk,
     _fetch_daily_chunk,
     _fetch_daily_basic_chunk,
+    _fetch_dividend_chunk,
     _fetch_fina_indicator_chunk,
     _fetch_market_table_in_chunks,
     _fetch_stk_limit_chunk,
@@ -225,6 +227,22 @@ def test_fetch_fina_indicator_chunk_requests_explicit_full_fields(monkeypatch: p
 
     assert captured["fields"] == ",".join(FINA_INDICATOR_API_FIELDS)
     assert list(out.columns) == FINA_INDICATOR_API_FIELDS
+
+
+def test_fetch_dividend_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyPro:
+        def dividend(self, **kwargs):
+            captured.update(kwargs)
+            return pd.DataFrame(columns=DIVIDEND_API_FIELDS)
+
+    monkeypatch.setattr("src.collector_tushare.get_tushare_client", lambda: DummyPro())
+
+    out = _fetch_dividend_chunk("000001", "20200101", "20260331")
+
+    assert captured["fields"] == ",".join(DIVIDEND_API_FIELDS)
+    assert list(out.columns) == DIVIDEND_API_FIELDS
 
 
 def test_resolve_symbol_lifecycle_status_and_effective_end_date_for_delisted() -> None:

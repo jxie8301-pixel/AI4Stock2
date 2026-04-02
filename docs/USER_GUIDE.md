@@ -224,6 +224,11 @@ uv run python src/gen_feature.py --workers 8
 uv run python src/gen_feature.py --workers 8
 ```
 
+如果要基于 Tushare 处理后的 parquet 生成独立因子库，显式切换数据源：
+```bash
+uv run python src/gen_feature.py --data-source tushare --workers 8
+```
+
 如果只是更新了部分 Parquet，希望尽量少重算特征，可以使用增量模式：
 ```bash
 uv run python src/gen_feature.py --workers 8 --incremental
@@ -241,6 +246,15 @@ uv run python src/gen_feature.py --workers 8 --incremental
 - Alpha158 全量因子，保留原始列名
 - LightGBM 净化因子，列名前缀为 `LGBM_`
 - 统一时间窗口因子，列名前缀为 `TEMP_`
+
+当 `--data-source tushare` 时，会生成单独的因子库存目录：
+- `data/factor_store/tushare_full_factor_space`
+
+Tushare 版本的全集 cache 会在通用因子之外额外追加一组 `TS_` 前缀特征，当前包括：
+- 涨跌停结构：`TS_gap_up_limit`, `TS_gap_down_limit`, `TS_limit_band_pct`, `TS_limit_band_pos`, `TS_hit_up_limit`, `TS_hit_down_limit`
+- 股本结构：`TS_free_float_ratio`, `TS_circ_float_ratio`, `TS_free_to_circ_ratio`
+- 自由流通换手：`TS_free_turnover_ratio`, `TS_free_turnover_spread`, `TS_free_turnover_mean_*`
+- Tushare 原生量价/估值补充：`TS_volume_ratio_raw`, `TS_sp`, `TS_sp_ttm`, `TS_dividend_yield`, `TS_dividend_yield_ttm`, `TS_has_dividend`
 
 当前统一时间窗口因子默认按这些窗口展开：
 - `1, 5, 10, 20, 30, 60, 120`
@@ -265,6 +279,7 @@ uv run python src/gen_feature.py --workers 8 --incremental
 - `alpha158_full`: 默认只用 Alpha158 子集
 - `alpha158_compact_v1`: 默认只用紧凑版 Alpha158 子集
 - `lgbm_purified_v1`: 默认只用 LightGBM 净化子集
+- `core_v4_techlite_tushare_plus`: 在 `core_v4_techlite` 基础上补入一组 Tushare 专属列
 
 `gen_feature.py` 现在只负责生成统一全集 cache，不再暴露 `alpha158/alpha360` 这类历史因子库名字。
 这些名字只保留在训练侧 profile 中，用来表达“从全集中默认选择哪些列”。
@@ -275,6 +290,11 @@ uv run python src/gen_feature.py --workers 8 --incremental
 当前推荐优先使用 native + LightGBM，并通过命名实验 profile 运行：
 ```bash
 uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10
+```
+
+如果要切到 Tushare 数据源：
+```bash
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --data-source tushare
 ```
 
 训练/回测入口现在不再依赖默认 experiment profile。

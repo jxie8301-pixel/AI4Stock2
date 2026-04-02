@@ -123,6 +123,10 @@ DEFAULT_TECHNICAL_FACTOR_CONFIG: dict[str, Any] = {
 
 DEFAULT_TUSHARE_FACTOR_CONFIG: dict[str, Any] = {
     "free_turnover_windows": [5, 20],
+    "limit_stat_windows": [5, 20],
+    "amplitude_windows": [5, 20],
+    "pct_chg_windows": [5, 20],
+    "zscore_window": 20,
 }
 
 ALL_FACTORS_ALPHA360_PREFIX = "A360_"
@@ -467,13 +471,26 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "free_turnover_ratio",
         "free_turnover_spread",
         "volume_ratio_raw",
+        "float_mv_ratio",
+        "ep",
         "sp",
         "sp_ttm",
+        "ep_ttm_gap",
         "dividend_yield",
         "dividend_yield_ttm",
         "has_dividend",
     ]
     names += [f"free_turnover_mean_{int(window)}" for window in cfg["free_turnover_windows"]]
+    names += [f"limit_band_pct_mean_{int(window)}" for window in cfg["limit_stat_windows"]]
+    names += [f"hit_up_limit_count_{int(window)}" for window in cfg["limit_stat_windows"]]
+    names += [f"hit_down_limit_count_{int(window)}" for window in cfg["limit_stat_windows"]]
+    names += [f"amplitude_mean_{int(window)}" for window in cfg["amplitude_windows"]]
+    names += [f"pct_chg_mean_{int(window)}" for window in cfg["pct_chg_windows"]]
+    zscore_window = int(cfg["zscore_window"])
+    names += [
+        f"amplitude_zscore_{zscore_window}",
+        f"pct_chg_zscore_{zscore_window}",
+    ]
     return names
 
 
@@ -1194,28 +1211,42 @@ def compute_tushare_factor_features(
     volume_ratio = (
         base["volume_ratio"] if "volume_ratio" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     )
+    total_mv = base["total_mv"] if "total_mv" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    circ_mv = base["circ_mv"] if "circ_mv" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    pe = base["pe"] if "pe" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    pe_ttm = base["pe_ttm"] if "pe_ttm" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     ps = base["ps"] if "ps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     ps_ttm = base["ps_ttm"] if "ps_ttm" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     dv_ratio = (
         base["dv_ratio"] if "dv_ratio" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     )
     dv_ttm = base["dv_ttm"] if "dv_ttm" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    amplitude = base["amplitude"] if "amplitude" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    pct_chg = base["pct_chg"] if "pct_chg" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
 
     out: dict[str, pd.Series] = {}
     out["gap_up_limit"] = up_limit / close - 1.0
     out["gap_down_limit"] = close / down_limit - 1.0
     out["limit_band_pct"] = (up_limit - down_limit) / (limit_pre_close + EPS)
     out["limit_band_pos"] = (close - down_limit) / (up_limit - down_limit + EPS)
-    out["hit_up_limit"] = np.where(
+    hit_up_limit = pd.Series(
+        np.where(
         np.isfinite(close) & np.isfinite(up_limit),
         (close >= up_limit * (1.0 - 1e-6)).astype(float),
         np.nan,
+        ),
+        index=base.index,
     )
-    out["hit_down_limit"] = np.where(
+    hit_down_limit = pd.Series(
+        np.where(
         np.isfinite(close) & np.isfinite(down_limit),
         (close <= down_limit * (1.0 + 1e-6)).astype(float),
         np.nan,
+        ),
+        index=base.index,
     )
+    out["hit_up_limit"] = hit_up_limit
+    out["hit_down_limit"] = hit_down_limit
 
     total_share_safe = total_share.replace(0, np.nan)
     circ_share_safe = circ_share.replace(0, np.nan)
@@ -1231,11 +1262,34 @@ def compute_tushare_factor_features(
         out[f"free_turnover_mean_{window}"] = turnover_free.rolling(window, min_periods=1).mean()
 
     out["volume_ratio_raw"] = volume_ratio
+    total_mv_safe = total_mv.replace(0, np.nan)
+    out["float_mv_ratio"] = circ_mv / total_mv_safe
+    out["ep"] = np.where(pe > 0, 1.0 / pe, -1.0)
     out["sp"] = np.where(ps > 0, 1.0 / ps, -1.0)
     out["sp_ttm"] = np.where(ps_ttm > 0, 1.0 / ps_ttm, -1.0)
+    ep_ttm = np.where(pe_ttm > 0, 1.0 / pe_ttm, -1.0)
+    out["ep_ttm_gap"] = out["ep"] - ep_ttm
     out["dividend_yield"] = dv_ratio
     out["dividend_yield_ttm"] = dv_ttm
     out["has_dividend"] = np.where(np.isfinite(dv_ttm), (dv_ttm > 0).astype(float), np.nan)
+    for window in cfg["limit_stat_windows"]:
+        window = int(window)
+        out[f"limit_band_pct_mean_{window}"] = out["limit_band_pct"].rolling(window, min_periods=1).mean()
+        out[f"hit_up_limit_count_{window}"] = hit_up_limit.rolling(window, min_periods=1).sum()
+        out[f"hit_down_limit_count_{window}"] = hit_down_limit.rolling(window, min_periods=1).sum()
+    for window in cfg["amplitude_windows"]:
+        window = int(window)
+        out[f"amplitude_mean_{window}"] = amplitude.rolling(window, min_periods=1).mean()
+    for window in cfg["pct_chg_windows"]:
+        window = int(window)
+        out[f"pct_chg_mean_{window}"] = pct_chg.rolling(window, min_periods=1).mean()
+    zscore_window = int(cfg["zscore_window"])
+    amplitude_mean = amplitude.rolling(zscore_window, min_periods=1).mean()
+    amplitude_std = amplitude.rolling(zscore_window, min_periods=1).std()
+    pct_chg_mean = pct_chg.rolling(zscore_window, min_periods=1).mean()
+    pct_chg_std = pct_chg.rolling(zscore_window, min_periods=1).std()
+    out[f"amplitude_zscore_{zscore_window}"] = (amplitude - amplitude_mean) / (amplitude_std + EPS)
+    out[f"pct_chg_zscore_{zscore_window}"] = (pct_chg - pct_chg_mean) / (pct_chg_std + EPS)
 
     feat = pd.DataFrame(out, index=base.index)
     ordered_names = get_tushare_factor_feature_names(cfg)

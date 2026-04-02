@@ -37,13 +37,19 @@ class TushareFeatureTest(unittest.TestCase):
                 "turnover": [1.0, 2.0, 4.0],
                 "turnover_free": [1.5, 3.0, 6.0],
                 "volume_ratio": [1.2, 1.3, 1.4],
+                "total_mv": [1000.0, 1100.0, 1200.0],
+                "circ_mv": [800.0, 880.0, 960.0],
                 "total_share": [100.0, 100.0, 100.0],
                 "circ_share": [80.0, 80.0, 80.0],
                 "free_share": [60.0, 60.0, 60.0],
+                "pe": [10.0, 20.0, -5.0],
+                "pe_ttm": [8.0, 16.0, 32.0],
                 "ps": [2.0, 4.0, 5.0],
                 "ps_ttm": [2.5, 5.0, 10.0],
                 "dv_ratio": [0.5, 0.0, 0.2],
                 "dv_ttm": [0.8, 0.0, 0.4],
+                "amplitude": [7.0, 8.0, 9.0],
+                "pct_chg": [5.0, 10.0, -3.0],
                 "limit_pre_close": [10.0, 11.0, 12.0],
                 "up_limit": [11.0, 12.1, 13.2],
                 "down_limit": [9.0, 9.9, 10.8],
@@ -58,10 +64,19 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[1]["gap_down_limit"]), 11.0 / 9.9 - 1.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[1]["free_turnover_ratio"]), 1.5, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["free_turnover_mean_5"]), (1.5 + 3.0 + 6.0) / 3.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[0]["float_mv_ratio"]), 0.8, places=6)
+        self.assertAlmostEqual(float(feat.iloc[0]["ep"]), 0.1, places=6)
+        self.assertAlmostEqual(float(feat.iloc[1]["ep_ttm_gap"]), 0.05 - 0.0625, places=6)
         self.assertAlmostEqual(float(feat.iloc[0]["sp"]), 0.5, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["sp_ttm"]), 0.1, places=6)
         self.assertEqual(float(feat.iloc[0]["has_dividend"]), 1.0)
         self.assertEqual(float(feat.iloc[1]["has_dividend"]), 0.0)
+        self.assertAlmostEqual(float(feat.iloc[2]["limit_band_pct_mean_5"]), 0.2, places=6)
+        self.assertAlmostEqual(float(feat.iloc[0]["hit_up_limit_count_5"]), 0.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["amplitude_mean_5"]), 8.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["pct_chg_mean_5"]), 4.0, places=6)
+        self.assertTrue(pd.notna(feat.iloc[2]["amplitude_zscore_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["pct_chg_zscore_20"]))
 
     def test_compute_all_factor_features_adds_tushare_columns_only_for_tushare_source(self):
         df = pd.DataFrame(
@@ -78,9 +93,11 @@ class TushareFeatureTest(unittest.TestCase):
                 "turnover": [1.0, 2.0],
                 "turnover_free": [1.5, 3.0],
                 "volume_ratio": [1.2, 1.3],
+                "total_mv": [1000.0, 1100.0],
                 "total_share": [100.0, 100.0],
                 "circ_share": [80.0, 80.0],
                 "free_share": [60.0, 60.0],
+                "pe": [10.0, 11.0],
                 "pe_ttm": [10.0, 11.0],
                 "pb": [1.0, 1.1],
                 "ps": [2.0, 4.0],
@@ -88,6 +105,8 @@ class TushareFeatureTest(unittest.TestCase):
                 "dv_ratio": [0.5, 0.0],
                 "dv_ttm": [0.8, 0.0],
                 "circ_mv": [1000.0, 1100.0],
+                "amplitude": [7.0, 8.0],
+                "pct_chg": [5.0, 10.0],
                 "limit_pre_close": [10.0, 11.0],
                 "up_limit": [11.0, 12.1],
                 "down_limit": [9.0, 9.9],
@@ -100,6 +119,8 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", default_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_ttm", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}float_mv_ratio", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}amplitude_mean_5", tushare_feat.columns)
 
 
 if __name__ == "__main__":

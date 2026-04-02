@@ -32,6 +32,8 @@ What is true now:
 - A first Tushare-native collector now exists under `src/collector_tushare.py`
 - The Tushare path currently stores symbol cache, trade calendar, raw market tables, and a first-pass normalized `hfq` combined parquet under `data/tushare/`
 - The Tushare collector now supports symbol-level incremental updates, lifecycle-aware completion checks, segmented long-history backfill, and stage cooldown after rate-limit errors
+- The native training/feature pipeline now accepts `data.source: tushare` and stores its factor cache under `data/factor_store/tushare_*`
+- A first Tushare-specific feature family now exists, covering涨跌停结构, 自由流通占比, 自由换手, 市销率倒数, and股息率
 - `src/probe_tushare.py` can be used to inspect real Tushare endpoint columns and latency before integrating new tables into the formal pipeline
 
 ## Current Recommended Workflow
@@ -43,15 +45,17 @@ What is true now:
 
 Active migration note:
 
-- `src/collector_tushare.py` is now the leading replacement candidate for daily market data, but it is not yet the default research source until the canonical normalized schema and formal pipeline wiring are finished.
+- `src/collector_tushare.py` is already wired into the formal native pipeline as an optional `data.source`.
+- It should remain a selectable source until financial/event tables and the next feature layer are added.
 
 ## Immediate TODO
 
 ### 0. Tushare Migration And Pipeline Cleanup
 
-- [ ] Finalize the canonical Tushare-to-native normalized schema and decide which columns become the long-term source of truth for `combined` parquet
+- [x] Finalize the first canonical Tushare market-data normalized schema for `combined` parquet
+- [x] Wire the Tushare collector into the formal native feature/training workflow as an optional `data.source`
 - [ ] Add Tushare financial/event raw tables to the formal collector path: `income`, `balancesheet`, `cashflow`, `fina_indicator`, `forecast`, `express`, `dividend`, `fina_audit`, `fina_mainbz`
-- [ ] Wire the Tushare collector into the formal research workflow after schema validation, instead of treating it as a side path under `data/tushare/`
+- [ ] Design the second Tushare factor layer around financial/event tables instead of only daily market tables
 - [ ] Deduplicate `main.py` and `run_native_rolling.py` into shared training/prediction/evaluation helpers before continuing to add more run modes
 - [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
 - [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py`, `collector_gm.py`, and `collector_tushare.py` stop diverging
@@ -70,6 +74,7 @@ Active migration note:
 - [ ] Add richer amount/turnover flow factors such as amount shock, turnover z-score, signed flow persistence
 - [ ] Expand valuation/share-based factors from Eastmoney parquet fields: `ps`, `pcf`, `peg`, `circ_share`, `total_share`, float ratio
 - [ ] Decide whether and how to use the retained Eastmoney daily fields such as `amplitude`, `pct_chg`, and `change`
+- [ ] Expand Tushare-only factors from already-landed market columns: limit-band width/position dynamics, free-float turnover shocks, share-structure drift, and valuation/dividend change factors
 - [ ] Add a rolling single-factor diagnostics report: IC, RankIC, coverage, monotonicity, stability
 - [ ] Add automated prefiltering by minimum coverage plus minimum rolling IC / RankIC threshold
 - [ ] Add redundancy pruning on the selected feature set using correlation clustering before model training

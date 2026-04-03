@@ -15,10 +15,14 @@ class ConfigValidationTest(unittest.TestCase):
             universe_dir = tmp_path / "universes"
             universe_dir.mkdir(parents=True, exist_ok=True)
             (universe_dir / "csi300.txt").write_text("000001.SZ\n", encoding="utf-8")
+            benchmark_dir = tmp_path / "benchmarks" / "tushare"
+            benchmark_dir.mkdir(parents=True, exist_ok=True)
+            (benchmark_dir / "csi300.parquet").write_text("stub", encoding="utf-8")
 
             cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
             cfg["features"]["factor_store_dir"] = str(factor_store_dir)
             cfg["native"]["universe_dir"] = str(universe_dir)
+            cfg["backtest"]["benchmark"]["path"] = str(benchmark_dir / "csi300.parquet")
 
             validated = validate_training_config(cfg, check_paths=True)
 
@@ -95,6 +99,40 @@ class ConfigValidationTest(unittest.TestCase):
         cfg["data"]["source"] = "demo"
 
         with self.assertRaisesRegex(ValueError, "Unsupported data source"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_accepts_file_benchmark(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            factor_store_dir = tmp_path / "factor_store" / "full_factor_space"
+            factor_store_dir.mkdir(parents=True, exist_ok=True)
+            universe_dir = tmp_path / "universes"
+            universe_dir.mkdir(parents=True, exist_ok=True)
+            (universe_dir / "csi300.txt").write_text("000001.SZ\n", encoding="utf-8")
+            benchmark_path = tmp_path / "csi300.csv"
+            benchmark_path.write_text("date,close\n2024-01-02,100\n", encoding="utf-8")
+
+            cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+            cfg["features"]["factor_store_dir"] = str(factor_store_dir)
+            cfg["native"]["universe_dir"] = str(universe_dir)
+            cfg["backtest"]["benchmark"] = {
+                "mode": "file",
+                "path": str(benchmark_path),
+                "date_column": "date",
+                "value_column": "close",
+                "value_type": "close",
+                "name": "CSI300",
+            }
+
+            validated = validate_training_config(cfg, check_paths=True)
+
+            self.assertEqual(validated["backtest"]["benchmark"]["mode"], "file")
+
+    def test_validate_training_config_rejects_invalid_benchmark_mode(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["benchmark"] = {"mode": "demo"}
+
+        with self.assertRaisesRegex(ValueError, "backtest.benchmark.mode must be one of"):
             validate_training_config(cfg, check_paths=False)
 
 

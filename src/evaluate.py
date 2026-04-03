@@ -6,6 +6,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+DEFAULT_BENCHMARK_MODE = "cross_section_mean"
+SUPPORTED_BENCHMARK_MODES = ("cross_section_mean", "file")
+SUPPORTED_BENCHMARK_VALUE_TYPES = ("return", "close")
+
 
 def safe_cross_sectional_corr(
     pred: pd.Series,
@@ -50,12 +54,133 @@ def _compute_return_distribution_metrics(returns: pd.Series) -> dict[str, float 
     }
 
 
+def _compute_chunked_period_returns(returns: pd.Series, period_size: int) -> pd.Series:
+    clean_returns = returns.astype(float).dropna()
+    if clean_returns.empty:
+        return pd.Series(dtype=float)
+    period_size = max(int(period_size), 1)
+    rows: list[dict[str, object]] = []
+    for start in range(0, len(clean_returns), period_size):
+        chunk = clean_returns.iloc[start : start + period_size]
+        if chunk.empty:
+            continue
+        rows.append(
+            {
+                "period_end": pd.Timestamp(chunk.index[-1]),
+                "return": float((1.0 + chunk).prod() - 1.0),
+            }
+        )
+    if not rows:
+        return pd.Series(dtype=float)
+    out = pd.DataFrame(rows).set_index("period_end")["return"].astype(float).sort_index()
+    out.index.name = "date"
+    return out
+
+
 def build_cross_section_benchmark(labels: pd.Series) -> pd.Series:
     """Compute daily cross-sectional mean return as a common reference series."""
     aligned_labels = labels.dropna()
     if aligned_labels.empty:
         return pd.Series(dtype=float)
     return aligned_labels.groupby(level=0).mean().sort_index()
+
+
+def _load_benchmark_frame(path: Path) -> pd.DataFrame:
+    suffix = path.suffix.lower()
+    if suffix in {".parquet", ".pq"}:
+        return pd.read_parquet(path)
+    if suffix in {".csv", ".txt"}:
+        return pd.read_csv(path)
+    raise ValueError(
+        f"Unsupported benchmark file format: {path}. "
+        "Use .csv, .txt, .parquet, or .pq."
+    )
+
+
+def _coerce_benchmark_returns(
+    frame: pd.DataFrame,
+    *,
+    date_column: str,
+    value_column: str,
+    value_type: str,
+) -> pd.Series:
+    if date_column not in frame.columns:
+        raise ValueError(f"Benchmark file is missing date column: {date_column}")
+    if value_column not in frame.columns:
+        raise ValueError(f"Benchmark file is missing value column: {value_column}")
+
+    data = frame[[date_column, value_column]].copy()
+    data[date_column] = pd.to_datetime(data[date_column], errors="coerce")
+    data[value_column] = pd.to_numeric(data[value_column], errors="coerce")
+    data = data.dropna().sort_values(date_column).drop_duplicates(subset=[date_column], keep="last")
+    if data.empty:
+        return pd.Series(dtype=float)
+
+    series = data.set_index(date_column)[value_column].astype(float).sort_index()
+    if value_type == "close":
+        series = series.pct_change(fill_method=None)
+    elif value_type != "return":
+        raise ValueError(
+            f"Unsupported benchmark value_type: {value_type}. "
+            f"Supported: {', '.join(SUPPORTED_BENCHMARK_VALUE_TYPES)}"
+        )
+    return series.astype(float).sort_index()
+
+
+def build_benchmark_series(
+    labels: pd.Series,
+    benchmark_cfg: dict | None = None,
+) -> tuple[pd.Series, str]:
+    """Resolve benchmark series for plots and excess-return analytics."""
+    benchmark_cfg = benchmark_cfg or {}
+    mode = str(benchmark_cfg.get("mode", DEFAULT_BENCHMARK_MODE) or DEFAULT_BENCHMARK_MODE).strip().lower()
+    if mode == "cross_section_mean":
+        return build_cross_section_benchmark(labels), "Cross-Section Mean"
+    if mode == "file":
+        raw_path = str(benchmark_cfg.get("path") or "").strip()
+        if not raw_path:
+            raise ValueError("backtest.benchmark.path must be set when benchmark.mode == 'file'")
+        path = Path(raw_path)
+        frame = _load_benchmark_frame(path)
+        date_column = str(benchmark_cfg.get("date_column") or "date").strip() or "date"
+        value_column = str(benchmark_cfg.get("value_column") or "close").strip() or "close"
+        value_type = str(benchmark_cfg.get("value_type") or "close").strip().lower() or "close"
+        name = str(benchmark_cfg.get("name") or path.stem).strip() or path.stem
+        benchmark_series = _coerce_benchmark_returns(
+            frame,
+            date_column=date_column,
+            value_column=value_column,
+            value_type=value_type,
+        )
+        if benchmark_series.empty:
+            raise ValueError(
+                f"Benchmark {name} returned no usable rows from {path}. "
+                "Check the file contents and configured date/value columns."
+            )
+        return benchmark_series, name
+    raise ValueError(
+        f"Unsupported benchmark mode: {mode}. "
+        f"Supported: {', '.join(SUPPORTED_BENCHMARK_MODES)}"
+    )
+
+
+def align_benchmark_to_report_index(
+    benchmark_series: pd.Series,
+    report_index: pd.Index,
+    *,
+    benchmark_name: str,
+) -> pd.Series:
+    """Align benchmark series to report dates and fail loudly on empty/no-overlap inputs."""
+    target_index = pd.DatetimeIndex(pd.to_datetime(report_index))
+    if benchmark_series.empty:
+        raise ValueError(f"Benchmark {benchmark_name} returned no rows.")
+    aligned = benchmark_series.reindex(target_index)
+    if int(aligned.notna().sum()) == 0:
+        raise ValueError(
+            f"Benchmark {benchmark_name} has no overlap with backtest period "
+            f"{target_index.min().date()} ~ {target_index.max().date()}."
+        )
+    return aligned.fillna(0.0).astype(float)
 
 
 def align_prediction_label_pairs(
@@ -136,6 +261,7 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     """
     report, _ = portfolio_metric
     report = report.copy()
+    report.attrs = dict(getattr(portfolio_metric[0], "attrs", {}) or {})
 
     # Qlib report columns: account/value/cash/... and ``return`` is gross of cost.
     is_qlib_style_report = {
@@ -168,6 +294,8 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     cum_returns = (1 + returns).cumprod()
     max_drawdown = ((cum_returns / cum_returns.cummax()) - 1.0).min() if not cum_returns.empty else 0.0
     
+    benchmark_name = str(report.attrs.get("benchmark_name") or "").strip()
+
     # Mimic Qlib's risk_analysis return structure
     distribution_metrics = _compute_return_distribution_metrics(valid_returns)
     result = {
@@ -183,12 +311,44 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         "payoff_ratio": {"risk": distribution_metrics["payoff_ratio"]},
         "profit_factor": {"risk": distribution_metrics["profit_factor"]},
     }
+    if "bench" in report.columns:
+        bench_returns = report["bench"].astype(float).dropna()
+        if not bench_returns.empty:
+            bench_mean = float(bench_returns.mean())
+            bench_std = float(bench_returns.std()) if len(bench_returns) > 1 else 0.0
+            if pd.isna(bench_std):
+                bench_std = 0.0
+            bench_ann_ret = bench_mean * ann_factor
+            bench_ann_vol = bench_std * np.sqrt(ann_factor)
+            bench_max_drawdown = _compute_max_drawdown(bench_returns)
+            aligned_strategy, aligned_bench = valid_returns.align(bench_returns, join="inner")
+            excess_returns = aligned_strategy - aligned_bench
+            excess_mean = float(excess_returns.mean()) if not excess_returns.empty else 0.0
+            excess_std = float(excess_returns.std()) if len(excess_returns) > 1 else 0.0
+            if pd.isna(excess_std):
+                excess_std = 0.0
+            excess_info_ratio = (
+                (excess_mean / excess_std) * np.sqrt(ann_factor) if excess_std > 0 else 0.0
+            )
+            result["benchmark_name"] = benchmark_name or "Benchmark"
+            result["benchmark_annualized_return"] = {"risk": bench_ann_ret}
+            result["benchmark_annualized_volatility"] = {"risk": bench_ann_vol}
+            result["benchmark_max_drawdown"] = {"risk": bench_max_drawdown}
+            result["excess_annualized_return"] = {"risk": excess_mean * ann_factor}
+            result["excess_information_ratio"] = {"risk": excess_info_ratio}
     
     # Add monthly returns calculation
     report.index = pd.to_datetime(report.index)
     monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
     result["monthly_return"] = monthly_ret.to_dict()
     result["monthly_win_rate"] = {"risk": float((monthly_ret > 0).mean()) if not monthly_ret.empty else 0.0}
+    rebalance_freq = int(report.attrs.get("rebalance_freq", 0) or 0)
+    if rebalance_freq > 0:
+        rebalance_ret = _compute_chunked_period_returns(report["return"], rebalance_freq)
+        result["rebalance_return"] = rebalance_ret.to_dict()
+        result["rebalance_win_rate"] = {
+            "risk": float((rebalance_ret > 0).mean()) if not rebalance_ret.empty else 0.0
+        }
     if "turnover" in report.columns:
         result["turnover_mean"] = {"risk": float(report["turnover"].astype(float).mean())}
     
@@ -222,10 +382,12 @@ def plot_cumulative_return(report: pd.DataFrame, save_path: str = None):
     fig, ax = plt.subplots(figsize=(12, 5))
 
     cum_return = (1 + report["return"]).cumprod()
-    cum_bench = (1 + report["bench"]).cumprod()
 
     ax.plot(cum_return.index, cum_return.values, label="Strategy", linewidth=1.5)
-    ax.plot(cum_bench.index, cum_bench.values, label="Benchmark (Cross-Section Mean)", linewidth=1.5, alpha=0.7)
+    if "bench" in report.columns:
+        cum_bench = (1 + report["bench"]).cumprod()
+        bench_label = str(report.attrs.get("benchmark_name") or "Benchmark").strip() or "Benchmark"
+        ax.plot(cum_bench.index, cum_bench.values, label=bench_label, linewidth=1.5, alpha=0.7)
     ax.set_title("Cumulative Return")
     ax.set_xlabel("Date")
     ax.set_ylabel("Cumulative Return")
@@ -358,6 +520,54 @@ def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame
     return pd.DataFrame(period_rows)
 
 
+def build_rebalance_period_summary(report: pd.DataFrame, rebalance_freq: int) -> pd.DataFrame:
+    """Aggregate daily report into fixed trading-day rebalance periods."""
+    rebalance_freq = max(int(rebalance_freq), 1)
+    period_report = report.copy()
+    period_report.index = pd.to_datetime(period_report.index)
+    period_rows: list[dict[str, float | int | str]] = []
+
+    for idx, start in enumerate(range(0, len(period_report), rebalance_freq), start=1):
+        period_frame = period_report.iloc[start : start + rebalance_freq]
+        if period_frame.empty:
+            continue
+        returns = period_frame["return"].astype(float).dropna()
+        if returns.empty:
+            continue
+        bench_returns = (
+            period_frame["bench"].astype(float).dropna()
+            if "bench" in period_frame.columns
+            else pd.Series(dtype=float)
+        )
+        distribution_metrics = _compute_return_distribution_metrics(returns)
+        period_rows.append(
+            {
+                "period": f"rebalance_{idx:03d}",
+                "period_start": str(pd.Timestamp(period_frame.index.min()).date()),
+                "period_end": str(pd.Timestamp(period_frame.index.max()).date()),
+                "days": int(len(returns)),
+                "return": float((1.0 + returns).prod() - 1.0),
+                "win_rate": float((returns > 0).mean()),
+                "avg_daily_return": float(returns.mean()),
+                "daily_volatility": float(returns.std()) if len(returns) > 1 else 0.0,
+                "max_drawdown": _compute_max_drawdown(returns),
+                "avg_turnover": float(period_frame["turnover"].astype(float).mean())
+                if "turnover" in period_frame.columns
+                else np.nan,
+                "bench_return": float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan,
+                "win_days": int(distribution_metrics["win_days"]),
+                "loss_days": int(distribution_metrics["loss_days"]),
+                "flat_days": int(distribution_metrics["flat_days"]),
+                "avg_win": distribution_metrics["avg_win"],
+                "avg_loss": distribution_metrics["avg_loss"],
+                "payoff_ratio": distribution_metrics["payoff_ratio"],
+                "profit_factor": distribution_metrics["profit_factor"],
+            }
+        )
+
+    return pd.DataFrame(period_rows)
+
+
 def save_period_summary(summary: pd.DataFrame, save_path: str | Path | None = None) -> pd.DataFrame:
     """Save a precomputed period summary to CSV."""
     if save_path:
@@ -452,6 +662,22 @@ def print_metrics(
         _print_metric_line("MaxDD", _format_pct(_extract_metric(portfolio_metrics, "max_drawdown")))
         _print_metric_line("Daily win", _format_pct(_extract_metric(portfolio_metrics, "daily_win_rate")))
         _print_metric_line("Monthly win", _format_pct(_extract_metric(portfolio_metrics, "monthly_win_rate")))
+        _print_metric_line("Rebalance win", _format_pct(_extract_metric(portfolio_metrics, "rebalance_win_rate")))
+        benchmark_name = portfolio_metrics.get("benchmark_name")
+        if benchmark_name:
+            _print_metric_line("Benchmark", str(benchmark_name))
+            _print_metric_line(
+                "Bench AnnRet",
+                _format_pct(_extract_metric(portfolio_metrics, "benchmark_annualized_return")),
+            )
+            _print_metric_line(
+                "Excess AnnRet",
+                _format_pct(_extract_metric(portfolio_metrics, "excess_annualized_return")),
+            )
+            _print_metric_line(
+                "Excess IR",
+                _format_number(_extract_metric(portfolio_metrics, "excess_information_ratio")),
+            )
         print()
         _print_metric_line("Avg win", _format_pct(_extract_metric(portfolio_metrics, "avg_win")))
         _print_metric_line("Avg loss", _format_pct(_extract_metric(portfolio_metrics, "avg_loss")))

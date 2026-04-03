@@ -176,6 +176,16 @@ uv run python src/collector_tushare.py --all --workers 8 --end-date 2026-03-31
 uv run python src/collector_tushare.py --update --workers 8 --end-date 2026-03-31
 ```
 
+只刷新 Tushare 指数 benchmark 文件：
+```bash
+uv run python src/collector_tushare.py --refresh-benchmarks-only --end-date 2026-03-31
+```
+
+如果你希望在更新股票 raw 的同时顺手刷新 benchmark：
+```bash
+uv run python src/collector_tushare.py --update --refresh-benchmarks --workers 8 --end-date 2026-03-31
+```
+
 只跑少量 symbol 做验证：
 ```bash
 uv run python src/collector_tushare.py --symbols 600000,000333 --workers 2 --end-date 2026-03-31
@@ -192,6 +202,11 @@ Tushare raw 目录当前拆分为：
 - `data/tushare/raw/daily_basic/`
 - `data/tushare/raw/adj_factor/`
 - `data/tushare/raw/stk_limit/`
+
+Tushare benchmark 指数文件默认输出到：
+- `data/benchmarks/tushare/csi300.parquet`
+- `data/benchmarks/tushare/csi500.parquet`
+- `data/benchmarks/tushare/zz1000.parquet`
 
 当前 Tushare collector 的几个关键行为：
 - 以 `stock_basic(list_status=L/D)` 维护股票缓存，并为退市股票记录 `delist_date`
@@ -349,6 +364,18 @@ uv run python run_experiment_batch.py \
   --sweep 'rolling.retrain_step=[5,10,15]'
 ```
 
+如果你想做“成组对比”而不是笛卡尔积，例如公平比较 `(topk=5,n_drop=1)`、`(topk=10,n_drop=2)`、`(topk=15,n_drop=3)`，可以直接用显式 case：
+```bash
+uv run python run_experiment_batch.py \
+  --pipeline rolling \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --case strategy.topk=5 strategy.n_drop=1 \
+  --case strategy.topk=10 strategy.n_drop=2 \
+  --case strategy.topk=15 strategy.n_drop=3 \
+  --case strategy.topk=30 strategy.n_drop=5 \
+  --run-tag-prefix topk_compare
+```
+
 当前 batch runner 默认是串行顺序执行。
 如果你只是想先确认会展开哪些命令，可以加：
 ```bash
@@ -435,7 +462,25 @@ rolling:
 
 backtest:
   rebalance_freq: 10
+  benchmark:
+    mode: cross_section_mean
 ```
+
+当前回测 benchmark 默认是 `cross_section_mean`，也就是当日 universe 截面平均收益。
+如果你要切到真实指数 baseline，可以改成文件模式：
+```yaml
+backtest:
+  rebalance_freq: 10
+  benchmark:
+    mode: file
+    path: data/benchmarks/tushare/csi300.parquet
+    date_column: date
+    value_column: close
+    value_type: close
+    name: CSI300
+```
+
+`value_type: close` 表示会先从收盘价自动转成日收益率；如果你的文件里已经直接存了日收益率，就把 `value_type` 改成 `return`。
 
 改 feature profile、model profile、experiment profile，都不需要重新执行 `gen_feature.py`。
 只有当 unified factor store 的生成空间本身变化时，才需要重建 cache。

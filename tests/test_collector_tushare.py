@@ -11,11 +11,13 @@ from src.collector_tushare import (
     ADJ_FACTOR_API_FIELDS,
     DAILY_API_FIELDS,
     DAILY_BASIC_API_FIELDS,
+    DEFAULT_BENCHMARK_INDEXES,
     DIVIDEND_API_FIELDS,
     EndpointRateLimiter,
     EXPRESS_API_FIELDS,
     FINA_INDICATOR_API_FIELDS,
     FORECAST_API_FIELDS,
+    INDEX_DAILY_API_FIELDS,
     PRECHECK_WORKERS,
     STK_LIMIT_API_FIELDS,
     STOCK_BASIC_API_FIELDS,
@@ -28,10 +30,12 @@ from src.collector_tushare import (
     _fetch_express_chunk,
     _fetch_fina_indicator_chunk,
     _fetch_forecast_chunk,
+    _fetch_index_daily_chunk,
     _fetch_market_table_in_chunks,
     _normalize_symbol_event_frame,
     _fetch_stk_limit_chunk,
     fetch_stock_basic_by_status,
+    fetch_index_daily,
     build_backfill_exhaustion_lookup,
     build_aux_empty_lookup,
     build_processed_symbol_frame_from_raw,
@@ -46,6 +50,7 @@ from src.collector_tushare import (
     precheck_pending_symbols,
     precheck_stage_updates,
     run_tushare_update_pipeline,
+    refresh_tushare_benchmarks,
     resolve_all_symbols,
     resolve_effective_end_date,
     resolve_symbol_lifecycle_status,
@@ -186,6 +191,36 @@ def test_fetch_daily_basic_chunk_requests_explicit_full_fields(monkeypatch: pyte
     assert list(out.columns) == DAILY_BASIC_API_FIELDS
 
 
+def test_fetch_index_daily_normalizes_date_and_sorts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "src.collector_tushare._iter_market_date_chunks",
+        lambda start, end: [("20260330", "20260331")],
+    )
+    monkeypatch.setattr(
+        "src.collector_tushare._fetch_index_daily_chunk",
+        lambda ts_code, chunk_start, chunk_end: pd.DataFrame(
+            {
+                "ts_code": [ts_code, ts_code],
+                "trade_date": ["20260331", "20260330"],
+                "close": [101.0, 100.0],
+                "open": [100.5, 99.5],
+                "high": [101.5, 100.5],
+                "low": [100.0, 99.0],
+                "pre_close": [100.0, 99.0],
+                "change": [1.0, 1.0],
+                "pct_chg": [1.0, 1.01],
+                "vol": [10.0, 11.0],
+                "amount": [20.0, 21.0],
+            }
+        ),
+    )
+
+    out = fetch_index_daily("399300.SZ", "20260330", "20260331")
+
+    assert out["date"].dt.strftime("%Y-%m-%d").tolist() == ["2026-03-30", "2026-03-31"]
+    assert list(out.columns) == ["ts_code", "date", "close", "open", "high", "low", "pre_close", "change", "pct_chg", "vol", "amount"]
+
+
 def test_fetch_daily_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -202,6 +237,23 @@ def test_fetch_daily_chunk_requests_explicit_full_fields(monkeypatch: pytest.Mon
     assert list(out.columns) == ["ts_code", "trade_date", "open", "high", "low", "close", "pre_close", "change", "pct_chg", "volume", "amount"]
 
 
+def test_fetch_index_daily_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class DummyPro:
+        def index_daily(self, **kwargs):
+            captured.update(kwargs)
+            return pd.DataFrame(columns=INDEX_DAILY_API_FIELDS)
+
+    monkeypatch.setattr("src.collector_tushare.get_tushare_client", lambda: DummyPro())
+
+    out = _fetch_index_daily_chunk("399300.SZ", "20260330", "20260331")
+
+    assert captured["ts_code"] == "399300.SZ"
+    assert captured["fields"] == ",".join(INDEX_DAILY_API_FIELDS)
+    assert list(out.columns) == INDEX_DAILY_API_FIELDS
+
+
 def test_fetch_adj_factor_chunk_requests_explicit_full_fields(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
@@ -216,6 +268,37 @@ def test_fetch_adj_factor_chunk_requests_explicit_full_fields(monkeypatch: pytes
 
     assert captured["fields"] == ",".join(ADJ_FACTOR_API_FIELDS)
     assert list(out.columns) == ADJ_FACTOR_API_FIELDS
+
+
+def test_refresh_tushare_benchmarks_writes_default_index_files(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("src.collector_tushare.BENCHMARK_DIR", tmp_path)
+    monkeypatch.setattr(
+        "src.collector_tushare.fetch_index_daily",
+        lambda ts_code, start_date, end_date: pd.DataFrame(
+            {
+                "ts_code": [ts_code],
+                "date": [pd.Timestamp("2026-03-31")],
+                "close": [100.0],
+                "open": [99.0],
+                "high": [101.0],
+                "low": [98.0],
+                "pre_close": [99.0],
+                "change": [1.0],
+                "pct_chg": [1.01],
+                "vol": [10.0],
+                "amount": [20.0],
+            }
+        ),
+    )
+
+    outputs = refresh_tushare_benchmarks(pd.Timestamp("2026-03-31"))
+
+    assert len(outputs) == len(DEFAULT_BENCHMARK_INDEXES)
+    for output in outputs:
+        assert output.exists()
 
 
 def test_fetch_stk_limit_chunk_requests_pre_close(monkeypatch: pytest.MonkeyPatch) -> None:

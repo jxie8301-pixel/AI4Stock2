@@ -53,6 +53,12 @@ SUMMARY_FIELDS = [
     "signal_icir",
     "signal_rank_ic_mean",
     "signal_rank_icir",
+    "benchmark_name",
+    "benchmark_annualized_return",
+    "excess_annualized_return",
+    "excess_information_ratio",
+    "monthly_win_rate",
+    "rebalance_win_rate",
     "portfolio_annualized_return",
     "portfolio_information_ratio",
     "portfolio_max_drawdown",
@@ -324,6 +330,22 @@ def flatten_metrics(signal_metrics: dict | None, portfolio_metrics: dict | None)
         "signal_icir": _safe_float(signal_metrics.get("ICIR")),
         "signal_rank_ic_mean": _safe_float(signal_metrics.get("Rank_IC_mean")),
         "signal_rank_icir": _safe_float(signal_metrics.get("Rank_ICIR")),
+        "benchmark_name": str(portfolio_metrics.get("benchmark_name") or ""),
+        "benchmark_annualized_return": _safe_float(
+            portfolio_metrics.get("benchmark_annualized_return", {}).get("risk")
+        ),
+        "excess_annualized_return": _safe_float(
+            portfolio_metrics.get("excess_annualized_return", {}).get("risk")
+        ),
+        "excess_information_ratio": _safe_float(
+            portfolio_metrics.get("excess_information_ratio", {}).get("risk")
+        ),
+        "monthly_win_rate": _safe_float(
+            portfolio_metrics.get("monthly_win_rate", {}).get("risk")
+        ),
+        "rebalance_win_rate": _safe_float(
+            portfolio_metrics.get("rebalance_win_rate", {}).get("risk")
+        ),
         "portfolio_annualized_return": _safe_float(
             portfolio_metrics.get("annualized_return", {}).get("risk")
         ),

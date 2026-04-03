@@ -19,6 +19,7 @@ from tqdm import tqdm
 TS_ROOT = Path("data/tushare")
 RAW_ROOT = TS_ROOT / "raw"
 RAW_META_DIR = RAW_ROOT / "meta"
+BENCHMARK_DIR = Path("data/benchmarks/tushare")
 RAW_DAILY_DIR = RAW_ROOT / "daily"
 RAW_DAILY_BASIC_DIR = RAW_ROOT / "daily_basic"
 RAW_ADJ_FACTOR_DIR = RAW_ROOT / "adj_factor"
@@ -69,6 +70,24 @@ STOCK_BASIC_API_FIELDS = [
 ]
 
 TRADE_CAL_API_FIELDS = ["exchange", "cal_date", "is_open", "pretrade_date"]
+INDEX_DAILY_API_FIELDS = [
+    "ts_code",
+    "trade_date",
+    "close",
+    "open",
+    "high",
+    "low",
+    "pre_close",
+    "change",
+    "pct_chg",
+    "vol",
+    "amount",
+]
+DEFAULT_BENCHMARK_INDEXES = {
+    "csi300": {"ts_code": "399300.SZ", "name": "CSI300"},
+    "csi500": {"ts_code": "000905.SH", "name": "CSI500"},
+    "zz1000": {"ts_code": "000852.SH", "name": "ZZ1000"},
+}
 
 DAILY_API_FIELDS = [
     "ts_code",
@@ -746,6 +765,57 @@ def resolve_latest_trading_date(target_end_date: pd.Timestamp) -> pd.Timestamp:
     if usable.empty:
         raise RuntimeError(f"no trading date found on or before {target_end_date.date()}")
     return usable["cal_date"].max().normalize()
+
+
+def _fetch_index_daily_chunk(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    pro = get_tushare_client()
+    frame = _ts_call(
+        "index_daily",
+        pro.index_daily,
+        ts_code=ts_code,
+        start_date=start_date,
+        end_date=end_date,
+        fields=",".join(INDEX_DAILY_API_FIELDS),
+    )
+    if frame is None:
+        return pd.DataFrame(columns=INDEX_DAILY_API_FIELDS)
+    return frame.reindex(columns=INDEX_DAILY_API_FIELDS)
+
+
+def fetch_index_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for chunk_start, chunk_end in _iter_market_date_chunks(start_date, end_date):
+        frame = _fetch_index_daily_chunk(ts_code, chunk_start, chunk_end)
+        if frame is None or frame.empty:
+            continue
+        frames.append(frame.reindex(columns=INDEX_DAILY_API_FIELDS))
+    if not frames:
+        return pd.DataFrame(columns=["ts_code", "date", "close", "open", "high", "low", "pre_close", "change", "pct_chg", "vol", "amount"])
+    merged = _concat_schema_preserving_frames(frames, ordered_columns=INDEX_DAILY_API_FIELDS)
+    merged = _normalize_symbol_date_frame(merged, "trade_date", "ts_code")
+    merged = merged.rename(columns={"trade_date": "date"})
+    return merged.reindex(
+        columns=["ts_code", "date", "close", "open", "high", "low", "pre_close", "change", "pct_chg", "vol", "amount"]
+    )
+
+
+def refresh_tushare_benchmarks(
+    target_end_date: pd.Timestamp,
+    benchmark_indexes: dict[str, dict[str, str]] | None = None,
+) -> list[Path]:
+    benchmark_indexes = benchmark_indexes or DEFAULT_BENCHMARK_INDEXES
+    BENCHMARK_DIR.mkdir(parents=True, exist_ok=True)
+    outputs: list[Path] = []
+    for benchmark_key, spec in benchmark_indexes.items():
+        ts_code = str(spec["ts_code"]).strip()
+        start_date = str(spec.get("start_date") or DEFAULT_START_DATE).replace("-", "")
+        end_date = pd.Timestamp(target_end_date).strftime("%Y%m%d")
+        frame = fetch_index_daily(ts_code, start_date, end_date)
+        path = BENCHMARK_DIR / f"{benchmark_key}.parquet"
+        save_optimized_parquet(frame, path)
+        outputs.append(path)
+        print(f"[*] Refreshed Tushare benchmark {benchmark_key}: rows={len(frame)} path={path}")
+    return outputs
 
 
 def list_local_symbols() -> list[str]:
@@ -2510,6 +2580,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Refresh Tushare symbol cache and exit.",
     )
+    parser.add_argument(
+        "--refresh-benchmarks",
+        action="store_true",
+        help="Refresh Tushare benchmark index files before other work.",
+    )
+    parser.add_argument(
+        "--refresh-benchmarks-only",
+        action="store_true",
+        help="Refresh Tushare benchmark index files and exit.",
+    )
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument(
         "--end-date",
@@ -2544,6 +2624,13 @@ def main() -> None:
     target_end_date = resolve_target_end_date(args.end_date)
     latest_trading_date = resolve_latest_trading_date(target_end_date)
     print(f"[*] Latest trading date on or before {target_end_date.date()}: {latest_trading_date.date()}")
+
+    if args.refresh_benchmarks_only:
+        refresh_tushare_benchmarks(latest_trading_date)
+        print("[+] Tushare benchmark refresh completed.")
+        return
+    if args.refresh_benchmarks:
+        refresh_tushare_benchmarks(latest_trading_date)
 
     symbols = parse_symbols_arg(args.symbols)
     if args.rebuild_processed:

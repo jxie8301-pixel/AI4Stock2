@@ -8,7 +8,14 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader, TensorDataset
 
-from src.evaluate import align_prediction_label_pairs, build_period_summary, compute_portfolio_metrics
+from src.evaluate import (
+    align_benchmark_to_report_index,
+    align_prediction_label_pairs,
+    build_benchmark_series,
+    build_rebalance_period_summary,
+    build_period_summary,
+    compute_portfolio_metrics,
+)
 from src.label_utils import sanitize_label_array, sanitize_label_series
 from src.model_config import get_lgbm_config
 from src.models.pure_lightgbm import (
@@ -212,6 +219,120 @@ class NativeModelMetricsTest(unittest.TestCase):
         )
         self.assertAlmostEqual(portfolio_metrics["daily_win_rate"]["risk"], 1.0, places=8)
         self.assertAlmostEqual(portfolio_metrics["monthly_win_rate"]["risk"], 1.0, places=8)
+
+    def test_build_benchmark_series_supports_close_file_input(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "csi300.csv"
+            pd.DataFrame(
+                {
+                    "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
+                    "close": [100.0, 110.0, 121.0],
+                }
+            ).to_csv(path, index=False)
+
+            benchmark, benchmark_name = build_benchmark_series(
+                pd.Series(dtype=float),
+                {
+                    "mode": "file",
+                    "path": str(path),
+                    "date_column": "date",
+                    "value_column": "close",
+                    "value_type": "close",
+                    "name": "CSI300",
+                },
+            )
+
+        self.assertEqual(benchmark_name, "CSI300")
+        self.assertTrue(np.isnan(float(benchmark.iloc[0])))
+        self.assertAlmostEqual(float(benchmark.iloc[1]), 0.10, places=8)
+        self.assertAlmostEqual(float(benchmark.iloc[2]), 0.10, places=8)
+
+    def test_build_benchmark_series_rejects_empty_file_payload(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "csi300.csv"
+            pd.DataFrame({"date": [], "close": []}).to_csv(path, index=False)
+
+            with self.assertRaisesRegex(ValueError, "returned no usable rows"):
+                build_benchmark_series(
+                    pd.Series(dtype=float),
+                    {
+                        "mode": "file",
+                        "path": str(path),
+                        "date_column": "date",
+                        "value_column": "close",
+                        "value_type": "close",
+                        "name": "CSI300",
+                    },
+                )
+
+    def test_align_benchmark_to_report_index_rejects_no_overlap(self):
+        benchmark = pd.Series(
+            [0.01, 0.02],
+            index=pd.to_datetime(["2020-01-02", "2020-01-03"]),
+            dtype=float,
+        )
+
+        with self.assertRaisesRegex(ValueError, "has no overlap with backtest period"):
+            align_benchmark_to_report_index(
+                benchmark,
+                pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                benchmark_name="CSI300",
+            )
+
+    def test_compute_portfolio_metrics_adds_benchmark_and_excess_fields(self):
+        report = pd.DataFrame(
+            {
+                "return": [0.02, 0.01],
+                "bench": [0.01, 0.00],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
+        )
+        report.attrs["benchmark_name"] = "CSI300"
+
+        portfolio_metrics, _ = compute_portfolio_metrics((report, None))
+
+        self.assertEqual(portfolio_metrics["benchmark_name"], "CSI300")
+        self.assertAlmostEqual(
+            portfolio_metrics["benchmark_annualized_return"]["risk"],
+            np.mean([0.01, 0.00]) * 242,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            portfolio_metrics["excess_annualized_return"]["risk"],
+            np.mean([0.01, 0.01]) * 242,
+            places=8,
+        )
+        self.assertIn("excess_information_ratio", portfolio_metrics)
+
+    def test_compute_portfolio_metrics_adds_rebalance_win_rate(self):
+        report = pd.DataFrame(
+            {
+                "return": [0.01, 0.01, -0.02, 0.0],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
+        )
+        report.attrs["rebalance_freq"] = 2
+
+        portfolio_metrics, _ = compute_portfolio_metrics((report, None))
+
+        self.assertAlmostEqual(portfolio_metrics["rebalance_win_rate"]["risk"], 0.5, places=8)
+
+    def test_build_rebalance_period_summary_groups_by_fixed_trading_windows(self):
+        report = pd.DataFrame(
+            {
+                "return": [0.10, -0.05, 0.02],
+                "turnover": [0.01, 0.03, 0.02],
+                "bench": [0.00, 0.00, 0.01],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+        )
+
+        summary = build_rebalance_period_summary(report, rebalance_freq=2)
+
+        self.assertEqual(summary["period"].tolist(), ["rebalance_001", "rebalance_002"])
+        self.assertAlmostEqual(summary.iloc[0]["return"], (1.10 * 0.95) - 1.0, places=8)
+        self.assertEqual(summary.iloc[0]["days"], 2)
+        self.assertEqual(summary.iloc[1]["days"], 1)
 
     def test_build_period_summary_includes_win_rate_and_turnover(self):
         report = pd.DataFrame(

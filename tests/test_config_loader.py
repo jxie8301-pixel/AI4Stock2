@@ -35,6 +35,8 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(cfg["label"]["signal_horizon"], 20)
         self.assertEqual(cfg["rolling"]["retrain_step"], 10)
         self.assertEqual(cfg["backtest"]["rebalance_freq"], 10)
+        self.assertEqual(cfg["backtest"]["benchmark"]["mode"], "file")
+        self.assertEqual(cfg["backtest"]["benchmark"]["name"], "CSI300")
 
     def test_load_config_supports_recent_lgbm_profile(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_recent_10x20x10")

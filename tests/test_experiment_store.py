@@ -101,6 +101,12 @@ class ExperimentStoreTest(unittest.TestCase):
                 results_dir=results_dir,
                 signal_metrics={"IC_mean": 0.12, "ICIR": 1.5, "Rank_IC_mean": 0.08, "Rank_ICIR": 1.2},
                 portfolio_metrics={
+                    "benchmark_name": "CSI300",
+                    "benchmark_annualized_return": {"risk": 0.08},
+                    "excess_annualized_return": {"risk": 0.17},
+                    "excess_information_ratio": {"risk": 0.9},
+                    "monthly_win_rate": {"risk": 0.6},
+                    "rebalance_win_rate": {"risk": 0.55},
                     "annualized_return": {"risk": 0.25},
                     "information_ratio": {"risk": 1.1},
                     "max_drawdown": {"risk": -0.15},
@@ -124,6 +130,11 @@ class ExperimentStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["data_source"], "tushare")
             self.assertEqual(rows[0]["run_tag"], "compare-a")
             self.assertEqual(rows[0]["signal_ic_mean"], "0.12")
+            self.assertEqual(rows[0]["benchmark_name"], "CSI300")
+            self.assertEqual(rows[0]["benchmark_annualized_return"], "0.08")
+            self.assertEqual(rows[0]["excess_annualized_return"], "0.17")
+            self.assertEqual(rows[0]["monthly_win_rate"], "0.6")
+            self.assertEqual(rows[0]["rebalance_win_rate"], "0.55")
             self.assertEqual(rows[0]["portfolio_annualized_return"], "0.25")
             self.assertEqual(rows[0]["weighting"], "rank")
             self.assertEqual(rows[0]["score_transform"], "zscore_clip")

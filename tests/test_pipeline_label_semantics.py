@@ -62,9 +62,9 @@ class PipelineLabelSemanticsTest(unittest.TestCase):
                 index=pd.to_datetime(["2024-01-04"]),
             )
 
-        def fake_benchmark(labels):
+        def fake_benchmark(labels, benchmark_cfg=None):
             captured["benchmark_labels"] = labels.sort_index()
-            return pd.Series([0.0], index=pd.to_datetime(["2024-01-04"]))
+            return pd.Series([0.0], index=pd.to_datetime(["2024-01-04"])), "Cross-Section Mean"
 
         cfg = {
             "features": {"lookback": 2},
@@ -120,7 +120,7 @@ class PipelineLabelSemanticsTest(unittest.TestCase):
                 ),
                 patch("src.evaluate.plot_ic_series", return_value=None),
                 patch("src.evaluate.compute_portfolio_metrics", side_effect=lambda portfolio_metric: ({}, portfolio_metric[0])),
-                patch("src.evaluate.build_cross_section_benchmark", side_effect=fake_benchmark),
+                patch("src.evaluate.build_benchmark_series", side_effect=fake_benchmark),
                 patch("src.evaluate.build_period_summary", return_value=pd.DataFrame()),
                 patch("src.evaluate.plot_cumulative_return", return_value=None),
                 patch("src.evaluate.plot_drawdown", return_value=None),

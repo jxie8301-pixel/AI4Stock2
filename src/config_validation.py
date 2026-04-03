@@ -110,6 +110,14 @@ TOP_LEVEL_SCHEMA = {
             "buy": None,
             "sell": None,
         },
+        "benchmark": {
+            "mode": None,
+            "path": None,
+            "date_column": None,
+            "value_column": None,
+            "value_type": None,
+            "name": None,
+        },
         "slippage": None,
         "min_cost": None,
         "account": None,
@@ -290,6 +298,31 @@ def validate_training_config(
     risk_degree = float(backtest_cfg.get("risk_degree", 0.0))
     if risk_degree <= 0 or risk_degree > 1:
         raise ValueError("backtest.risk_degree must be in (0, 1]")
+    benchmark_cfg = backtest_cfg.get("benchmark")
+    if benchmark_cfg is not None:
+        if not isinstance(benchmark_cfg, dict):
+            raise ValueError("backtest.benchmark must be a mapping when provided")
+        benchmark_mode = str(benchmark_cfg.get("mode", "cross_section_mean") or "cross_section_mean").strip().lower()
+        if benchmark_mode not in {"cross_section_mean", "file"}:
+            raise ValueError("backtest.benchmark.mode must be one of: cross_section_mean, file")
+        benchmark_cfg["mode"] = benchmark_mode
+        if benchmark_mode == "file":
+            benchmark_path = str(benchmark_cfg.get("path") or "").strip()
+            if not benchmark_path:
+                raise ValueError("backtest.benchmark.path must be non-empty when benchmark.mode == 'file'")
+            date_column = str(benchmark_cfg.get("date_column") or "date").strip()
+            value_column = str(benchmark_cfg.get("value_column") or "close").strip()
+            value_type = str(benchmark_cfg.get("value_type") or "close").strip().lower()
+            if not date_column:
+                raise ValueError("backtest.benchmark.date_column must be non-empty")
+            if not value_column:
+                raise ValueError("backtest.benchmark.value_column must be non-empty")
+            if value_type not in {"return", "close"}:
+                raise ValueError("backtest.benchmark.value_type must be one of: return, close")
+            benchmark_cfg["path"] = benchmark_path
+            benchmark_cfg["date_column"] = date_column
+            benchmark_cfg["value_column"] = value_column
+            benchmark_cfg["value_type"] = value_type
 
     time_cfg = cfg.get("time", {})
     train_start, train_end = _expect_split_dates(time_cfg.get("train"), "time.train")
@@ -333,6 +366,11 @@ def validate_training_config(
             universe_path = universe_dir / f"{universe}.txt"
             if not universe_path.exists():
                 raise ValueError(f"Universe file not found: {universe_path}")
+        benchmark_cfg = cfg.get("backtest", {}).get("benchmark")
+        if isinstance(benchmark_cfg, dict) and benchmark_cfg.get("mode") == "file":
+            benchmark_path = Path(str(benchmark_cfg.get("path")))
+            if not benchmark_path.exists():
+                raise ValueError(f"Benchmark file not found: {benchmark_path}")
 
     return cfg
 

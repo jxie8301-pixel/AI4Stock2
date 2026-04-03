@@ -93,9 +93,11 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     from torch.utils.data import DataLoader
     from src.models.pure_pytorch_lstm import NativeStockDataset, NativeLSTMTrainer
     from src.evaluate import (
+        align_benchmark_to_report_index,
         align_prediction_label_pairs,
+        build_benchmark_series,
+        build_rebalance_period_summary,
         build_period_summary,
-        build_cross_section_benchmark,
         compute_signal_metrics,
         print_metrics,
         plot_ic_series,
@@ -374,14 +376,22 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         min_score=cfg["strategy"].get("min_score"),
     )
     
-    # Rename for compatibility with plot functions
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
-    
+    bench_series, benchmark_name = build_benchmark_series(
+        backtest_label_series,
+        cfg.get("backtest", {}).get("benchmark"),
+    )
+    plot_report["bench"] = align_benchmark_to_report_index(
+        bench_series,
+        plot_report.index,
+        benchmark_name=benchmark_name,
+    ).to_numpy()
+    plot_report.attrs["benchmark_name"] = benchmark_name
+    plot_report.attrs["rebalance_freq"] = rebalance_freq
+
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
-    bench_series = build_cross_section_benchmark(backtest_label_series)
-    metric_report["bench"] = bench_series.reindex(metric_report.index).fillna(0.0).to_numpy()
     monthly_summary = build_period_summary(metric_report, freq="ME")
-    biweekly_summary = build_period_summary(metric_report, freq="2W-FRI")
+    rebalance_summary = build_rebalance_period_summary(metric_report, rebalance_freq)
     
     # Generate native-specific plots/reports
     plot_cumulative_return(metric_report, save_path=str(results_dir / "native_cumulative_return.png"))
@@ -390,7 +400,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     save_monthly_report(metric_report, save_path=str(results_dir / "native_monthly_report.csv"))
     metric_report.to_csv(results_dir / "native_daily_report.csv", index=True)
     save_period_summary(monthly_summary, results_dir / "native_monthly_summary.csv")
-    save_period_summary(biweekly_summary, results_dir / "native_biweekly_summary.csv")
+    save_period_summary(rebalance_summary, results_dir / "native_rebalance_summary.csv")
     print(f"Artifacts saved under: {results_dir}")
 
     _maybe_export_backtest_trace(
@@ -422,6 +432,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     )
     
     print_metrics(signal_metrics, portfolio_results, period_summary=monthly_summary, period_label="Monthly")
+    if not rebalance_summary.empty:
+        print_metrics({}, {}, period_summary=rebalance_summary, period_label=f"Rebalance ({rebalance_freq}d)")
     
     # JSON keys must be strings, convert any Timestamp keys (e.g. from monthly returns) to strings
     def sanitize_dict_keys(d):

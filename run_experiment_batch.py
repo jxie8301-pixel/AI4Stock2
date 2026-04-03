@@ -13,6 +13,7 @@ from src.override_utils import (
     build_override_tag,
     expand_sweep_grid,
     flatten_sweep_mapping,
+    parse_override_arg,
     parse_sweep_arg,
 )
 
@@ -37,6 +38,17 @@ def _build_parser() -> argparse.ArgumentParser:
         nargs="+",
         dest="sweep_overrides",
         help="Sweep override in key=[a,b,c] form. Quote it in zsh to avoid shell glob expansion.",
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        nargs="+",
+        dest="case_overrides",
+        help=(
+            "Explicit grouped overrides for one run. "
+            "Example: --case strategy.topk=5 strategy.n_drop=1 "
+            "--case strategy.topk=10 strategy.n_drop=2"
+        ),
     )
     parser.add_argument("--run-tag-prefix", help="Optional run-tag prefix added before per-run sweep suffix")
     parser.add_argument("--dry-run", action="store_true", help="Print expanded commands without executing them")
@@ -73,6 +85,18 @@ def _resolve_sweep_map(args: argparse.Namespace) -> dict[str, list[object]]:
     return sweep_map
 
 
+def _resolve_explicit_cases(args: argparse.Namespace) -> list[dict[str, object]]:
+    cases: list[dict[str, object]] = []
+    for group in args.case_overrides or []:
+        case: dict[str, object] = {}
+        for raw in group:
+            key, value = parse_override_arg(raw)
+            case[key] = value
+        if case:
+            cases.append(case)
+    return cases
+
+
 def _build_run_tag(prefix: str | None, overrides: dict[str, object]) -> str | None:
     suffix = build_override_tag(overrides)
     if prefix and suffix:
@@ -88,14 +112,24 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    sweep_map = _resolve_sweep_map(args)
-    runs = expand_sweep_grid(sweep_map)
+    explicit_cases = _resolve_explicit_cases(args)
+    if explicit_cases:
+        sweep_map: dict[str, list[object]] = {}
+        runs = explicit_cases
+    else:
+        sweep_map = _resolve_sweep_map(args)
+        runs = expand_sweep_grid(sweep_map)
     base_cmd = _build_base_command(args)
 
     print(f"[*] Batch pipeline: {args.pipeline}")
     print(f"[*] Base experiment profile: {args.experiment_profile}")
     print(f"[*] Expanded runs: {len(runs)}")
-    if sweep_map:
+    if explicit_cases:
+        print("[*] Explicit cases:")
+        for idx, case in enumerate(explicit_cases, start=1):
+            rendered = ", ".join(f"{key}={value}" for key, value in sorted(case.items()))
+            print(f"    case {idx}: {rendered}")
+    elif sweep_map:
         for key, values in sweep_map.items():
             print(f"    {key} -> {values}")
 

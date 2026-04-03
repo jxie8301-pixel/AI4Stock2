@@ -406,6 +406,30 @@ uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --topk 
 uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --load-models
 ```
 
+如果你只想复用 rolling 预测，不想重新训练也不想重新推理，可以显式保存 prediction bundle：
+```bash
+uv run python run_native_rolling.py \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --save-predictions
+```
+
+默认情况下，rolling 会在同一进程里把“训练/推理/回测”三段直接串起来，不会额外把预测写盘。
+只有显式加了 `--save-predictions`，才会把以下文件保存到当前 run 目录下的 `prediction_artifacts/`：
+- `final_predictions.parquet`
+- `signal_labels.parquet`
+- `backtest_labels.parquet`
+- `metadata.json`
+
+之后如果你只是想重扫策略参数，可以直接复用这组预测输入，跳过训练和推理：
+```bash
+uv run python run_native_rolling.py \
+  --experiment-profile core_v4_lgbm_default_10x20x10 \
+  --load-predictions-dir results/experiments/native/rolling/lgbm/<run_id>/prediction_artifacts \
+  --set strategy.topk=10 \
+  --set strategy.n_drop=2 \
+  --set strategy.weighting=rank
+```
+
 ## 4. 本地实验库 (Local Experiment Store)
 
 默认启用本地实验归档，根目录为 `results/experiments/`：

@@ -15,6 +15,8 @@ DEFAULT_SLIPPAGE = 0.0
 DEFAULT_TRANSACTION_COST = 0.001
 DEFAULT_WEIGHTING = "equal"
 SUPPORTED_WEIGHTING_MODES = ("equal", "rank", "score_softmax")
+DEFAULT_SCORE_TRANSFORM = "none"
+SUPPORTED_SCORE_TRANSFORMS = ("none", "rank_pct", "zscore_clip")
 
 
 def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
@@ -24,6 +26,11 @@ def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
 def _normalize_weighting_mode(weighting: str | None) -> str:
     mode = str(weighting or DEFAULT_WEIGHTING).strip().lower()
     return mode or DEFAULT_WEIGHTING
+
+
+def _normalize_score_transform(score_transform: str | None) -> str:
+    mode = str(score_transform or DEFAULT_SCORE_TRANSFORM).strip().lower()
+    return mode or DEFAULT_SCORE_TRANSFORM
 
 
 def _normalize_keep_top_n(keep_top_n: int | None, topk: int) -> int | None:
@@ -39,6 +46,41 @@ def _normalize_min_score(min_score: float | None) -> float | None:
     return float(min_score)
 
 
+def _transform_scores(
+    scores: pd.Series,
+    *,
+    score_transform: str,
+    zscore_clip: float,
+) -> pd.Series:
+    transformed = pd.to_numeric(scores, errors="coerce").astype(float)
+    mode = _normalize_score_transform(score_transform)
+
+    if transformed.empty or mode == "none":
+        return transformed
+    if mode == "rank_pct":
+        out = transformed.rank(method="average", pct=True)
+        out[transformed.isna()] = np.nan
+        return out.astype(float)
+    if mode == "zscore_clip":
+        finite = transformed.dropna()
+        if finite.empty:
+            return transformed
+        std = float(finite.std(ddof=0))
+        if np.isfinite(std) and not np.isclose(std, 0.0):
+            out = (transformed - float(finite.mean())) / std
+        else:
+            out = pd.Series(0.0, index=transformed.index, dtype=float)
+            out[transformed.isna()] = np.nan
+            return out
+        clip_value = max(float(zscore_clip), 0.0)
+        if clip_value > 0:
+            out = out.clip(lower=-clip_value, upper=clip_value)
+        return out.astype(float)
+    raise ValueError(
+        f"Unsupported score transform: {score_transform}. Supported: {', '.join(SUPPORTED_SCORE_TRANSFORMS)}"
+    )
+
+
 def _select_topk_dropout_trades(
     scores: pd.Series,
     current_holdings: list[str],
@@ -47,9 +89,11 @@ def _select_topk_dropout_trades(
     locked_holdings: set[str] | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
+    score_transform: str = DEFAULT_SCORE_TRANSFORM,
+    zscore_clip: float = 3.0,
 ) -> tuple[list[str], list[str]]:
     """Mirror Qlib TopkDropoutStrategy's sell/buy selection."""
-    raw_scores = pd.to_numeric(scores, errors="coerce")
+    raw_scores = _transform_scores(scores, score_transform=score_transform, zscore_clip=zscore_clip)
     ranked_scores = raw_scores.dropna().sort_values(ascending=False)
     min_score_value = _normalize_min_score(min_score)
     eligible_scores = ranked_scores if min_score_value is None else ranked_scores[ranked_scores > min_score_value]
@@ -173,13 +217,16 @@ def _compute_target_weights(
     *,
     weighting: str,
     max_weight: float | None,
+    score_transform: str,
+    zscore_clip: float,
 ) -> pd.Series:
     target_index = pd.Index(_ordered_unique_symbols(target_holdings), dtype=object)
     if target_index.empty:
         return pd.Series(dtype=float)
 
     mode = _normalize_weighting_mode(weighting)
-    target_scores = pd.to_numeric(scores.reindex(target_index), errors="coerce").astype(float)
+    transformed_scores = _transform_scores(scores, score_transform=score_transform, zscore_clip=zscore_clip)
+    target_scores = transformed_scores.reindex(target_index).astype(float)
     if target_scores.notna().any():
         fill_value = float(target_scores.min(skipna=True)) - 1.0
         target_scores = target_scores.fillna(fill_value)
@@ -220,6 +267,8 @@ def run_native_backtest(
     slippage: float = DEFAULT_SLIPPAGE,
     rebalance_freq: int = 1,
     weighting: str = DEFAULT_WEIGHTING,
+    score_transform: str = DEFAULT_SCORE_TRANSFORM,
+    score_zscore_clip: float = 3.0,
     max_weight: float | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
@@ -236,8 +285,10 @@ def run_native_backtest(
     topk = max(1, int(topk))
     n_drop = max(0, int(n_drop))
     weighting = _normalize_weighting_mode(weighting)
+    score_transform = _normalize_score_transform(score_transform)
     keep_top_n = _normalize_keep_top_n(keep_top_n, topk)
     min_score = _normalize_min_score(min_score)
+    score_zscore_clip = max(float(score_zscore_clip), 0.0)
     open_rate = float(cost_buy) + float(slippage)
     close_rate = float(cost_sell) + float(slippage)
 
@@ -290,6 +341,8 @@ def run_native_backtest(
                 locked_holdings=locked_holdings,
                 keep_top_n=keep_top_n,
                 min_score=min_score,
+                score_transform=score_transform,
+                zscore_clip=score_zscore_clip,
             )
             trade_sell_list: list[str] = []
             trade_buy_list: list[str] = []
@@ -309,7 +362,11 @@ def run_native_backtest(
             if min_score is None:
                 eligible_current_holdings = tradable_holdings
             else:
-                day_scores = pd.to_numeric(pred_matrix.loc[date], errors="coerce")
+                day_scores = _transform_scores(
+                    pred_matrix.loc[date],
+                    score_transform=score_transform,
+                    zscore_clip=score_zscore_clip,
+                )
                 eligible_current_holdings = [
                     stock
                     for stock in tradable_holdings
@@ -321,6 +378,8 @@ def run_native_backtest(
                 target_holdings,
                 weighting=weighting,
                 max_weight=max_weight,
+                score_transform=score_transform,
+                zscore_clip=score_zscore_clip,
             )
             locked_value = float(sum(holdings.get(stock, 0.0) for stock in locked_holdings))
             tradable_budget = max(start_value * float(risk_degree) - locked_value, 0.0)
@@ -426,6 +485,8 @@ def run_native_backtest(
                     "trade_sell_list": list(trade_sell_list),
                     "trade_buy_list": list(trade_buy_list),
                     "weighting": weighting,
+                    "score_transform": score_transform,
+                    "score_zscore_clip": score_zscore_clip,
                     "keep_top_n": keep_top_n,
                     "min_score": min_score,
                     "target_weights": {stock: float(value) for stock, value in target_weights.items()},

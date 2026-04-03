@@ -6,6 +6,7 @@ import pandas as pd
 from src.label_utils import sanitize_label_series
 
 DEFAULT_WEIGHTING = "equal"
+DEFAULT_SCORE_TRANSFORM = "none"
 
 
 def _select_topk_dropout_trades_reference(
@@ -78,6 +79,44 @@ def _normalize_min_score_reference(min_score: float | None) -> float | None:
     return float(min_score)
 
 
+def _normalize_score_transform_reference(score_transform: str | None) -> str:
+    mode = str(score_transform or DEFAULT_SCORE_TRANSFORM).strip().lower()
+    return mode or DEFAULT_SCORE_TRANSFORM
+
+
+def _transform_scores_reference(
+    scores: pd.Series,
+    *,
+    score_transform: str,
+    zscore_clip: float,
+) -> pd.Series:
+    transformed = pd.to_numeric(scores, errors="coerce").astype(float)
+    mode = _normalize_score_transform_reference(score_transform)
+
+    if transformed.empty or mode == "none":
+        return transformed
+    if mode == "rank_pct":
+        out = transformed.rank(method="average", pct=True)
+        out[transformed.isna()] = np.nan
+        return out.astype(float)
+    if mode == "zscore_clip":
+        finite = transformed.dropna()
+        if finite.empty:
+            return transformed
+        std = float(finite.std(ddof=0))
+        if np.isfinite(std) and not np.isclose(std, 0.0):
+            out = (transformed - float(finite.mean())) / std
+        else:
+            out = pd.Series(0.0, index=transformed.index, dtype=float)
+            out[transformed.isna()] = np.nan
+            return out
+        clip_value = max(float(zscore_clip), 0.0)
+        if clip_value > 0:
+            out = out.clip(lower=-clip_value, upper=clip_value)
+        return out.astype(float)
+    raise ValueError(f"Unsupported score transform: {score_transform}")
+
+
 def _ordered_unique_symbols_reference(symbols: list[str]) -> list[str]:
     return list(dict.fromkeys(str(symbol) for symbol in symbols))
 
@@ -123,12 +162,15 @@ def _compute_target_weights_reference(
     *,
     weighting: str,
     max_weight: float | None,
+    score_transform: str,
+    zscore_clip: float,
 ) -> pd.Series:
     target_index = pd.Index(_ordered_unique_symbols_reference(target_holdings), dtype=object)
     if target_index.empty:
         return pd.Series(dtype=float)
 
-    target_scores = pd.to_numeric(scores.reindex(target_index), errors="coerce").astype(float)
+    transformed_scores = _transform_scores_reference(scores, score_transform=score_transform, zscore_clip=zscore_clip)
+    target_scores = transformed_scores.reindex(target_index).astype(float)
     if target_scores.notna().any():
         fill_value = float(target_scores.min(skipna=True)) - 1.0
         target_scores = target_scores.fillna(fill_value)
@@ -164,8 +206,10 @@ def _select_trades_with_overrides_reference(
     locked_holdings: set[str] | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
+    score_transform: str = DEFAULT_SCORE_TRANSFORM,
+    zscore_clip: float = 3.0,
 ) -> tuple[list[str], list[str]]:
-    raw_scores = pd.to_numeric(scores, errors="coerce")
+    raw_scores = _transform_scores_reference(scores, score_transform=score_transform, zscore_clip=zscore_clip)
     ranked_scores = raw_scores.dropna().sort_values(ascending=False)
     min_score_value = _normalize_min_score_reference(min_score)
     eligible_scores = ranked_scores if min_score_value is None else ranked_scores[ranked_scores > min_score_value]
@@ -227,6 +271,8 @@ def run_reference_backtest(
     slippage: float = 0.0005,
     rebalance_freq: int = 1,
     weighting: str = DEFAULT_WEIGHTING,
+    score_transform: str = DEFAULT_SCORE_TRANSFORM,
+    score_zscore_clip: float = 3.0,
     max_weight: float | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
@@ -277,6 +323,8 @@ def run_reference_backtest(
                 locked_holdings=locked_holdings,
                 keep_top_n=keep_top_n,
                 min_score=min_score,
+                score_transform=score_transform,
+                zscore_clip=score_zscore_clip,
             )
 
             for stock in sell_list:
@@ -293,7 +341,11 @@ def run_reference_backtest(
             if min_score is None:
                 eligible_current_holdings = tradable_holdings
             else:
-                day_scores = pd.to_numeric(pred_matrix.loc[date], errors="coerce")
+                day_scores = _transform_scores_reference(
+                    pred_matrix.loc[date],
+                    score_transform=score_transform,
+                    zscore_clip=score_zscore_clip,
+                )
                 eligible_current_holdings = [
                     stock
                     for stock in tradable_holdings
@@ -305,6 +357,8 @@ def run_reference_backtest(
                 target_holdings,
                 weighting=weighting,
                 max_weight=max_weight,
+                score_transform=score_transform,
+                zscore_clip=score_zscore_clip,
             )
             locked_value = float(sum(holdings.get(stock, 0.0) for stock in locked_holdings))
             tradable_budget = max(start_value * float(risk_degree) - locked_value, 0.0)

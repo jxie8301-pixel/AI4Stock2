@@ -39,6 +39,13 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "strategy.weighting must be one of"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_rejects_unknown_score_transform(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["strategy"]["score_transform"] = "demo"
+
+        with self.assertRaisesRegex(ValueError, "strategy.score_transform must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_invalid_max_weight(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["strategy"]["max_weight"] = 1.5
@@ -51,6 +58,13 @@ class ConfigValidationTest(unittest.TestCase):
         cfg["strategy"]["keep_top_n"] = 10
 
         with self.assertRaisesRegex(ValueError, "strategy.keep_top_n must be >="):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_nonpositive_score_zscore_clip(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["strategy"]["score_zscore_clip"] = 0
+
+        with self.assertRaisesRegex(ValueError, "strategy.score_zscore_clip must be > 0"):
             validate_training_config(cfg, check_paths=False)
 
     def test_validate_training_config_rejects_excessive_ranking_bins(self):

@@ -1,6 +1,7 @@
 """AI4Stock2 native quantitative investment pipeline."""
 
 import argparse
+import inspect
 import json
 import pickle
 from pathlib import Path
@@ -173,13 +174,18 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             model = _load_native_model(model_name, args.load_model, model)
             print("Skipping training.")
         else:
+            fit_signature = inspect.signature(model.fit)
+            fit_kwargs = {}
+            if "train_dates" in fit_signature.parameters:
+                fit_kwargs["train_dates"] = train_dates
+            if "valid_dates" in fit_signature.parameters:
+                fit_kwargs["valid_dates"] = valid_dates
             model.fit(
                 X_train_df,
                 y_train_series,
                 X_valid_df,
                 y_valid_series,
-                train_dates=train_dates,
-                valid_dates=valid_dates,
+                **fit_kwargs,
             )
             if args.save_model:
                 _save_native_model(model_name, model, args.save_model)
@@ -339,6 +345,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         f"topk={cfg['strategy']['topk']}, "
         f"n_drop={cfg['strategy']['n_drop']}, "
         f"weighting={cfg['strategy'].get('weighting', 'equal')}, "
+        f"score_transform={cfg['strategy'].get('score_transform', 'none')}, "
+        f"score_zscore_clip={cfg['strategy'].get('score_zscore_clip', 3.0)}, "
         f"max_weight={cfg['strategy'].get('max_weight', 'none')}, "
         f"keep_top_n={cfg['strategy'].get('keep_top_n', 'none')}, "
         f"min_score={cfg['strategy'].get('min_score', 'none')}, "
@@ -359,6 +367,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         slippage=cfg["backtest"].get("slippage", 0.0),
         rebalance_freq=rebalance_freq,
         weighting=cfg["strategy"].get("weighting", "equal"),
+        score_transform=cfg["strategy"].get("score_transform", "none"),
+        score_zscore_clip=cfg["strategy"].get("score_zscore_clip", 3.0),
         max_weight=cfg["strategy"].get("max_weight"),
         keep_top_n=cfg["strategy"].get("keep_top_n"),
         min_score=cfg["strategy"].get("min_score"),
@@ -401,6 +411,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             slippage=cfg["backtest"].get("slippage", 0.0),
             rebalance_freq=rebalance_freq,
             weighting=cfg["strategy"].get("weighting", "equal"),
+            score_transform=cfg["strategy"].get("score_transform", "none"),
+            score_zscore_clip=cfg["strategy"].get("score_zscore_clip", 3.0),
             max_weight=cfg["strategy"].get("max_weight"),
             keep_top_n=cfg["strategy"].get("keep_top_n"),
             min_score=cfg["strategy"].get("min_score"),

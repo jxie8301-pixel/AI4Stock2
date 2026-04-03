@@ -98,6 +98,8 @@ TOP_LEVEL_SCHEMA = {
         "topk": None,
         "n_drop": None,
         "weighting": None,
+        "score_transform": None,
+        "score_zscore_clip": None,
         "max_weight": None,
         "keep_top_n": None,
         "min_score": None,
@@ -250,6 +252,15 @@ def validate_training_config(
     if weighting not in {"equal", "rank", "score_softmax"}:
         raise ValueError("strategy.weighting must be one of: equal, rank, score_softmax")
     strategy_cfg["weighting"] = weighting
+    score_transform = str(strategy_cfg.get("score_transform", "none") or "none").strip().lower()
+    if score_transform not in {"none", "rank_pct", "zscore_clip"}:
+        raise ValueError("strategy.score_transform must be one of: none, rank_pct, zscore_clip")
+    strategy_cfg["score_transform"] = score_transform
+    score_zscore_clip = strategy_cfg.get("score_zscore_clip", 3.0)
+    score_zscore_clip = float(score_zscore_clip)
+    if score_zscore_clip <= 0:
+        raise ValueError("strategy.score_zscore_clip must be > 0")
+    strategy_cfg["score_zscore_clip"] = score_zscore_clip
     max_weight = strategy_cfg.get("max_weight")
     if max_weight is not None:
         max_weight = float(max_weight)

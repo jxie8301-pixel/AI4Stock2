@@ -24,6 +24,8 @@ class ExperimentStoreTest(unittest.TestCase):
                 "topk": 30,
                 "n_drop": 5,
                 "weighting": "rank",
+                "score_transform": "zscore_clip",
+                "score_zscore_clip": 2.5,
                 "max_weight": 0.2,
                 "keep_top_n": 50,
                 "min_score": 0.0,
@@ -124,6 +126,8 @@ class ExperimentStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["signal_ic_mean"], "0.12")
             self.assertEqual(rows[0]["portfolio_annualized_return"], "0.25")
             self.assertEqual(rows[0]["weighting"], "rank")
+            self.assertEqual(rows[0]["score_transform"], "zscore_clip")
+            self.assertEqual(rows[0]["score_zscore_clip"], "2.5")
             self.assertEqual(rows[0]["max_weight"], "0.2")
             self.assertEqual(rows[0]["keep_top_n"], "50")
             self.assertEqual(rows[0]["min_score"], "0.0")

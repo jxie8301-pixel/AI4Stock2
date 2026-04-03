@@ -32,6 +32,8 @@ SUMMARY_FIELDS = [
     "topk",
     "n_drop",
     "weighting",
+    "score_transform",
+    "score_zscore_clip",
     "max_weight",
     "keep_top_n",
     "min_score",
@@ -170,6 +172,7 @@ def prepare_run_store(
         f"top{cfg.get('strategy', {}).get('topk', 'na')}"
         f"_drop{cfg.get('strategy', {}).get('n_drop', 'na')}"
         f"_w{cfg.get('strategy', {}).get('weighting', 'equal')}"
+        f"_st{cfg.get('strategy', {}).get('score_transform', 'none')}"
         f"_keep{cfg.get('strategy', {}).get('keep_top_n', 'na')}"
         f"_mins{cfg.get('strategy', {}).get('min_score', 'na')}"
         f"_reb{resolve_rebalance_freq(cfg, args)}"
@@ -268,6 +271,8 @@ def finalize_run_store(
         "topk": cfg.get("strategy", {}).get("topk"),
         "n_drop": cfg.get("strategy", {}).get("n_drop"),
         "weighting": cfg.get("strategy", {}).get("weighting", "equal"),
+        "score_transform": cfg.get("strategy", {}).get("score_transform", "none"),
+        "score_zscore_clip": cfg.get("strategy", {}).get("score_zscore_clip", 3.0),
         "max_weight": cfg.get("strategy", {}).get("max_weight", ""),
         "keep_top_n": cfg.get("strategy", {}).get("keep_top_n", ""),
         "min_score": cfg.get("strategy", {}).get("min_score", ""),

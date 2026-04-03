@@ -279,6 +279,74 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertGreater(target_weights["A"], target_weights["B"])
         self.assertGreater(target_weights["B"], target_weights["C"])
 
+    def test_rank_pct_score_transform_changes_scale_but_preserves_softmax_order(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02"]),
+                ["A", "B", "C"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([10.0, 2.0, -1.0], index=index)
+        labels = pd.Series([0.0, 0.0, 0.0], index=index)
+
+        _, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=3,
+            n_drop=1,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            weighting="score_softmax",
+            score_transform="rank_pct",
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-02")},
+        )
+
+        weights = trace.iloc[0]["target_weights"]
+        self.assertEqual(trace.iloc[0]["score_transform"], "rank_pct")
+        self.assertGreater(weights["A"], weights["B"])
+        self.assertGreater(weights["B"], weights["C"])
+
+    def test_zscore_clip_score_transform_supports_positive_score_floor(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02"]),
+                ["A", "B", "C"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([10.0, 0.0, -10.0], index=index)
+        labels = pd.Series([0.0, 0.0, 0.0], index=index)
+
+        _, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=3,
+            n_drop=1,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            weighting="rank",
+            score_transform="zscore_clip",
+            score_zscore_clip=1.0,
+            min_score=0.0,
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-02")},
+        )
+
+        self.assertEqual(trace.iloc[0]["buy_list"], ["A"])
+        self.assertEqual(trace.iloc[0]["target_weights"], {"A": 1.0})
+
     def test_min_score_zero_liquidates_negative_score_holdings(self):
         index = pd.MultiIndex.from_product(
             [
@@ -303,6 +371,7 @@ class NativeBacktestTest(unittest.TestCase):
             slippage=0.0,
             rebalance_freq=1,
             min_score=0.0,
+            score_transform="none",
             return_trace=True,
             trace_dates={pd.Timestamp("2024-01-03")},
         )

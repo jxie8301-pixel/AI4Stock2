@@ -23,6 +23,8 @@ class ExperimentStoreTest(unittest.TestCase):
             "strategy": {
                 "topk": 30,
                 "n_drop": 5,
+                "weighting": "rank",
+                "max_weight": 0.2,
             },
             "backtest": {
                 "rebalance_freq": 3,
@@ -119,6 +121,8 @@ class ExperimentStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["run_tag"], "compare-a")
             self.assertEqual(rows[0]["signal_ic_mean"], "0.12")
             self.assertEqual(rows[0]["portfolio_annualized_return"], "0.25")
+            self.assertEqual(rows[0]["weighting"], "rank")
+            self.assertEqual(rows[0]["max_weight"], "0.2")
 
 
 if __name__ == "__main__":

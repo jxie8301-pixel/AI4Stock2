@@ -24,6 +24,8 @@ def run_backtest(
     risk_degree: float = DEFAULT_RISK_DEGREE,
     slippage: float = DEFAULT_SLIPPAGE,
     rebalance_freq: int = 1,
+    weighting: str = "equal",
+    max_weight: float | None = None,
     return_trace: bool = False,
     trace_dates: set[pd.Timestamp] | None = None,
 ) -> tuple[pd.DataFrame, None] | tuple[tuple[pd.DataFrame, None], pd.DataFrame]:
@@ -60,6 +62,8 @@ def run_backtest(
         risk_degree=risk_degree,
         slippage=slippage,
         rebalance_freq=rebalance_freq,
+        weighting=weighting,
+        max_weight=max_weight,
         return_trace=return_trace,
         trace_dates=trace_dates,
     )

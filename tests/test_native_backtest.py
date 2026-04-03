@@ -1,5 +1,6 @@
 import unittest
 
+import numpy as np
 import pandas as pd
 from pandas.testing import assert_frame_equal
 
@@ -8,6 +9,44 @@ from reference_backtest import run_reference_backtest
 
 
 class NativeBacktestTest(unittest.TestCase):
+    def test_equal_weighting_rebalances_existing_holdings_to_equal_targets(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0, 2.0, 1.0], index=index)
+        labels = pd.Series([0.1, -0.1, 0.0, 0.0], index=index)
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=2,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-03")},
+        )
+
+        self.assertEqual(report.index.tolist(), [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")])
+        self.assertEqual(trace.iloc[0]["weighting"], "equal")
+        self.assertEqual(trace.iloc[0]["sell_list"], [])
+        self.assertEqual(trace.iloc[0]["buy_list"], [])
+        self.assertEqual(trace.iloc[0]["trade_sell_list"], ["A"])
+        self.assertEqual(trace.iloc[0]["trade_buy_list"], ["B"])
+        self.assertAlmostEqual(trace.iloc[0]["target_weights"]["A"], 0.5, places=8)
+        self.assertAlmostEqual(trace.iloc[0]["target_weights"]["B"], 0.5, places=8)
+        self.assertAlmostEqual(trace.iloc[0]["holdings_after"]["A"], 500.0, places=8)
+        self.assertAlmostEqual(trace.iloc[0]["holdings_after"]["B"], 500.0, places=8)
+
     def test_n_drop_only_replaces_limited_positions(self):
         index = pd.MultiIndex.from_product(
             [
@@ -162,12 +201,83 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(trace.index.tolist(), [pd.Timestamp("2024-01-03")])
         self.assertEqual(trace.iloc[0]["sell_list"], ["A"])
         self.assertEqual(trace.iloc[0]["buy_list"], ["B"])
+        self.assertEqual(trace.iloc[0]["trade_sell_list"], ["A"])
+        self.assertEqual(trace.iloc[0]["trade_buy_list"], ["B"])
         self.assertEqual(trace.iloc[0]["holdings_before"], {"A": 1100.0})
         self.assertEqual(trace.iloc[0]["holdings_after"], {"B": 1320.0})
         self.assertAlmostEqual(float(trace.iloc[0]["start_value"]), 1100.0, places=8)
         self.assertAlmostEqual(float(trace.iloc[0]["end_value"]), 1320.0, places=8)
         self.assertEqual(int(trace.iloc[0]["buy_count"]), 1)
         self.assertEqual(int(trace.iloc[0]["sell_count"]), 1)
+
+    def test_rank_weighting_allocates_more_capital_to_higher_rank(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0], index=index)
+        labels = pd.Series([0.0, 0.0], index=index)
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=2,
+            n_drop=1,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=900.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            weighting="rank",
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-02")},
+        )
+
+        self.assertEqual(report.index.tolist(), [pd.Timestamp("2024-01-02")])
+        self.assertAlmostEqual(trace.iloc[0]["target_weights"]["A"], 2.0 / 3.0, places=8)
+        self.assertAlmostEqual(trace.iloc[0]["target_weights"]["B"], 1.0 / 3.0, places=8)
+        self.assertAlmostEqual(trace.iloc[0]["holdings_after"]["A"], 600.0, places=8)
+        self.assertAlmostEqual(trace.iloc[0]["holdings_after"]["B"], 300.0, places=8)
+
+    def test_score_softmax_respects_max_weight_cap(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02"]),
+                ["A", "B", "C"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([10.0, 1.0, 0.0], index=index)
+        labels = pd.Series([0.0, 0.0, 0.0], index=index)
+
+        _, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=3,
+            n_drop=1,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            weighting="score_softmax",
+            max_weight=0.5,
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-02")},
+        )
+
+        target_weights = trace.iloc[0]["target_weights"]
+        self.assertLessEqual(target_weights["A"], 0.5 + 1e-12)
+        self.assertAlmostEqual(sum(target_weights.values()), 1.0, places=8)
+        self.assertGreater(target_weights["A"], target_weights["B"])
+        self.assertGreater(target_weights["B"], target_weights["C"])
 
     def test_reference_backtest_matches_native_report(self):
         index = pd.MultiIndex.from_product(

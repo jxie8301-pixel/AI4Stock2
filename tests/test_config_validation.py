@@ -32,6 +32,20 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "strategy.n_drop must be smaller than strategy.topk"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_rejects_unknown_weighting_mode(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["strategy"]["weighting"] = "demo"
+
+        with self.assertRaisesRegex(ValueError, "strategy.weighting must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_invalid_max_weight(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["strategy"]["max_weight"] = 1.5
+
+        with self.assertRaisesRegex(ValueError, "strategy.max_weight must be in"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_unknown_keys(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["unknown_knob"] = 1

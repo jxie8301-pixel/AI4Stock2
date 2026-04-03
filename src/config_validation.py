@@ -95,6 +95,8 @@ TOP_LEVEL_SCHEMA = {
     "strategy": {
         "topk": None,
         "n_drop": None,
+        "weighting": None,
+        "max_weight": None,
     },
     "backtest": {
         "rebalance_freq": None,
@@ -233,6 +235,16 @@ def validate_training_config(
     n_drop = _expect_nonnegative_int(strategy_cfg.get("n_drop"), "strategy.n_drop")
     if n_drop >= topk:
         raise ValueError("strategy.n_drop must be smaller than strategy.topk")
+    weighting = str(strategy_cfg.get("weighting", "equal") or "equal").strip().lower()
+    if weighting not in {"equal", "rank", "score_softmax"}:
+        raise ValueError("strategy.weighting must be one of: equal, rank, score_softmax")
+    strategy_cfg["weighting"] = weighting
+    max_weight = strategy_cfg.get("max_weight")
+    if max_weight is not None:
+        max_weight = float(max_weight)
+        if max_weight <= 0 or max_weight > 1:
+            raise ValueError("strategy.max_weight must be in (0, 1] when provided")
+        strategy_cfg["max_weight"] = max_weight
 
     backtest_cfg = cfg.get("backtest", {})
     _expect_positive_int(backtest_cfg.get("rebalance_freq"), "backtest.rebalance_freq")

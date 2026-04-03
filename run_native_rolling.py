@@ -387,6 +387,8 @@ def run_rolling_pipeline():
         "\n[Backtest] "
         f"topk={cfg['strategy']['topk']}, "
         f"n_drop={cfg['strategy']['n_drop']}, "
+        f"weighting={cfg['strategy'].get('weighting', 'equal')}, "
+        f"max_weight={cfg['strategy'].get('max_weight', 'none')}, "
         f"rebalance={rebalance_freq}d, "
         f"signal_label={signal_horizon}d, "
         "backtest_label=1d"
@@ -403,7 +405,9 @@ def run_rolling_pipeline():
         account=cfg["backtest"].get("account", 100_000_000),
         risk_degree=cfg["backtest"].get("risk_degree", 0.95),
         slippage=cfg["backtest"].get("slippage", 0.0),
-        rebalance_freq=rebalance_freq
+        rebalance_freq=rebalance_freq,
+        weighting=cfg["strategy"].get("weighting", "equal"),
+        max_weight=cfg["strategy"].get("max_weight"),
     )
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})

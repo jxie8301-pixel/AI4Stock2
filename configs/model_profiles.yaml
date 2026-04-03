@@ -10,5 +10,8 @@ profiles:
   lgbm_regularized:
     path: configs/models/lgbm_regularized.yaml
 
+  lgbm_ranker_default:
+    path: configs/models/lgbm_ranker_default.yaml
+
   lstm_baseline:
     path: configs/models/lstm_baseline.yaml

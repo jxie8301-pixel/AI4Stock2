@@ -43,6 +43,14 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(cfg["rolling"]["valid_days"], 20)
         self.assertEqual(cfg["lgbm"]["train_weight_half_life"], 60)
 
+    def test_resolve_ranker_model_profile(self):
+        profile = resolve_model_profile({"model": {"profile": "lgbm_ranker_default"}})
+
+        self.assertEqual(profile["name"], "lgbm_ranker_default")
+        self.assertTrue(profile["path"].endswith("configs/models/lgbm_ranker_default.yaml"))
+        self.assertEqual(profile["config"]["lgbm"]["loss"], "rank_xendcg")
+        self.assertEqual(profile["config"]["lgbm"]["ranking_num_bins"], 5)
+
     def test_load_config_requires_explicit_experiment_profile(self):
         with self.assertRaises(ValueError):
             load_config("configs/config.yaml")

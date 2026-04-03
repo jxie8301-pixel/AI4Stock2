@@ -11,8 +11,7 @@ import pandas as pd
 from src.evaluate import safe_cross_sectional_corr
 
 
-def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray):
-    labels = dataset.get_label()
+def _daily_ic_metric_from_labels(preds: np.ndarray, labels: np.ndarray, dates: np.ndarray):
     frame = pd.DataFrame(
         {
             "pred": np.asarray(preds, dtype=np.float32),
@@ -30,6 +29,10 @@ def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray)
     if daily_ic.empty:
         return "daily_ic", 0.0, True
     return "daily_ic", float(daily_ic.mean()), True
+
+
+def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray):
+    return _daily_ic_metric_from_labels(preds, dataset.get_label(), dates)
 
 
 def _compute_time_decay_weights(
@@ -52,6 +55,63 @@ def _compute_time_decay_weights(
     if not np.isfinite(mean_weight) or np.isclose(mean_weight, 0.0):
         return np.ones(len(dt), dtype=np.float32)
     return (weights / mean_weight).astype(np.float32, copy=False)
+
+
+def _sort_frame_by_dates(
+    X: pd.DataFrame,
+    y: pd.Series,
+    dates: np.ndarray | pd.Series,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    if len(X) != len(y) or len(X) != len(date_series):
+        raise ValueError("X, y, and dates must have the same length")
+    order = np.argsort(date_series.to_numpy(dtype="datetime64[ns]"), kind="stable")
+    return (
+        X.iloc[order].reset_index(drop=True),
+        y.iloc[order].reset_index(drop=True),
+        date_series.iloc[order].reset_index(drop=True),
+    )
+
+
+def _compute_ranking_groups(dates: np.ndarray | pd.Series) -> np.ndarray:
+    date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    if date_series.empty:
+        return np.array([], dtype=np.int32)
+    return date_series.groupby(date_series, sort=False).size().to_numpy(dtype=np.int32, copy=False)
+
+
+def _build_ranking_relevance_labels(
+    labels: np.ndarray | pd.Series,
+    dates: np.ndarray | pd.Series,
+    *,
+    num_bins: int,
+) -> np.ndarray:
+    """Convert raw returns into per-date integer relevance labels for LTR."""
+    num_bins = max(2, int(num_bins))
+    label_series = pd.Series(np.asarray(labels, dtype=np.float32)).reset_index(drop=True)
+    date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    if len(label_series) != len(date_series):
+        raise ValueError("labels and dates must have the same length")
+
+    relevance = np.zeros(len(label_series), dtype=np.int32)
+    if label_series.empty:
+        return relevance
+
+    for _, idx in date_series.groupby(date_series, sort=False).groups.items():
+        group_idx = np.asarray(idx, dtype=np.int64)
+        values = label_series.iloc[group_idx].to_numpy(dtype=np.float32, copy=False)
+        finite_mask = np.isfinite(values)
+        if finite_mask.sum() <= 1:
+            continue
+        finite_values = values[finite_mask]
+        if np.isclose(float(finite_values.max()), float(finite_values.min())):
+            continue
+        ranks = pd.Series(finite_values).rank(method="average", ascending=True).to_numpy(dtype=np.float32, copy=False)
+        group_rel = np.floor((ranks - 1.0) * num_bins / len(finite_values) + 1e-8).astype(np.int32)
+        group_rel = np.maximum(group_rel, 0)
+        group_rel = np.minimum(group_rel, num_bins - 1)
+        relevance[group_idx[finite_mask]] = group_rel
+    return relevance
 
 
 class NativeLGBM:
@@ -77,6 +137,7 @@ class NativeLGBM:
         alpha: float = 0.9,
         seed: int = 42,
         train_weight_half_life: float | None = None,
+        ranking_num_bins: int = 5,
         **kwargs
     ):
         # Map generic loss names to lightgbm specific objectives
@@ -91,10 +152,15 @@ class NativeLGBM:
         elif loss == "huber":
             objective = "huber"
             default_metric = "rmse"
+        elif loss in {"lambdarank", "rank_xendcg"}:
+            objective = loss
+            default_metric = "ndcg"
         else:
             default_metric = "l2"
 
         self.eval_metric = eval_metric or default_metric
+        self.is_ranking_objective = objective in {"lambdarank", "rank_xendcg"}
+        self.ranking_num_bins = max(2, int(ranking_num_bins))
         self.params = {
             "objective": objective,
             # Use a stable regression metric for early stopping. Daily IC remains
@@ -140,16 +206,36 @@ class NativeLGBM:
         """Fit the LightGBM model."""
         feature_names = X_train.columns.tolist()
         train_weight = None
+        train_group = None
+        train_label_values = y_train.to_numpy(dtype=np.float32, copy=False)
+        X_train_use = X_train
+        y_train_use = y_train
+        train_dates_use = None if train_dates is None else pd.to_datetime(pd.Series(train_dates)).reset_index(drop=True)
         if self.train_weight_half_life is not None:
-            if train_dates is None:
+            if train_dates_use is None:
                 raise ValueError("train_dates is required when train_weight_half_life is configured")
-            if len(train_dates) != len(X_train):
+            if len(train_dates_use) != len(X_train):
                 raise ValueError("train_dates length must match X_train rows")
-            train_weight = _compute_time_decay_weights(train_dates, self.train_weight_half_life)
+
+        if self.is_ranking_objective:
+            if train_dates is None:
+                raise ValueError("train_dates is required when using a ranking objective")
+            X_train_use, y_train_use, train_dates_use = _sort_frame_by_dates(X_train, y_train, train_dates)
+            train_label_values = _build_ranking_relevance_labels(
+                y_train_use.to_numpy(dtype=np.float32, copy=False),
+                train_dates_use,
+                num_bins=self.ranking_num_bins,
+            )
+            train_group = _compute_ranking_groups(train_dates_use)
+
+        if self.train_weight_half_life is not None:
+            train_weight = _compute_time_decay_weights(train_dates_use, self.train_weight_half_life)
+
         dtrain = lgb.Dataset(
-            X_train.values,
-            label=y_train.values,
+            X_train_use.values,
+            label=train_label_values,
             weight=train_weight,
+            group=train_group,
             feature_name=feature_names,
         )
         
@@ -157,12 +243,36 @@ class NativeLGBM:
         valid_names = ["train"]
         feval = None
         
+        valid_label_values = None
         if X_valid is not None and y_valid is not None:
-            dvalid = lgb.Dataset(X_valid.values, label=y_valid.values, reference=dtrain, feature_name=feature_names)
+            X_valid_use = X_valid
+            y_valid_use = y_valid
+            valid_dates_use = None if valid_dates is None else pd.to_datetime(pd.Series(valid_dates)).reset_index(drop=True)
+            valid_group = None
+            valid_label_values = y_valid.to_numpy(dtype=np.float32, copy=False)
+            if self.is_ranking_objective:
+                if valid_dates is None:
+                    raise ValueError("valid_dates is required when using a ranking objective with validation")
+                X_valid_use, y_valid_use, valid_dates_use = _sort_frame_by_dates(X_valid, y_valid, valid_dates)
+                valid_label_values = _build_ranking_relevance_labels(
+                    y_valid_use.to_numpy(dtype=np.float32, copy=False),
+                    valid_dates_use,
+                    num_bins=self.ranking_num_bins,
+                )
+                valid_group = _compute_ranking_groups(valid_dates_use)
+            dvalid = lgb.Dataset(
+                X_valid_use.values,
+                label=valid_label_values,
+                group=valid_group,
+                reference=dtrain,
+                feature_name=feature_names,
+            )
             valid_sets = [dvalid]
             valid_names = ["valid"]
             if valid_dates is not None:
-                feval = lambda preds, data: _daily_ic_metric(preds, data, valid_dates)
+                raw_valid_labels = y_valid_use.to_numpy(dtype=np.float32, copy=False) if self.is_ranking_objective else y_valid.to_numpy(dtype=np.float32, copy=False)
+                raw_valid_dates = valid_dates_use if self.is_ranking_objective else valid_dates
+                feval = lambda preds, data: _daily_ic_metric_from_labels(preds, raw_valid_labels, raw_valid_dates)
             
         evals_result: dict[str, dict[str, list[float]]] = {}
         callbacks = []

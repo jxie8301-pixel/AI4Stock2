@@ -11,7 +11,13 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.evaluate import align_prediction_label_pairs, build_period_summary, compute_portfolio_metrics
 from src.label_utils import sanitize_label_array, sanitize_label_series
 from src.model_config import get_lgbm_config
-from src.models.pure_lightgbm import NativeLGBM, _compute_time_decay_weights, _daily_ic_metric
+from src.models.pure_lightgbm import (
+    NativeLGBM,
+    _build_ranking_relevance_labels,
+    _compute_time_decay_weights,
+    _compute_ranking_groups,
+    _daily_ic_metric,
+)
 from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
 
 
@@ -47,12 +53,15 @@ class NativeModelMetricsTest(unittest.TestCase):
         mse_model = NativeLGBM(loss="mse")
         mae_model = NativeLGBM(loss="mae")
         huber_model = NativeLGBM(loss="huber")
+        rank_model = NativeLGBM(loss="rank_xendcg")
         custom_model = NativeLGBM(loss="mse", eval_metric="rmse")
 
         self.assertEqual(mse_model.params["metric"], "l2")
         self.assertEqual(mae_model.params["metric"], "l1")
         self.assertEqual(huber_model.params["metric"], "rmse")
         self.assertEqual(huber_model.params["objective"], "huber")
+        self.assertEqual(rank_model.params["metric"], "ndcg")
+        self.assertEqual(rank_model.params["objective"], "rank_xendcg")
         self.assertEqual(custom_model.params["metric"], "rmse")
 
     def test_native_lgbm_can_export_feature_importance_csv(self):
@@ -89,6 +98,38 @@ class NativeModelMetricsTest(unittest.TestCase):
         model.fit(X_train, y_train, train_dates=train_dates)
 
         self.assertIsNotNone(model.model)
+
+    def test_build_ranking_relevance_labels_is_cross_sectional(self):
+        labels = np.array([0.10, 0.00, -0.10, 0.20, 0.10, 0.00], dtype=np.float32)
+        dates = pd.to_datetime(
+            [
+                "2024-01-02",
+                "2024-01-02",
+                "2024-01-02",
+                "2024-01-03",
+                "2024-01-03",
+                "2024-01-03",
+            ]
+        )
+
+        rel = _build_ranking_relevance_labels(labels, dates, num_bins=3)
+        groups = _compute_ranking_groups(dates)
+
+        self.assertEqual(groups.tolist(), [3, 3])
+        self.assertEqual(rel.tolist()[:3], [2, 1, 0])
+        self.assertEqual(rel.tolist()[3:], [2, 1, 0])
+
+    def test_native_lgbm_accepts_ranking_objective(self):
+        model = NativeLGBM(loss="rank_xendcg", early_stop=0, num_threads=1, ranking_num_bins=3)
+        X_train = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [1.0, 1.0, 0.0, 0.0]})
+        y_train = pd.Series([0.0, 0.1, 0.3, 0.2])
+        train_dates = pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02"])
+
+        model.fit(X_train, y_train, train_dates=train_dates)
+
+        self.assertIsNotNone(model.model)
+        preds = model.predict(X_train)
+        self.assertEqual(preds.shape[0], len(X_train))
 
     def test_get_lgbm_config_uses_dedicated_block(self):
         cfg = {

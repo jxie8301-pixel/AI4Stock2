@@ -53,6 +53,14 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "strategy.keep_top_n must be >="):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_rejects_excessive_ranking_bins(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["lgbm"]["loss"] = "rank_xendcg"
+        cfg["lgbm"]["ranking_num_bins"] = 32
+
+        with self.assertRaisesRegex(ValueError, "lgbm.ranking_num_bins must be <= 31"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_nonpositive_train_weight_half_life(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg.setdefault("lgbm", {})

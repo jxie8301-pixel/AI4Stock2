@@ -69,6 +69,7 @@ TOP_LEVEL_SCHEMA = {
         "early_stop": None,
         "early_stopping_min_delta": None,
         "train_weight_half_life": None,
+        "ranking_num_bins": None,
         "log_evaluation_period": None,
         "colsample_bytree": None,
         "subsample": None,
@@ -296,6 +297,11 @@ def validate_training_config(
         train_weight_half_life = lgbm_cfg.get("train_weight_half_life")
         if train_weight_half_life is not None:
             _expect_positive_float(train_weight_half_life, "lgbm.train_weight_half_life")
+        ranking_num_bins = lgbm_cfg.get("ranking_num_bins")
+        if ranking_num_bins is not None:
+            ranking_num_bins = _expect_positive_int(ranking_num_bins, "lgbm.ranking_num_bins")
+            if ranking_num_bins > 31:
+                raise ValueError("lgbm.ranking_num_bins must be <= 31")
         _expect_positive_int(lgbm_cfg.get("log_evaluation_period"), "lgbm.log_evaluation_period")
         _expect_positive_int(lgbm_cfg.get("num_threads"), "lgbm.num_threads")
         _expect_positive_int(lgbm_cfg.get("num_leaves"), "lgbm.num_leaves")

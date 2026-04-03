@@ -32,6 +32,28 @@ def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray)
     return "daily_ic", float(daily_ic.mean()), True
 
 
+def _compute_time_decay_weights(
+    dates: np.ndarray | pd.Series,
+    half_life: float,
+) -> np.ndarray:
+    """Return exponential time-decay weights normalized to mean 1."""
+    half_life = float(half_life)
+    if half_life <= 0:
+        raise ValueError("half_life must be > 0")
+
+    dt = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    if dt.empty:
+        return np.array([], dtype=np.float32)
+
+    latest = dt.max()
+    age_days = (latest - dt).dt.days.clip(lower=0).to_numpy(dtype=np.float64, copy=False)
+    weights = np.power(0.5, age_days / half_life)
+    mean_weight = float(weights.mean()) if weights.size > 0 else 1.0
+    if not np.isfinite(mean_weight) or np.isclose(mean_weight, 0.0):
+        return np.ones(len(dt), dtype=np.float32)
+    return (weights / mean_weight).astype(np.float32, copy=False)
+
+
 class NativeLGBM:
     """Native LightGBM wrapper mimicking the interface expected by our pipeline."""
 
@@ -54,6 +76,7 @@ class NativeLGBM:
         log_evaluation_period: int = 50,
         alpha: float = 0.9,
         seed: int = 42,
+        train_weight_half_life: float | None = None,
         **kwargs
     ):
         # Map generic loss names to lightgbm specific objectives
@@ -97,6 +120,9 @@ class NativeLGBM:
         self.num_boost_round = int(num_boost_round)
         self.early_stopping_min_delta = float(early_stopping_min_delta)
         self.log_evaluation_period = int(log_evaluation_period)
+        self.train_weight_half_life = (
+            None if train_weight_half_life is None else float(train_weight_half_life)
+        )
         self.model = None
         self.evals_result_: dict[str, dict[str, list[float]]] = {}
         self.best_iteration_: int | None = None
@@ -108,11 +134,24 @@ class NativeLGBM:
         y_train: pd.Series,
         X_valid: pd.DataFrame = None,
         y_valid: pd.Series = None,
+        train_dates: np.ndarray | pd.Series | None = None,
         valid_dates: np.ndarray | None = None,
     ):
         """Fit the LightGBM model."""
         feature_names = X_train.columns.tolist()
-        dtrain = lgb.Dataset(X_train.values, label=y_train.values, feature_name=feature_names)
+        train_weight = None
+        if self.train_weight_half_life is not None:
+            if train_dates is None:
+                raise ValueError("train_dates is required when train_weight_half_life is configured")
+            if len(train_dates) != len(X_train):
+                raise ValueError("train_dates length must match X_train rows")
+            train_weight = _compute_time_decay_weights(train_dates, self.train_weight_half_life)
+        dtrain = lgb.Dataset(
+            X_train.values,
+            label=y_train.values,
+            weight=train_weight,
+            feature_name=feature_names,
+        )
         
         valid_sets = [dtrain]
         valid_names = ["train"]

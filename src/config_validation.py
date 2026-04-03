@@ -68,6 +68,7 @@ TOP_LEVEL_SCHEMA = {
         "num_boost_round": None,
         "early_stop": None,
         "early_stopping_min_delta": None,
+        "train_weight_half_life": None,
         "log_evaluation_period": None,
         "colsample_bytree": None,
         "subsample": None,
@@ -163,6 +164,13 @@ def _expect_nonnegative_float(value: Any, field: str) -> float:
         raise ValueError(f"{field} must be numeric") from exc
     if out < 0:
         raise ValueError(f"{field} must be >= 0")
+    return out
+
+
+def _expect_positive_float(value: Any, field: str) -> float:
+    out = _expect_nonnegative_float(value, field)
+    if out <= 0:
+        raise ValueError(f"{field} must be > 0")
     return out
 
 
@@ -285,6 +293,9 @@ def validate_training_config(
         _expect_positive_int(lgbm_cfg.get("num_boost_round"), "lgbm.num_boost_round")
         _expect_nonnegative_int(lgbm_cfg.get("early_stop"), "lgbm.early_stop")
         _expect_nonnegative_float(lgbm_cfg.get("early_stopping_min_delta", 0.0), "lgbm.early_stopping_min_delta")
+        train_weight_half_life = lgbm_cfg.get("train_weight_half_life")
+        if train_weight_half_life is not None:
+            _expect_positive_float(train_weight_half_life, "lgbm.train_weight_half_life")
         _expect_positive_int(lgbm_cfg.get("log_evaluation_period"), "lgbm.log_evaluation_period")
         _expect_positive_int(lgbm_cfg.get("num_threads"), "lgbm.num_threads")
         _expect_positive_int(lgbm_cfg.get("num_leaves"), "lgbm.num_leaves")

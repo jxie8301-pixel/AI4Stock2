@@ -53,6 +53,14 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "strategy.keep_top_n must be >="):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_rejects_nonpositive_train_weight_half_life(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["train_weight_half_life"] = 0
+
+        with self.assertRaisesRegex(ValueError, "lgbm.train_weight_half_life must be > 0"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_unknown_keys(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["unknown_knob"] = 1

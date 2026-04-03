@@ -204,7 +204,14 @@ def run_rolling_pipeline():
                 loaded_model = True
             else:
                 print("    Training LightGBM...")
-                model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
+                model.fit(
+                    X_train_df,
+                    y_train_series,
+                    X_valid_df,
+                    y_valid_series,
+                    train_dates=train_dates,
+                    valid_dates=valid_dates,
+                )
                 if args.save_models:
                     with open(model_path, "wb") as f:
                         pickle.dump(model, f)

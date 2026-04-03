@@ -173,7 +173,14 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             model = _load_native_model(model_name, args.load_model, model)
             print("Skipping training.")
         else:
-            model.fit(X_train_df, y_train_series, X_valid_df, y_valid_series, valid_dates=valid_dates)
+            model.fit(
+                X_train_df,
+                y_train_series,
+                X_valid_df,
+                y_valid_series,
+                train_dates=train_dates,
+                valid_dates=valid_dates,
+            )
             if args.save_model:
                 _save_native_model(model_name, model, args.save_model)
         feature_importance_path = results_dir / "feature_importance_gain.csv"

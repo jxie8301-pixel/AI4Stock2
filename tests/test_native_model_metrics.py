@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from src.evaluate import align_prediction_label_pairs, build_period_summary, compute_portfolio_metrics
 from src.label_utils import sanitize_label_array, sanitize_label_series
 from src.model_config import get_lgbm_config
-from src.models.pure_lightgbm import NativeLGBM, _daily_ic_metric
+from src.models.pure_lightgbm import NativeLGBM, _compute_time_decay_weights, _daily_ic_metric
 from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
 
 
@@ -69,6 +69,26 @@ class NativeModelMetricsTest(unittest.TestCase):
 
         self.assertEqual(exported.columns.tolist(), ["feature", "gain"])
         self.assertEqual(set(exported["feature"]), {"f1", "f2"})
+
+    def test_compute_time_decay_weights_emphasizes_recent_rows(self):
+        dates = pd.to_datetime(["2024-01-01", "2024-01-11", "2024-01-31"])
+
+        weights = _compute_time_decay_weights(dates, half_life=10)
+
+        self.assertEqual(weights.shape[0], 3)
+        self.assertAlmostEqual(float(weights.mean()), 1.0, places=6)
+        self.assertLess(float(weights[0]), float(weights[1]))
+        self.assertLess(float(weights[1]), float(weights[2]))
+
+    def test_native_lgbm_accepts_time_decay_training_weights(self):
+        model = NativeLGBM(loss="mse", early_stop=0, num_threads=1, train_weight_half_life=10)
+        X_train = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [1.0, 1.0, 0.0, 0.0]})
+        y_train = pd.Series([0.0, 0.1, 0.2, 0.3])
+        train_dates = pd.to_datetime(["2024-01-01", "2024-01-05", "2024-01-10", "2024-01-20"])
+
+        model.fit(X_train, y_train, train_dates=train_dates)
+
+        self.assertIsNotNone(model.model)
 
     def test_get_lgbm_config_uses_dedicated_block(self):
         cfg = {

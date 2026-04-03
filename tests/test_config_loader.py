@@ -36,6 +36,13 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(cfg["rolling"]["retrain_step"], 10)
         self.assertEqual(cfg["backtest"]["rebalance_freq"], 10)
 
+    def test_load_config_supports_recent_lgbm_profile(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_recent_10x20x10")
+
+        self.assertEqual(cfg["rolling"]["train_days"], 180)
+        self.assertEqual(cfg["rolling"]["valid_days"], 20)
+        self.assertEqual(cfg["lgbm"]["train_weight_half_life"], 60)
+
     def test_load_config_requires_explicit_experiment_profile(self):
         with self.assertRaises(ValueError):
             load_config("configs/config.yaml")

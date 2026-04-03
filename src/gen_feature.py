@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 from copy import deepcopy
 from pathlib import Path
@@ -20,7 +20,6 @@ import numpy as np
 import pandas as pd
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
-from scipy.stats import percentileofscore
 from tqdm import tqdm
 import yaml
 
@@ -135,62 +134,66 @@ DEFAULT_TUSHARE_FACTOR_CONFIG: dict[str, Any] = {
     "zscore_window": 20,
 }
 
-TUSHARE_FINA_INDICATOR_FEATURE_COLS = [
-    "fi_eps",
-    "fi_dt_eps",
-    "fi_bps",
-    "fi_ocfps",
-    "fi_roe",
-    "fi_roe_dt",
-    "fi_roa",
-    "fi_grossprofit_margin",
-    "fi_netprofit_margin",
-    "fi_debt_to_assets",
-    "fi_q_eps",
-    "fi_q_dtprofit",
-    "fi_q_roe",
-    "fi_q_dt_roe",
-    "fi_tr_yoy",
-    "fi_or_yoy",
-    "fi_op_yoy",
-    "fi_netprofit_yoy",
-    "fi_ocf_yoy",
+TUSHARE_FINA_INDICATOR_FEATURE_PAIRS = [
+    ("eps", "fi_eps"),
+    ("dt_eps", "fi_dt_eps"),
+    ("bps", "fi_bps"),
+    ("ocfps", "fi_ocfps"),
+    ("roe", "fi_roe"),
+    ("roe_dt", "fi_roe_dt"),
+    ("roa", "fi_roa"),
+    ("grossprofit_margin", "fi_grossprofit_margin"),
+    ("netprofit_margin", "fi_netprofit_margin"),
+    ("debt_to_assets", "fi_debt_to_assets"),
+    ("q_eps", "fi_q_eps"),
+    ("q_dtprofit", "fi_q_dtprofit"),
+    ("q_roe", "fi_q_roe"),
+    ("q_dt_roe", "fi_q_dt_roe"),
+    ("tr_yoy", "fi_tr_yoy"),
+    ("or_yoy", "fi_or_yoy"),
+    ("op_yoy", "fi_op_yoy"),
+    ("netprofit_yoy", "fi_netprofit_yoy"),
+    ("ocf_yoy", "fi_ocf_yoy"),
 ]
+TUSHARE_FINA_INDICATOR_FEATURE_COLS = [target for _, target in TUSHARE_FINA_INDICATOR_FEATURE_PAIRS]
 
-TUSHARE_DIVIDEND_FEATURE_COLS = [
-    "div_cash_div",
-    "div_cash_div_tax",
-    "div_stk_div",
-    "div_stk_bo_rate",
-    "div_stk_co_rate",
-    "div_base_share",
+TUSHARE_DIVIDEND_FEATURE_PAIRS = [
+    ("cash_div", "div_cash_div"),
+    ("cash_div_tax", "div_cash_div_tax"),
+    ("stk_div", "div_stk_div"),
+    ("stk_bo_rate", "div_stk_bo_rate"),
+    ("stk_co_rate", "div_stk_co_rate"),
+    ("base_share", "div_base_share"),
 ]
+TUSHARE_DIVIDEND_FEATURE_COLS = [target for _, target in TUSHARE_DIVIDEND_FEATURE_PAIRS]
 
-TUSHARE_FORECAST_FEATURE_COLS = [
-    "fc_p_change_min",
-    "fc_p_change_max",
-    "fc_net_profit_min",
-    "fc_net_profit_max",
-    "fc_last_parent_net",
+TUSHARE_FORECAST_FEATURE_PAIRS = [
+    ("p_change_min", "fc_p_change_min"),
+    ("p_change_max", "fc_p_change_max"),
+    ("net_profit_min", "fc_net_profit_min"),
+    ("net_profit_max", "fc_net_profit_max"),
+    ("last_parent_net", "fc_last_parent_net"),
 ]
+TUSHARE_FORECAST_FEATURE_COLS = [target for _, target in TUSHARE_FORECAST_FEATURE_PAIRS]
 
-TUSHARE_EXPRESS_FEATURE_COLS = [
-    "exp_revenue",
-    "exp_operate_profit",
-    "exp_total_profit",
-    "exp_n_income",
-    "exp_total_assets",
-    "exp_diluted_eps",
-    "exp_diluted_roe",
-    "exp_yoy_sales",
-    "exp_yoy_op",
-    "exp_yoy_tp",
-    "exp_yoy_dedu_np",
-    "exp_yoy_eps",
-    "exp_yoy_roe",
-    "exp_growth_assets",
-    "exp_yoy_assets",
+TUSHARE_EXPRESS_FEATURE_PAIRS = [
+    ("revenue", "exp_revenue"),
+    ("operate_profit", "exp_operate_profit"),
+    ("total_profit", "exp_total_profit"),
+    ("n_income", "exp_n_income"),
+    ("total_assets", "exp_total_assets"),
+    ("diluted_eps", "exp_diluted_eps"),
+    ("diluted_roe", "exp_diluted_roe"),
+    ("yoy_sales", "exp_yoy_sales"),
+    ("yoy_op", "exp_yoy_op"),
+    ("yoy_tp", "exp_yoy_tp"),
+    ("yoy_dedu_np", "exp_yoy_dedu_np"),
+    ("yoy_eps", "exp_yoy_eps"),
+    ("yoy_roe", "exp_yoy_roe"),
+    ("growth_assets", "exp_growth_assets"),
+    ("yoy_assets", "exp_yoy_assets"),
 ]
+TUSHARE_EXPRESS_FEATURE_COLS = [target for _, target in TUSHARE_EXPRESS_FEATURE_PAIRS]
 
 ALL_FACTORS_ALPHA360_PREFIX = "A360_"
 ALL_FACTORS_LGBM_PREFIX = "LGBM_"
@@ -646,13 +649,37 @@ def _prepare_ohlcv(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _load_tushare_fina_indicator_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
-    path = TUSHARE_RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet"
+def _load_tushare_sidecar_features(
+    symbol: str,
+    date_index: pd.DatetimeIndex,
+    *,
+    raw_dir: Path,
+    column_pairs: list[tuple[str, str]],
+) -> pd.DataFrame | None:
+    path = raw_dir / f"{symbol}.parquet"
     if not path.exists():
         return None
 
-    frame = pd.read_parquet(path)
-    if frame.empty or "ann_date" not in frame.columns:
+    output_cols = [target for _, target in column_pairs]
+    available_pairs: list[tuple[str, str]]
+
+    try:
+        schema_names = set(pq.read_schema(path).names)
+        if "ann_date" not in schema_names:
+            return None
+        available_pairs = [(source, target) for source, target in column_pairs if source in schema_names]
+        if not available_pairs:
+            return None
+        frame = pd.read_parquet(path, columns=["ann_date", *(source for source, _ in available_pairs)])
+    except Exception:
+        frame = pd.read_parquet(path)
+        if frame.empty or "ann_date" not in frame.columns:
+            return None
+        available_pairs = [(source, target) for source, target in column_pairs if source in frame.columns]
+        if not available_pairs:
+            return None
+
+    if frame.empty:
         return None
 
     frame = frame.copy()
@@ -661,35 +688,11 @@ def _load_tushare_fina_indicator_features(symbol: str, date_index: pd.DatetimeIn
     if frame.empty:
         return None
 
-    value_cols = [
-        "eps",
-        "dt_eps",
-        "bps",
-        "ocfps",
-        "roe",
-        "roe_dt",
-        "roa",
-        "grossprofit_margin",
-        "netprofit_margin",
-        "debt_to_assets",
-        "q_eps",
-        "q_dtprofit",
-        "q_roe",
-        "q_dt_roe",
-        "tr_yoy",
-        "or_yoy",
-        "op_yoy",
-        "netprofit_yoy",
-        "ocf_yoy",
-    ]
-    available = [col for col in value_cols if col in frame.columns]
-    if not available:
-        return None
-
-    right = frame[["ann_date", *available]].copy()
-    for col in available:
+    source_cols = [source for source, _ in available_pairs]
+    right = frame[["ann_date", *source_cols]].copy()
+    for col in source_cols:
         right[col] = pd.to_numeric(right[col], errors="coerce")
-    right = right.rename(columns={col: f"fi_{col}" for col in available})
+    right = right.rename(columns=dict(available_pairs))
 
     left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
     merged = pd.merge_asof(
@@ -700,147 +703,46 @@ def _load_tushare_fina_indicator_features(symbol: str, date_index: pd.DatetimeIn
         direction="backward",
     )
     merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
-    for col in TUSHARE_FINA_INDICATOR_FEATURE_COLS:
+    for col in output_cols:
         if col not in merged.columns:
             merged[col] = np.nan
-    return merged.reindex(columns=TUSHARE_FINA_INDICATOR_FEATURE_COLS)
+    return merged.reindex(columns=output_cols)
+
+
+def _load_tushare_fina_indicator_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
+    return _load_tushare_sidecar_features(
+        symbol,
+        date_index,
+        raw_dir=TUSHARE_RAW_FINA_INDICATOR_DIR,
+        column_pairs=TUSHARE_FINA_INDICATOR_FEATURE_PAIRS,
+    )
 
 
 def _load_tushare_dividend_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
-    path = TUSHARE_RAW_DIVIDEND_DIR / f"{symbol}.parquet"
-    if not path.exists():
-        return None
-
-    frame = pd.read_parquet(path)
-    if frame.empty or "ann_date" not in frame.columns:
-        return None
-
-    frame = frame.copy()
-    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
-    frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
-    if frame.empty:
-        return None
-
-    value_cols = [
-        "cash_div",
-        "cash_div_tax",
-        "stk_div",
-        "stk_bo_rate",
-        "stk_co_rate",
-        "base_share",
-    ]
-    available = [col for col in value_cols if col in frame.columns]
-    if not available:
-        return None
-
-    right = frame[["ann_date", *available]].copy()
-    for col in available:
-        right[col] = pd.to_numeric(right[col], errors="coerce")
-    right = right.rename(columns={col: f"div_{col}" for col in available})
-
-    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
-    merged = pd.merge_asof(
-        left,
-        right.sort_values("ann_date"),
-        left_on="date",
-        right_on="ann_date",
-        direction="backward",
+    return _load_tushare_sidecar_features(
+        symbol,
+        date_index,
+        raw_dir=TUSHARE_RAW_DIVIDEND_DIR,
+        column_pairs=TUSHARE_DIVIDEND_FEATURE_PAIRS,
     )
-    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
-    for col in TUSHARE_DIVIDEND_FEATURE_COLS:
-        if col not in merged.columns:
-            merged[col] = np.nan
-    return merged.reindex(columns=TUSHARE_DIVIDEND_FEATURE_COLS)
 
 
 def _load_tushare_forecast_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
-    path = TUSHARE_RAW_FORECAST_DIR / f"{symbol}.parquet"
-    if not path.exists():
-        return None
-
-    frame = pd.read_parquet(path)
-    if frame.empty or "ann_date" not in frame.columns:
-        return None
-
-    frame = frame.copy()
-    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
-    frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
-    if frame.empty:
-        return None
-
-    value_cols = [
-        "p_change_min",
-        "p_change_max",
-        "net_profit_min",
-        "net_profit_max",
-        "last_parent_net",
-    ]
-    available = [col for col in value_cols if col in frame.columns]
-    if not available:
-        return None
-
-    right = frame[["ann_date", *available]].copy()
-    for col in available:
-        right[col] = pd.to_numeric(right[col], errors="coerce")
-    right = right.rename(columns={col: f"fc_{col}" for col in available})
-
-    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
-    merged = pd.merge_asof(left, right.sort_values("ann_date"), left_on="date", right_on="ann_date", direction="backward")
-    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
-    for col in TUSHARE_FORECAST_FEATURE_COLS:
-        if col not in merged.columns:
-            merged[col] = np.nan
-    return merged.reindex(columns=TUSHARE_FORECAST_FEATURE_COLS)
+    return _load_tushare_sidecar_features(
+        symbol,
+        date_index,
+        raw_dir=TUSHARE_RAW_FORECAST_DIR,
+        column_pairs=TUSHARE_FORECAST_FEATURE_PAIRS,
+    )
 
 
 def _load_tushare_express_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
-    path = TUSHARE_RAW_EXPRESS_DIR / f"{symbol}.parquet"
-    if not path.exists():
-        return None
-
-    frame = pd.read_parquet(path)
-    if frame.empty or "ann_date" not in frame.columns:
-        return None
-
-    frame = frame.copy()
-    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
-    frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
-    if frame.empty:
-        return None
-
-    value_cols = [
-        "revenue",
-        "operate_profit",
-        "total_profit",
-        "n_income",
-        "total_assets",
-        "diluted_eps",
-        "diluted_roe",
-        "yoy_sales",
-        "yoy_op",
-        "yoy_tp",
-        "yoy_dedu_np",
-        "yoy_eps",
-        "yoy_roe",
-        "growth_assets",
-        "yoy_assets",
-    ]
-    available = [col for col in value_cols if col in frame.columns]
-    if not available:
-        return None
-
-    right = frame[["ann_date", *available]].copy()
-    for col in available:
-        right[col] = pd.to_numeric(right[col], errors="coerce")
-    right = right.rename(columns={col: f"exp_{col}" for col in available})
-
-    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
-    merged = pd.merge_asof(left, right.sort_values("ann_date"), left_on="date", right_on="ann_date", direction="backward")
-    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
-    for col in TUSHARE_EXPRESS_FEATURE_COLS:
-        if col not in merged.columns:
-            merged[col] = np.nan
-    return merged.reindex(columns=TUSHARE_EXPRESS_FEATURE_COLS)
+    return _load_tushare_sidecar_features(
+        symbol,
+        date_index,
+        raw_dir=TUSHARE_RAW_EXPRESS_DIR,
+        column_pairs=TUSHARE_EXPRESS_FEATURE_PAIRS,
+    )
 
 
 def _augment_tushare_symbol_frame(
@@ -855,38 +757,24 @@ def _augment_tushare_symbol_frame(
     fina_indicator = _load_tushare_fina_indicator_features(symbol, date_index)
     if fina_indicator is not None and not fina_indicator.empty:
         aligned = fina_indicator.reindex(date_index)
-        for col in aligned.columns:
-            out[col] = aligned[col].to_numpy()
+        out[aligned.columns] = aligned.to_numpy(copy=False)
     dividend = _load_tushare_dividend_features(symbol, date_index)
     if dividend is not None and not dividend.empty:
         aligned = dividend.reindex(date_index)
-        for col in aligned.columns:
-            out[col] = aligned[col].to_numpy()
+        out[aligned.columns] = aligned.to_numpy(copy=False)
     forecast = _load_tushare_forecast_features(symbol, date_index)
     if forecast is not None and not forecast.empty:
         aligned = forecast.reindex(date_index)
-        for col in aligned.columns:
-            out[col] = aligned[col].to_numpy()
+        out[aligned.columns] = aligned.to_numpy(copy=False)
     express = _load_tushare_express_features(symbol, date_index)
     if express is not None and not express.empty:
         aligned = express.reindex(date_index)
-        for col in aligned.columns:
-            out[col] = aligned[col].to_numpy()
+        out[aligned.columns] = aligned.to_numpy(copy=False)
     return out
 
 
 def _rolling_rank_pct(series: pd.Series, window: int) -> pd.Series:
-    roll = series.rolling(window, min_periods=1)
-
-    def _rank(x: np.ndarray) -> float:
-        if np.isnan(x[-1]):
-            return np.nan
-        x1 = x[~np.isnan(x)]
-        if x1.size == 0:
-            return np.nan
-        return percentileofscore(x1, x1[-1]) / 100.0
-
-    return roll.apply(_rank, raw=True)
+    return series.rolling(window, min_periods=1).rank(method="average", pct=True)
 
 
 def _rolling_idxmax(series: pd.Series, window: int) -> pd.Series:
@@ -897,60 +785,75 @@ def _rolling_idxmin(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window, min_periods=1).apply(lambda x: float(np.argmin(x) + 1), raw=True)
 
 
-def _rolling_slope(series: pd.Series, window: int) -> pd.Series:
-    def _slope(y: np.ndarray) -> float:
-        mask = ~np.isnan(y)
-        yv = y[mask]
-        if yv.size < 2:
-            return np.nan
-        xv = np.arange(1, yv.size + 1, dtype=np.float64)
-        xm = xv.mean()
-        ym = yv.mean()
-        denom = np.sum((xv - xm) ** 2)
-        if np.isclose(denom, 0):
-            return np.nan
-        return float(np.sum((xv - xm) * (yv - ym)) / denom)
+def _rolling_window_view(values: np.ndarray, window: int) -> np.ndarray:
+    padded = np.full(values.size + window - 1, np.nan, dtype=np.float64)
+    padded[window - 1 :] = values
+    return np.lib.stride_tricks.sliding_window_view(padded, window)
 
-    return series.rolling(window, min_periods=1).apply(_slope, raw=True)
+
+def _rolling_regression_stats(series: pd.Series, window: int) -> tuple[pd.Series, pd.Series, pd.Series]:
+    values = series.to_numpy(dtype=np.float64, copy=False)
+    if values.size == 0:
+        empty = pd.Series(index=series.index, dtype=float)
+        return empty, empty.copy(), empty.copy()
+
+    windows = _rolling_window_view(values, int(window))
+    mask = np.isfinite(windows)
+    counts = mask.sum(axis=1).astype(np.float64)
+    ordered_pos = np.cumsum(mask, axis=1, dtype=np.float64) * mask
+    clean_windows = np.where(mask, windows, 0.0)
+
+    sy = clean_windows.sum(axis=1)
+    syy = (clean_windows * clean_windows).sum(axis=1)
+    sx = counts * (counts + 1.0) / 2.0
+    sxx = counts * (counts + 1.0) * (2.0 * counts + 1.0) / 6.0
+    sxy = (ordered_pos * clean_windows).sum(axis=1)
+
+    numer = counts * sxy - sx * sy
+    denom_x = counts * sxx - sx * sx
+    valid = (counts >= 2.0) & ~np.isclose(denom_x, 0.0)
+
+    slope = np.full(values.shape, np.nan, dtype=np.float64)
+    slope[valid] = numer[valid] / denom_x[valid]
+
+    denom_y = counts * syy - sy * sy
+    rsquare = np.full(values.shape, np.nan, dtype=np.float64)
+    rsquare_valid = valid & (denom_y > 0.0)
+    rsquare[rsquare_valid] = np.clip(
+        (numer[rsquare_valid] * numer[rsquare_valid]) / (denom_x[rsquare_valid] * denom_y[rsquare_valid]),
+        0.0,
+        1.0,
+    )
+
+    alpha = np.full(values.shape, np.nan, dtype=np.float64)
+    alpha[valid] = (sy[valid] - slope[valid] * sx[valid]) / counts[valid]
+    last_pos = np.where(mask, np.arange(windows.shape[1], dtype=np.int64), -1).max(axis=1)
+    residual = np.full(values.shape, np.nan, dtype=np.float64)
+    residual_valid = valid & (last_pos >= 0)
+    residual_rows = np.flatnonzero(residual_valid)
+    last_values = windows[residual_rows, last_pos[residual_rows]]
+    residual[residual_rows] = last_values - (alpha[residual_rows] + slope[residual_rows] * counts[residual_rows])
+
+    return (
+        pd.Series(slope, index=series.index),
+        pd.Series(rsquare, index=series.index),
+        pd.Series(residual, index=series.index),
+    )
+
+
+def _rolling_slope(series: pd.Series, window: int) -> pd.Series:
+    slope, _, _ = _rolling_regression_stats(series, window)
+    return slope
 
 
 def _rolling_rsquare(series: pd.Series, window: int) -> pd.Series:
-    def _rsq(y: np.ndarray) -> float:
-        mask = ~np.isnan(y)
-        yv = y[mask]
-        if yv.size < 2:
-            return np.nan
-        xv = np.arange(1, yv.size + 1, dtype=np.float64)
-        sx = xv.std(ddof=0)
-        sy = yv.std(ddof=0)
-        if np.isclose(sx, 0) or np.isclose(sy, 0):
-            return np.nan
-        r = np.corrcoef(xv, yv)[0, 1]
-        return float(r * r)
-
-    res = series.rolling(window, min_periods=1).apply(_rsq, raw=True)
-    std = series.rolling(window, min_periods=1).std()
-    res[np.isclose(std, 0, atol=2e-5)] = np.nan
-    return res
+    _, rsquare, _ = _rolling_regression_stats(series, window)
+    return rsquare
 
 
 def _rolling_resi(series: pd.Series, window: int) -> pd.Series:
-    def _resi(y: np.ndarray) -> float:
-        mask = ~np.isnan(y)
-        yv = y[mask]
-        if yv.size < 2:
-            return np.nan
-        xv = np.arange(1, yv.size + 1, dtype=np.float64)
-        xm = xv.mean()
-        ym = yv.mean()
-        denom = np.sum((xv - xm) ** 2)
-        if np.isclose(denom, 0):
-            return np.nan
-        beta = np.sum((xv - xm) * (yv - ym)) / denom
-        alpha = ym - beta * xm
-        return float(yv[-1] - (alpha + beta * xv[-1]))
-
-    return series.rolling(window, min_periods=1).apply(_resi, raw=True)
+    _, _, residual = _rolling_regression_stats(series, window)
+    return residual
 
 
 def _rolling_corr(left: pd.Series, right: pd.Series, window: int) -> pd.Series:
@@ -1059,6 +962,10 @@ def compute_alpha158(
         vol_ret_log = np.log(volume / ref_vol1 + 1)
         close_delta = close - ref_close1
         vol_delta = volume - ref_vol1
+        close_delta_pos = close_delta.clip(lower=0)
+        close_delta_neg = (ref_close1 - close).clip(lower=0)
+        vol_delta_pos = vol_delta.clip(lower=0)
+        vol_delta_neg = (ref_vol1 - volume).clip(lower=0)
         log_volume = np.log(volume + 1)
 
         for d in windows:
@@ -1068,6 +975,9 @@ def compute_alpha158(
             volume_roll = volume.rolling(d, min_periods=1)
             close_abs_delta_roll = np.abs(close_delta).rolling(d, min_periods=1)
             vol_abs_delta_roll = np.abs(vol_delta).rolling(d, min_periods=1)
+            slope = rsquare = residual = None
+            if use("BETA") or use("RSQR") or use("RESI"):
+                slope, rsquare, residual = _rolling_regression_stats(close, d)
             if use("ROC"):
                 out[f"ROC{d}"] = close.shift(d) / close
             if use("MA"):
@@ -1075,11 +985,11 @@ def compute_alpha158(
             if use("STD"):
                 out[f"STD{d}"] = close_roll.std() / close
             if use("BETA"):
-                out[f"BETA{d}"] = _rolling_slope(close, d) / close
+                out[f"BETA{d}"] = slope / close
             if use("RSQR"):
-                out[f"RSQR{d}"] = _rolling_rsquare(close, d)
+                out[f"RSQR{d}"] = rsquare
             if use("RESI"):
-                out[f"RESI{d}"] = _rolling_resi(close, d) / close
+                out[f"RESI{d}"] = residual / close
             if use("MAX"):
                 out[f"MAX{d}"] = high_roll.max() / close
             if use("LOW"):
@@ -1094,12 +1004,17 @@ def compute_alpha158(
                 rolling_low = low_roll.min()
                 rolling_high = high_roll.max()
                 out[f"RSV{d}"] = (close - rolling_low) / (rolling_high - rolling_low + EPS)
+            imax = imin = None
+            if use("IMAX") or use("IMXD"):
+                imax = _rolling_idxmax(high, d)
+            if use("IMIN") or use("IMXD"):
+                imin = _rolling_idxmin(low, d)
             if use("IMAX"):
-                out[f"IMAX{d}"] = _rolling_idxmax(high, d) / d
+                out[f"IMAX{d}"] = imax / d
             if use("IMIN"):
-                out[f"IMIN{d}"] = _rolling_idxmin(low, d) / d
+                out[f"IMIN{d}"] = imin / d
             if use("IMXD"):
-                out[f"IMXD{d}"] = (_rolling_idxmax(high, d) - _rolling_idxmin(low, d)) / d
+                out[f"IMXD{d}"] = (imax - imin) / d
             if use("CORR"):
                 out[f"CORR{d}"] = _rolling_corr(close, log_volume, d)
             if use("CORD"):
@@ -1113,24 +1028,16 @@ def compute_alpha158(
                     (close > ref_close1).rolling(d, min_periods=1).mean()
                     - (close < ref_close1).rolling(d, min_periods=1).mean()
                 )
+            close_pos_sum = close_neg_sum = None
+            if use("SUMP") or use("SUMN") or use("SUMD"):
+                close_pos_sum = close_delta_pos.rolling(d, min_periods=1).sum()
+                close_neg_sum = close_delta_neg.rolling(d, min_periods=1).sum()
             if use("SUMP"):
-                out[f"SUMP{d}"] = (
-                    np.maximum(close_delta, 0).rolling(d, min_periods=1).sum()
-                    / (close_abs_delta_roll.sum() + EPS)
-                )
+                out[f"SUMP{d}"] = close_pos_sum / (close_abs_delta_roll.sum() + EPS)
             if use("SUMN"):
-                out[f"SUMN{d}"] = (
-                    np.maximum(ref_close1 - close, 0).rolling(d, min_periods=1).sum()
-                    / (close_abs_delta_roll.sum() + EPS)
-                )
+                out[f"SUMN{d}"] = close_neg_sum / (close_abs_delta_roll.sum() + EPS)
             if use("SUMD"):
-                out[f"SUMD{d}"] = (
-                    (
-                        np.maximum(close_delta, 0).rolling(d, min_periods=1).sum()
-                        - np.maximum(ref_close1 - close, 0).rolling(d, min_periods=1).sum()
-                    )
-                    / (close_abs_delta_roll.sum() + EPS)
-                )
+                out[f"SUMD{d}"] = (close_pos_sum - close_neg_sum) / (close_abs_delta_roll.sum() + EPS)
             if use("VMA"):
                 out[f"VMA{d}"] = volume_roll.mean() / (volume + EPS)
             if use("VSTD"):
@@ -1138,24 +1045,16 @@ def compute_alpha158(
             if use("WVMA"):
                 w = np.abs(close_ret - 1) * volume
                 out[f"WVMA{d}"] = w.rolling(d, min_periods=1).std() / (w.rolling(d, min_periods=1).mean() + EPS)
+            vol_pos_sum = vol_neg_sum = None
+            if use("VSUMP") or use("VSUMN") or use("VSUMD"):
+                vol_pos_sum = vol_delta_pos.rolling(d, min_periods=1).sum()
+                vol_neg_sum = vol_delta_neg.rolling(d, min_periods=1).sum()
             if use("VSUMP"):
-                out[f"VSUMP{d}"] = (
-                    np.maximum(vol_delta, 0).rolling(d, min_periods=1).sum()
-                    / (vol_abs_delta_roll.sum() + EPS)
-                )
+                out[f"VSUMP{d}"] = vol_pos_sum / (vol_abs_delta_roll.sum() + EPS)
             if use("VSUMN"):
-                out[f"VSUMN{d}"] = (
-                    np.maximum(ref_vol1 - volume, 0).rolling(d, min_periods=1).sum()
-                    / (vol_abs_delta_roll.sum() + EPS)
-                )
+                out[f"VSUMN{d}"] = vol_neg_sum / (vol_abs_delta_roll.sum() + EPS)
             if use("VSUMD"):
-                out[f"VSUMD{d}"] = (
-                    (
-                        np.maximum(vol_delta, 0).rolling(d, min_periods=1).sum()
-                        - np.maximum(ref_vol1 - volume, 0).rolling(d, min_periods=1).sum()
-                    )
-                    / (vol_abs_delta_roll.sum() + EPS)
-                )
+                out[f"VSUMD{d}"] = (vol_pos_sum - vol_neg_sum) / (vol_abs_delta_roll.sum() + EPS)
 
     feat = pd.DataFrame(out, index=base.index)
     _, ordered_names = get_alpha158_feature_config(cfg)
@@ -1489,7 +1388,9 @@ def compute_temporal_factor_features(
     turnover = base["turnover"] if "turnover" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
 
     close_ret = close.pct_change(fill_method=None)
+    close_ret_abs = close_ret.abs()
     log_volume = np.log(volume + 1.0)
+    amount_abs = amount.abs()
     groups = set(cfg["groups"])
     out: dict[str, pd.Series] = {}
 
@@ -1506,9 +1407,11 @@ def compute_temporal_factor_features(
             out[f"ma_gap_{window}"] = close / ma - 1.0
         if "std" in groups:
             out[f"std_{window}"] = close_ret.rolling(window, min_periods=1).std()
-        if "rsv" in groups:
+        rolling_low = rolling_high = None
+        if "rsv" in groups or "high_gap" in groups or "low_gap" in groups:
             rolling_low = low_roll.min()
             rolling_high = high_roll.max()
+        if "rsv" in groups:
             out[f"rsv_{window}"] = (close - rolling_low) / (rolling_high - rolling_low + EPS)
         if "price_rank" in groups:
             out[f"price_rank_{window}"] = _rolling_rank_pct(close, window)
@@ -1518,11 +1421,11 @@ def compute_temporal_factor_features(
         if "turnover_mean" in groups:
             out[f"turnover_mean_{window}"] = turnover_roll.mean()
         if "amihud" in groups:
-            out[f"amihud_{window}"] = (close_ret.abs() / (amount.abs() + EPS)).rolling(window, min_periods=1).mean()
+            out[f"amihud_{window}"] = (close_ret_abs / (amount_abs + EPS)).rolling(window, min_periods=1).mean()
         if "high_gap" in groups:
-            out[f"high_gap_{window}"] = close / high_roll.max().replace(0, np.nan) - 1.0
+            out[f"high_gap_{window}"] = close / rolling_high.replace(0, np.nan) - 1.0
         if "low_gap" in groups:
-            out[f"low_gap_{window}"] = close / low_roll.min().replace(0, np.nan) - 1.0
+            out[f"low_gap_{window}"] = close / rolling_low.replace(0, np.nan) - 1.0
         if "corr_cv" in groups:
             out[f"corr_cv_{window}"] = close.rolling(window, min_periods=1).corr(log_volume)
 
@@ -1863,9 +1766,10 @@ def compute_all_factor_features(
     technical_config: dict[str, Any] | None = None,
     data_source: str | None = None,
     tushare_config: dict[str, Any] | None = None,
+    _base: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Compute a single comprehensive factor frame for training-time sub-selection."""
-    base = _prepare_ohlcv(df)
+    base = _base if _base is not None else _prepare_ohlcv(df)
     alpha158_feat = compute_alpha158(df, config=alpha158_config, _base=base)
     lgbm_feat = compute_lgbm_purified_features(df, config=lgbm_purified_config, _base=base).rename(
         columns=lambda name: f"{ALL_FACTORS_LGBM_PREFIX}{name}"
@@ -1896,6 +1800,15 @@ def compute_all_factor_features(
 def build_open_to_open_label(df: pd.DataFrame, horizon_days: int = DEFAULT_LABEL_HORIZON) -> pd.Series:
     """Label: open_{t+1+h}/open_{t+1} - 1 for a holding horizon of ``h`` trading days."""
     base = _prepare_ohlcv(df)
+    return _build_open_to_open_label_from_base(base, horizon_days=horizon_days)
+
+
+def _build_open_to_open_label_from_base(
+    base: pd.DataFrame,
+    *,
+    horizon_days: int = DEFAULT_LABEL_HORIZON,
+) -> pd.Series:
+    """Compute the open-to-open label from an already prepared OHLCV frame."""
     next_open = base["open"].shift(-1)
     exit_open = base["open"].shift(-(1 + int(horizon_days)))
     label = exit_open / next_open - 1
@@ -1925,8 +1838,9 @@ def build_open_to_open_labels(
     horizons: list[int],
 ) -> dict[str, pd.Series]:
     """Build multiple open-to-open labels keyed by factor-store column name."""
+    base = _prepare_ohlcv(df)
     labels = {
-        get_label_column_name(horizon): build_open_to_open_label(df, horizon_days=horizon)
+        get_label_column_name(horizon): _build_open_to_open_label_from_base(base, horizon_days=horizon)
         for horizon in horizons
     }
     labels[get_legacy_label_column_name()] = labels[get_label_column_name(1)]
@@ -1958,8 +1872,9 @@ def _compute_symbol_feat_label(
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
     if data_source is not None and normalize_data_source_name(data_source) == "tushare":
         df = _augment_tushare_symbol_frame(df, symbol=symbol)
-    feat = compute_all_factor_features(df, data_source=data_source)
-    label = build_open_to_open_label(df, horizon_days=1)
+    base = _prepare_ohlcv(df)
+    feat = compute_all_factor_features(df, data_source=data_source, _base=base)
+    label = _build_open_to_open_label_from_base(base, horizon_days=1)
     return symbol, feat, label
 
 
@@ -1974,8 +1889,13 @@ def _compute_symbol_feat_labels(
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
     if data_source is not None and normalize_data_source_name(data_source) == "tushare":
         df = _augment_tushare_symbol_frame(df, symbol=symbol)
-    feat = compute_all_factor_features(df, data_source=data_source)
-    labels = build_open_to_open_labels(df, label_horizons)
+    base = _prepare_ohlcv(df)
+    feat = compute_all_factor_features(df, data_source=data_source, _base=base)
+    labels = {
+        get_label_column_name(horizon): _build_open_to_open_label_from_base(base, horizon_days=horizon)
+        for horizon in label_horizons
+    }
+    labels[get_legacy_label_column_name()] = labels[get_label_column_name(1)]
     return symbol, feat, labels
 
 

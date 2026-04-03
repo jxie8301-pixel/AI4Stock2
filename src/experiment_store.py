@@ -33,6 +33,8 @@ SUMMARY_FIELDS = [
     "n_drop",
     "weighting",
     "max_weight",
+    "keep_top_n",
+    "min_score",
     "rebalance_freq",
     "retrain_step",
     "signal_horizon",
@@ -168,6 +170,8 @@ def prepare_run_store(
         f"top{cfg.get('strategy', {}).get('topk', 'na')}"
         f"_drop{cfg.get('strategy', {}).get('n_drop', 'na')}"
         f"_w{cfg.get('strategy', {}).get('weighting', 'equal')}"
+        f"_keep{cfg.get('strategy', {}).get('keep_top_n', 'na')}"
+        f"_mins{cfg.get('strategy', {}).get('min_score', 'na')}"
         f"_reb{resolve_rebalance_freq(cfg, args)}"
     )
     tag_slug = _slugify(getattr(args, "run_tag", None))
@@ -265,6 +269,8 @@ def finalize_run_store(
         "n_drop": cfg.get("strategy", {}).get("n_drop"),
         "weighting": cfg.get("strategy", {}).get("weighting", "equal"),
         "max_weight": cfg.get("strategy", {}).get("max_weight", ""),
+        "keep_top_n": cfg.get("strategy", {}).get("keep_top_n", ""),
+        "min_score": cfg.get("strategy", {}).get("min_score", ""),
         "rebalance_freq": resolve_rebalance_freq(cfg, args),
         "retrain_step": extra_context.get("retrain_step", resolve_retrain_step(cfg, args)),
         "signal_horizon": extra_context.get("signal_horizon", resolve_signal_horizon_for_run(cfg, args)),

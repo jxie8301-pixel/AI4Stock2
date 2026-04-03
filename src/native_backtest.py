@@ -26,40 +26,84 @@ def _normalize_weighting_mode(weighting: str | None) -> str:
     return mode or DEFAULT_WEIGHTING
 
 
+def _normalize_keep_top_n(keep_top_n: int | None, topk: int) -> int | None:
+    if keep_top_n is None:
+        return None
+    keep_top_n = max(int(keep_top_n), int(topk))
+    return keep_top_n
+
+
+def _normalize_min_score(min_score: float | None) -> float | None:
+    if min_score is None:
+        return None
+    return float(min_score)
+
+
 def _select_topk_dropout_trades(
     scores: pd.Series,
     current_holdings: list[str],
     topk: int,
     n_drop: int,
     locked_holdings: set[str] | None = None,
+    keep_top_n: int | None = None,
+    min_score: float | None = None,
 ) -> tuple[list[str], list[str]]:
     """Mirror Qlib TopkDropoutStrategy's sell/buy selection."""
-    ranked_scores = scores.dropna().sort_values(ascending=False)
-    if ranked_scores.empty:
-        return [], []
+    raw_scores = pd.to_numeric(scores, errors="coerce")
+    ranked_scores = raw_scores.dropna().sort_values(ascending=False)
+    min_score_value = _normalize_min_score(min_score)
+    eligible_scores = ranked_scores if min_score_value is None else ranked_scores[ranked_scores > min_score_value]
+    locked_set = set() if locked_holdings is None else set(locked_holdings)
+
+    if eligible_scores.empty:
+        if min_score_value is None:
+            return [], []
+        return [stock for stock in current_holdings if stock not in locked_set], []
 
     current_index = pd.Index(current_holdings, dtype=object)
     ranked_current = ranked_scores.reindex(current_index).sort_values(
         ascending=False,
         na_position="last",
     ).index
-    locked_set = set() if locked_holdings is None else set(locked_holdings)
-    sellable_current = pd.Index([stock for stock in ranked_current if stock not in locked_set], dtype=object)
+    keep_top_n_value = _normalize_keep_top_n(keep_top_n, topk)
+    eligible_ranks = {stock: rank for rank, stock in enumerate(eligible_scores.index.tolist(), start=1)}
+    forced_sell = [
+        stock
+        for stock in current_holdings
+        if stock not in locked_set and (stock not in eligible_ranks)
+    ]
+    buffer_protected = set()
+    if keep_top_n_value is not None:
+        buffer_protected = {
+            stock
+            for stock in current_holdings
+            if stock not in locked_set
+            and stock not in forced_sell
+            and eligible_ranks.get(stock, keep_top_n_value + 1) <= keep_top_n_value
+        }
+
+    sellable_current = pd.Index(
+        [stock for stock in ranked_current if stock not in locked_set and stock not in forced_sell and stock not in buffer_protected],
+        dtype=object,
+    )
 
     n_drop = max(0, int(n_drop))
     topk = max(0, int(topk))
-    candidate_count = n_drop + max(topk - len(ranked_current), 0)
-    today = ranked_scores[~ranked_scores.index.isin(ranked_current)].index[:candidate_count]
+    candidate_count = len(forced_sell) + n_drop + max(topk - len(ranked_current), 0)
+    today = eligible_scores[~eligible_scores.index.isin(ranked_current)].index[:candidate_count]
 
-    comb = ranked_scores.reindex(ranked_current.union(today)).sort_values(
+    comb = eligible_scores.reindex(ranked_current.union(today)).sort_values(
         ascending=False,
         na_position="last",
     ).index
-    sellable_comb = pd.Index([stock for stock in comb if stock not in locked_set], dtype=object)
+    sellable_comb = pd.Index(
+        [stock for stock in comb if stock not in locked_set and stock not in forced_sell and stock not in buffer_protected],
+        dtype=object,
+    )
     effective_drop = min(n_drop, len(sellable_current))
     drop_set = set(sellable_comb[-effective_drop:]) if effective_drop > 0 else set()
 
-    sell = [stock for stock in sellable_current if stock in drop_set]
+    sell = forced_sell + [stock for stock in sellable_current if stock in drop_set]
     buy_count = len(sell) + max(topk - len(ranked_current), 0)
     buy = list(today[:buy_count])
     return sell, buy
@@ -177,6 +221,8 @@ def run_native_backtest(
     rebalance_freq: int = 1,
     weighting: str = DEFAULT_WEIGHTING,
     max_weight: float | None = None,
+    keep_top_n: int | None = None,
+    min_score: float | None = None,
     return_trace: bool = False,
     trace_dates: set[pd.Timestamp] | None = None,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
@@ -190,6 +236,8 @@ def run_native_backtest(
     topk = max(1, int(topk))
     n_drop = max(0, int(n_drop))
     weighting = _normalize_weighting_mode(weighting)
+    keep_top_n = _normalize_keep_top_n(keep_top_n, topk)
+    min_score = _normalize_min_score(min_score)
     open_rate = float(cost_buy) + float(slippage)
     close_rate = float(cost_sell) + float(slippage)
 
@@ -240,6 +288,8 @@ def run_native_backtest(
                 topk=topk,
                 n_drop=n_drop,
                 locked_holdings=locked_holdings,
+                keep_top_n=keep_top_n,
+                min_score=min_score,
             )
             trade_sell_list: list[str] = []
             trade_buy_list: list[str] = []
@@ -256,7 +306,16 @@ def run_native_backtest(
                 trade_sell_list.append(stock)
 
             tradable_holdings = [stock for stock in holdings if stock not in locked_holdings]
-            target_holdings = _ordered_unique_symbols(tradable_holdings + list(buy_list))
+            if min_score is None:
+                eligible_current_holdings = tradable_holdings
+            else:
+                day_scores = pd.to_numeric(pred_matrix.loc[date], errors="coerce")
+                eligible_current_holdings = [
+                    stock
+                    for stock in tradable_holdings
+                    if float(day_scores.get(stock, np.nan)) > min_score
+                ]
+            target_holdings = _ordered_unique_symbols(eligible_current_holdings + list(buy_list))
             target_weights = _compute_target_weights(
                 pred_matrix.loc[date],
                 target_holdings,
@@ -367,6 +426,8 @@ def run_native_backtest(
                     "trade_sell_list": list(trade_sell_list),
                     "trade_buy_list": list(trade_buy_list),
                     "weighting": weighting,
+                    "keep_top_n": keep_top_n,
+                    "min_score": min_score,
                     "target_weights": {stock: float(value) for stock, value in target_weights.items()},
                     "target_values": {stock: float(value) for stock, value in target_values.items()},
                     "buy_count": int(buy_count),

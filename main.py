@@ -333,6 +333,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         f"n_drop={cfg['strategy']['n_drop']}, "
         f"weighting={cfg['strategy'].get('weighting', 'equal')}, "
         f"max_weight={cfg['strategy'].get('max_weight', 'none')}, "
+        f"keep_top_n={cfg['strategy'].get('keep_top_n', 'none')}, "
+        f"min_score={cfg['strategy'].get('min_score', 'none')}, "
         f"rebalance={rebalance_freq}d, "
         f"signal_label={signal_horizon}d, "
         "backtest_label=1d"
@@ -351,6 +353,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         rebalance_freq=rebalance_freq,
         weighting=cfg["strategy"].get("weighting", "equal"),
         max_weight=cfg["strategy"].get("max_weight"),
+        keep_top_n=cfg["strategy"].get("keep_top_n"),
+        min_score=cfg["strategy"].get("min_score"),
     )
     
     # Rename for compatibility with plot functions
@@ -391,6 +395,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             rebalance_freq=rebalance_freq,
             weighting=cfg["strategy"].get("weighting", "equal"),
             max_weight=cfg["strategy"].get("max_weight"),
+            keep_top_n=cfg["strategy"].get("keep_top_n"),
+            min_score=cfg["strategy"].get("min_score"),
             return_trace=True,
             trace_dates=trace_dates,
         )[1],

@@ -389,6 +389,8 @@ def run_rolling_pipeline():
         f"n_drop={cfg['strategy']['n_drop']}, "
         f"weighting={cfg['strategy'].get('weighting', 'equal')}, "
         f"max_weight={cfg['strategy'].get('max_weight', 'none')}, "
+        f"keep_top_n={cfg['strategy'].get('keep_top_n', 'none')}, "
+        f"min_score={cfg['strategy'].get('min_score', 'none')}, "
         f"rebalance={rebalance_freq}d, "
         f"signal_label={signal_horizon}d, "
         "backtest_label=1d"
@@ -408,6 +410,8 @@ def run_rolling_pipeline():
         rebalance_freq=rebalance_freq,
         weighting=cfg["strategy"].get("weighting", "equal"),
         max_weight=cfg["strategy"].get("max_weight"),
+        keep_top_n=cfg["strategy"].get("keep_top_n"),
+        min_score=cfg["strategy"].get("min_score"),
     )
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})

@@ -97,6 +97,8 @@ TOP_LEVEL_SCHEMA = {
         "n_drop": None,
         "weighting": None,
         "max_weight": None,
+        "keep_top_n": None,
+        "min_score": None,
     },
     "backtest": {
         "rebalance_freq": None,
@@ -245,6 +247,15 @@ def validate_training_config(
         if max_weight <= 0 or max_weight > 1:
             raise ValueError("strategy.max_weight must be in (0, 1] when provided")
         strategy_cfg["max_weight"] = max_weight
+    keep_top_n = strategy_cfg.get("keep_top_n")
+    if keep_top_n is not None:
+        keep_top_n = _expect_positive_int(keep_top_n, "strategy.keep_top_n")
+        if keep_top_n < topk:
+            raise ValueError("strategy.keep_top_n must be >= strategy.topk when provided")
+        strategy_cfg["keep_top_n"] = keep_top_n
+    min_score = strategy_cfg.get("min_score")
+    if min_score is not None:
+        strategy_cfg["min_score"] = float(min_score)
 
     backtest_cfg = cfg.get("backtest", {})
     _expect_positive_int(backtest_cfg.get("rebalance_freq"), "backtest.rebalance_freq")

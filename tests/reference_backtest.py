@@ -66,6 +66,18 @@ def _max_affordable_trade_value_reference(cash: float, rate: float, min_cost: fl
     return max(cash - min_cost, 0.0)
 
 
+def _normalize_keep_top_n_reference(keep_top_n: int | None, topk: int) -> int | None:
+    if keep_top_n is None:
+        return None
+    return max(int(keep_top_n), int(topk))
+
+
+def _normalize_min_score_reference(min_score: float | None) -> float | None:
+    if min_score is None:
+        return None
+    return float(min_score)
+
+
 def _ordered_unique_symbols_reference(symbols: list[str]) -> list[str]:
     return list(dict.fromkeys(str(symbol) for symbol in symbols))
 
@@ -143,6 +155,65 @@ def _compute_target_weights_reference(
     return _cap_target_weights_reference(raw, max_weight)
 
 
+def _select_trades_with_overrides_reference(
+    scores: pd.Series,
+    current_holdings: list[str],
+    *,
+    topk: int,
+    n_drop: int,
+    locked_holdings: set[str] | None = None,
+    keep_top_n: int | None = None,
+    min_score: float | None = None,
+) -> tuple[list[str], list[str]]:
+    raw_scores = pd.to_numeric(scores, errors="coerce")
+    ranked_scores = raw_scores.dropna().sort_values(ascending=False)
+    min_score_value = _normalize_min_score_reference(min_score)
+    eligible_scores = ranked_scores if min_score_value is None else ranked_scores[ranked_scores > min_score_value]
+    locked_set = set() if locked_holdings is None else set(locked_holdings)
+
+    if eligible_scores.empty:
+        if min_score_value is None:
+            return [], []
+        return [stock for stock in current_holdings if stock not in locked_set], []
+
+    current_index = pd.Index(current_holdings, dtype=object)
+    ranked_current = ranked_scores.reindex(current_index).sort_values(ascending=False, na_position="last").index.tolist()
+    keep_top_n_value = _normalize_keep_top_n_reference(keep_top_n, topk)
+    eligible_ranks = {stock: rank for rank, stock in enumerate(eligible_scores.index.tolist(), start=1)}
+    forced_sell = [
+        stock
+        for stock in current_holdings
+        if stock not in locked_set and stock not in eligible_ranks
+    ]
+    buffer_protected = set()
+    if keep_top_n_value is not None:
+        buffer_protected = {
+            stock
+            for stock in current_holdings
+            if stock not in locked_set
+            and stock not in forced_sell
+            and eligible_ranks.get(stock, keep_top_n_value + 1) <= keep_top_n_value
+        }
+
+    sellable_current = [stock for stock in ranked_current if stock not in locked_set and stock not in forced_sell and stock not in buffer_protected]
+    candidate_count = len(forced_sell) + max(0, int(n_drop)) + max(max(0, int(topk)) - len(ranked_current), 0)
+    today = [stock for stock in eligible_scores.index.tolist() if stock not in ranked_current][:candidate_count]
+    comb = (
+        eligible_scores.reindex(pd.Index(ranked_current).union(pd.Index(today)))
+        .sort_values(ascending=False, na_position="last")
+        .index.tolist()
+    )
+    sellable_comb = [
+        stock for stock in comb if stock not in locked_set and stock not in forced_sell and stock not in buffer_protected
+    ]
+    effective_drop = min(max(0, int(n_drop)), len(sellable_current))
+    drop_set = set(sellable_comb[-effective_drop:]) if effective_drop > 0 else set()
+    sell = forced_sell + [stock for stock in sellable_current if stock in drop_set]
+    buy_count = len(sell) + max(max(0, int(topk)) - len(ranked_current), 0)
+    buy = today[:buy_count]
+    return sell, buy
+
+
 def run_reference_backtest(
     preds: pd.Series,
     labels: pd.Series,
@@ -157,6 +228,8 @@ def run_reference_backtest(
     rebalance_freq: int = 1,
     weighting: str = DEFAULT_WEIGHTING,
     max_weight: float | None = None,
+    keep_top_n: int | None = None,
+    min_score: float | None = None,
 ) -> pd.DataFrame:
     common_idx = preds.index.intersection(labels.index)
     preds = preds.loc[common_idx].sort_index()
@@ -175,6 +248,8 @@ def run_reference_backtest(
     open_rate = float(cost_buy) + float(slippage)
     close_rate = float(cost_sell) + float(slippage)
     rebalance_dates = set(pred_matrix.index[:: max(1, int(rebalance_freq))])
+    keep_top_n = _normalize_keep_top_n_reference(keep_top_n, topk)
+    min_score = _normalize_min_score_reference(min_score)
 
     cash = float(account)
     holdings: dict[str, float] = {}
@@ -194,12 +269,14 @@ def run_reference_backtest(
         }
 
         if date in rebalance_dates:
-            sell_list, buy_list = _select_topk_dropout_trades_reference(
+            sell_list, buy_list = _select_trades_with_overrides_reference(
                 scores=pred_matrix.loc[date],
                 current_holdings=list(holdings.keys()),
                 topk=topk,
                 n_drop=n_drop,
                 locked_holdings=locked_holdings,
+                keep_top_n=keep_top_n,
+                min_score=min_score,
             )
 
             for stock in sell_list:
@@ -213,7 +290,16 @@ def run_reference_backtest(
                 sell_count += 1
 
             tradable_holdings = [stock for stock in holdings if stock not in locked_holdings]
-            target_holdings = _ordered_unique_symbols_reference(tradable_holdings + list(buy_list))
+            if min_score is None:
+                eligible_current_holdings = tradable_holdings
+            else:
+                day_scores = pd.to_numeric(pred_matrix.loc[date], errors="coerce")
+                eligible_current_holdings = [
+                    stock
+                    for stock in tradable_holdings
+                    if float(day_scores.get(stock, np.nan)) > min_score
+                ]
+            target_holdings = _ordered_unique_symbols_reference(eligible_current_holdings + list(buy_list))
             target_weights = _compute_target_weights_reference(
                 pred_matrix.loc[date],
                 target_holdings,

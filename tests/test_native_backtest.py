@@ -279,6 +279,78 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertGreater(target_weights["A"], target_weights["B"])
         self.assertGreater(target_weights["B"], target_weights["C"])
 
+    def test_min_score_zero_liquidates_negative_score_holdings(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0, -0.1, -0.2], index=index)
+        labels = pd.Series([0.1, 0.0, 0.0, 0.0], index=index)
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=1,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            min_score=0.0,
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-03")},
+        )
+
+        self.assertEqual(report.index.tolist(), [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")])
+        self.assertEqual(trace.iloc[0]["sell_list"], ["A"])
+        self.assertEqual(trace.iloc[0]["buy_list"], [])
+        self.assertEqual(trace.iloc[0]["trade_sell_list"], ["A"])
+        self.assertEqual(trace.iloc[0]["trade_buy_list"], [])
+        self.assertEqual(trace.iloc[0]["holdings_after"], {})
+        self.assertEqual(trace.iloc[0]["target_weights"], {})
+
+    def test_keep_top_n_buffers_ranked_holdings_against_forced_rotation(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                ["A", "B", "C"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([3.0, 2.0, 1.0, 2.0, 1.0, 3.0], index=index)
+        labels = pd.Series([0.1, 0.0, 0.0, 0.0, 0.0, 0.0], index=index)
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=1,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            keep_top_n=2,
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-03")},
+        )
+
+        self.assertEqual(report.index.tolist(), [pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")])
+        self.assertEqual(trace.iloc[0]["sell_list"], [])
+        self.assertEqual(trace.iloc[0]["buy_list"], [])
+        self.assertEqual(trace.iloc[0]["trade_sell_list"], [])
+        self.assertEqual(trace.iloc[0]["trade_buy_list"], [])
+        self.assertEqual(trace.iloc[0]["keep_top_n"], 2)
+        self.assertEqual(set(trace.iloc[0]["holdings_after"].keys()), {"A"})
+
     def test_reference_backtest_matches_native_report(self):
         index = pd.MultiIndex.from_product(
             [

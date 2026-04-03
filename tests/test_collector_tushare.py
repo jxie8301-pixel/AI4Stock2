@@ -45,6 +45,7 @@ from src.collector_tushare import (
     normalize_symbol_cache_frame,
     precheck_pending_symbols,
     precheck_stage_updates,
+    run_tushare_update_pipeline,
     resolve_all_symbols,
     resolve_effective_end_date,
     resolve_symbol_lifecycle_status,
@@ -367,6 +368,65 @@ def test_precheck_aux_stage_symbols_skips_fresh_file_and_empty_marker(monkeypatc
 
     assert ready == ["000001", "000002"]
     assert pending == ["000003"]
+
+
+def test_filter_symbols_by_lifecycle_applicability_skips_not_yet_listed() -> None:
+    lifecycle_registry = pd.DataFrame(
+        {
+            "local_symbol": ["000001", "301683"],
+            "lifecycle_status": ["active", "not_yet_listed"],
+        }
+    )
+
+    from src.collector_tushare import filter_symbols_by_lifecycle_applicability
+
+    eligible, skipped = filter_symbols_by_lifecycle_applicability(
+        ["000001", "301683"],
+        lifecycle_registry,
+    )
+
+    assert eligible == ["000001"]
+    assert skipped == ["301683"]
+
+
+def test_run_tushare_update_pipeline_limits_market_stages_to_lifecycle_scope(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen_stage_symbols: dict[str, list[str]] = {}
+
+    def fake_precheck(symbols, stage_name, *args, **kwargs):
+        seen_stage_symbols[stage_name] = list(symbols)
+        return type(
+            "Plan",
+            (),
+            {
+                "stage_name": stage_name,
+                "latest_by_symbol": {symbol: None for symbol in symbols},
+                "earliest_by_symbol": {},
+                "pending_symbols": [],
+                "ready_outputs": {},
+            },
+        )()
+
+    monkeypatch.setattr("src.collector_tushare.load_backfill_exhaustion", lambda: pd.DataFrame())
+    monkeypatch.setattr("src.collector_tushare.build_backfill_exhaustion_lookup", lambda frame: {})
+    monkeypatch.setattr("src.collector_tushare.load_aux_empty_results", lambda: pd.DataFrame())
+    monkeypatch.setattr("src.collector_tushare.build_aux_empty_lookup", lambda frame: {})
+    monkeypatch.setattr("src.collector_tushare.load_symbol_cache", lambda: None)
+    monkeypatch.setattr("src.collector_tushare.precheck_stage_updates", fake_precheck)
+    monkeypatch.setattr(
+        "src.collector_tushare.precheck_aux_stage_symbols",
+        lambda symbols, **kwargs: ([], list(symbols)),
+    )
+
+    run_tushare_update_pipeline(
+        ["000001", "301683"],
+        target_end_date=pd.Timestamp("2026-03-31"),
+        max_workers=1,
+        effective_end_dates={},
+        selected_stage_names=("daily", "fina_indicator"),
+        lifecycle_scope_symbols={"000001"},
+    )
+
+    assert seen_stage_symbols["daily"] == ["000001"]
 
 
 def test_resolve_symbol_lifecycle_status_and_effective_end_date_for_delisted() -> None:

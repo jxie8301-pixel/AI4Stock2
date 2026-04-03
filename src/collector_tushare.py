@@ -1226,6 +1226,27 @@ def split_symbols_by_completion(
     return pending, completed, effective_end_dates
 
 
+def filter_symbols_by_lifecycle_applicability(
+    symbols: list[str],
+    lifecycle_registry: pd.DataFrame,
+) -> tuple[list[str], list[str]]:
+    if lifecycle_registry.empty:
+        return list(symbols), []
+    registry_by_symbol = lifecycle_registry.set_index("local_symbol", drop=False)
+    eligible: list[str] = []
+    skipped: list[str] = []
+    for symbol in symbols:
+        if symbol not in registry_by_symbol.index:
+            eligible.append(symbol)
+            continue
+        row = registry_by_symbol.loc[symbol]
+        if str(row.get("lifecycle_status") or "") == "not_yet_listed":
+            skipped.append(symbol)
+            continue
+        eligible.append(symbol)
+    return eligible, skipped
+
+
 def precheck_pending_symbols(
     symbols: list[str],
     target_end_date: pd.Timestamp,
@@ -1973,6 +1994,7 @@ def run_tushare_update_pipeline(
     max_workers: int,
     effective_end_dates: dict[str, pd.Timestamp] | None = None,
     selected_stage_names: tuple[str, ...] = DEFAULT_STAGE_NAMES,
+    lifecycle_scope_symbols: set[str] | None = None,
 ) -> list[TaskResult]:
     exhaustion_frame = load_backfill_exhaustion()
     exhaustion_lookup = build_backfill_exhaustion_lookup(exhaustion_frame)
@@ -2124,8 +2146,9 @@ def run_tushare_update_pipeline(
     for stage_name, spec in stage_specs:
         stage_dir = spec["stage_dir"]
         if spec["completion_policy"] == "lifecycle_end_date":
+            stage_symbols = list(lifecycle_scope_symbols or set(symbols))
             stage_plans[stage_name] = precheck_stage_updates(
-                symbols,
+                stage_symbols,
                 stage_name,
                 stage_dir,
                 target_end_date,
@@ -2541,6 +2564,7 @@ def main() -> None:
         if not symbols:
             raise SystemExit("[!] No Tushare symbols to process.")
         effective_end_dates: dict[str, pd.Timestamp] | None = None
+        lifecycle_scope_symbols: set[str] | None = None
         lifecycle_selected = any(stage in PROCESSED_DEPENDENCY_STAGE_NAMES for stage in selected_stage_names)
         event_stage_selected = any(stage in EVENT_STAGE_NAMES for stage in selected_stage_names)
         requested_symbols = list(symbols)
@@ -2548,14 +2572,21 @@ def main() -> None:
             pending_lifecycle_symbols, completed_symbols, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
                 symbols, target_end_date=latest_trading_date
             )
+            lifecycle_scope_symbols = set(pending_lifecycle_symbols)
             if not lifecycle_registry.empty:
                 lifecycle_counts = lifecycle_registry["lifecycle_status"].value_counts().to_dict()
                 counts_text = ", ".join(f"{key}={value}" for key, value in sorted(lifecycle_counts.items()))
                 print(f"[*] Tushare lifecycle snapshot: {counts_text}")
             if completed_symbols:
                 print(f"[*] Skipping {len(completed_symbols)} already-complete Tushare symbols.")
+            eligible_symbols, skipped_not_yet_listed = filter_symbols_by_lifecycle_applicability(
+                requested_symbols,
+                lifecycle_registry,
+            )
+            if skipped_not_yet_listed:
+                print(f"[*] Skipping {len(skipped_not_yet_listed)} not-yet-listed Tushare symbols.")
             if event_stage_selected:
-                symbols = requested_symbols
+                symbols = eligible_symbols
             else:
                 symbols = pending_lifecycle_symbols
             if not symbols:
@@ -2572,6 +2603,7 @@ def main() -> None:
             max_workers=args.workers,
             effective_end_dates=effective_end_dates,
             selected_stage_names=selected_stage_names,
+            lifecycle_scope_symbols=lifecycle_scope_symbols,
         )
 
     success = sum(1 for item in results if item.ok)

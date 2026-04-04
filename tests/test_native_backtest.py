@@ -714,6 +714,79 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "holdings_after"], {})
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_score_source"], "rank_pct")
 
+    def test_expected_return_intraperiod_exit_uses_calibrated_future_return(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(
+                    [
+                        "2024-01-02",
+                        "2024-01-03",
+                        "2024-01-04",
+                        "2024-01-05",
+                        "2024-01-08",
+                        "2024-01-09",
+                    ]
+                ),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series(
+            [
+                2.0, 1.0,
+                0.2, 0.8,
+                0.3, 0.7,
+                3.0, 1.0,
+                0.25, 0.9,
+                0.2, 1.0,
+            ],
+            index=index,
+        )
+        labels = pd.Series(
+            [
+                0.0, 0.0,
+                -0.05, 0.02,
+                -0.05, 0.02,
+                0.0, 0.0,
+                -0.10, 0.01,
+                -0.05, 0.01,
+            ],
+            index=index,
+        )
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=3,
+            intraperiod_exit={
+                "mode": "expected_return_threshold",
+                "score_source": "raw",
+                "threshold": 0.0,
+                "calibration": "quantile_bins",
+                "n_bins": 2,
+                "min_history": 2,
+            },
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-08")},
+        )
+
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-08"), "intraperiod_exit_count"]), 1)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-08"), "sell_count"]), 1)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-08"), "holdings"]), 0)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-08"), "net_return"]), 0.0, places=8)
+        self.assertLess(float(report.loc[pd.Timestamp("2024-01-08"), "intraperiod_exit_signal_min"]), 0.0)
+        self.assertEqual(trace.loc[pd.Timestamp("2024-01-08"), "trade_sell_list"], ["A"])
+        self.assertEqual(trace.loc[pd.Timestamp("2024-01-08"), "intraperiod_exit_mode"], "expected_return_threshold")
+        self.assertLess(float(trace.loc[pd.Timestamp("2024-01-08"), "intraperiod_exit_signal_values"]["A"]), 0.0)
+
     def test_reference_backtest_matches_native_report(self):
         index = pd.MultiIndex.from_product(
             [

@@ -142,6 +142,9 @@ TOP_LEVEL_SCHEMA = {
             "mode": None,
             "score_source": None,
             "threshold": None,
+            "calibration": None,
+            "n_bins": None,
+            "min_history": None,
         },
         "dynamic_risk": {
             "mode": None,
@@ -436,10 +439,12 @@ def validate_training_config(
         if not isinstance(intraperiod_exit_cfg, dict):
             raise ValueError("backtest.intraperiod_exit must be a mapping when provided")
         exit_mode = str(intraperiod_exit_cfg.get("mode", "none") or "none").strip().lower()
-        if exit_mode not in {"none", "score_threshold"}:
-            raise ValueError("backtest.intraperiod_exit.mode must be one of: none, score_threshold")
+        if exit_mode not in {"none", "score_threshold", "expected_return_threshold"}:
+            raise ValueError(
+                "backtest.intraperiod_exit.mode must be one of: none, score_threshold, expected_return_threshold"
+            )
         intraperiod_exit_cfg["mode"] = exit_mode
-        if exit_mode == "score_threshold":
+        if exit_mode in {"score_threshold", "expected_return_threshold"}:
             score_source = str(intraperiod_exit_cfg.get("score_source", "raw") or "raw").strip().lower()
             if score_source not in {"raw", "transformed", "rank_pct", "zscore"}:
                 raise ValueError(
@@ -447,6 +452,13 @@ def validate_training_config(
                 )
             intraperiod_exit_cfg["score_source"] = score_source
             intraperiod_exit_cfg["threshold"] = float(intraperiod_exit_cfg.get("threshold", 0.0))
+        if exit_mode == "expected_return_threshold":
+            calibration = str(intraperiod_exit_cfg.get("calibration", "quantile_bins") or "quantile_bins").strip().lower()
+            if calibration not in {"quantile_bins"}:
+                raise ValueError("backtest.intraperiod_exit.calibration must be one of: quantile_bins")
+            intraperiod_exit_cfg["calibration"] = calibration
+            intraperiod_exit_cfg["n_bins"] = max(int(intraperiod_exit_cfg.get("n_bins", 20) or 20), 2)
+            intraperiod_exit_cfg["min_history"] = max(int(intraperiod_exit_cfg.get("min_history", 200) or 200), 1)
     benchmark_cfg = backtest_cfg.get("benchmark")
     if benchmark_cfg is not None:
         if not isinstance(benchmark_cfg, dict):

@@ -233,11 +233,38 @@ class ConfigValidationTest(unittest.TestCase):
 
         self.assertEqual(validated["backtest"]["intraperiod_exit"]["mode"], "score_threshold")
 
+    def test_validate_training_config_accepts_expected_return_intraperiod_exit(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["intraperiod_exit"] = {
+            "mode": "expected_return_threshold",
+            "score_source": "raw",
+            "threshold": 0.0,
+            "calibration": "quantile_bins",
+            "n_bins": 8,
+            "min_history": 16,
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["mode"], "expected_return_threshold")
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["n_bins"], 8)
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["min_history"], 16)
+
     def test_validate_training_config_rejects_invalid_intraperiod_exit_mode(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["intraperiod_exit"] = {"mode": "demo"}
 
         with self.assertRaisesRegex(ValueError, "backtest.intraperiod_exit.mode must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_invalid_intraperiod_exit_calibration(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["intraperiod_exit"] = {
+            "mode": "expected_return_threshold",
+            "calibration": "demo",
+        }
+
+        with self.assertRaisesRegex(ValueError, "backtest.intraperiod_exit.calibration must be one of"):
             validate_training_config(cfg, check_paths=False)
 
     def test_validate_training_config_rejects_invalid_risk_control_windows(self):

@@ -19,8 +19,9 @@ DEFAULT_SCORE_TRANSFORM = "none"
 SUPPORTED_SCORE_TRANSFORMS = ("none", "rank_pct", "zscore_clip")
 SUPPORTED_RISK_CONTROL_MODES = ("fixed", "benchmark_ma", "signal_strength", "benchmark_ma_signal_strength")
 SUPPORTED_SIGNAL_STRENGTH_METRICS = ("top1", "topk_mean", "topk_sum")
-SUPPORTED_INTRAPERIOD_EXIT_MODES = ("none", "score_threshold")
+SUPPORTED_INTRAPERIOD_EXIT_MODES = ("none", "score_threshold", "expected_return_threshold")
 SUPPORTED_EXIT_SCORE_SOURCES = ("raw", "transformed", "rank_pct", "zscore")
+SUPPORTED_INTRAPERIOD_EXIT_CALIBRATIONS = ("quantile_bins",)
 
 
 def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
@@ -52,7 +53,7 @@ def _normalize_min_score(min_score: float | None) -> float | None:
 
 def _normalize_intraperiod_exit_config(
     intraperiod_exit: dict[str, object] | None,
-) -> dict[str, float | str] | None:
+) -> dict[str, float | int | str] | None:
     if intraperiod_exit is None:
         return None
     if not isinstance(intraperiod_exit, dict):
@@ -71,11 +72,22 @@ def _normalize_intraperiod_exit_config(
             f"Supported: {', '.join(SUPPORTED_EXIT_SCORE_SOURCES)}"
         )
     threshold = float(intraperiod_exit.get("threshold", 0.0))
-    return {
+    out: dict[str, float | int | str] = {
         "mode": mode,
         "score_source": score_source,
         "threshold": threshold,
     }
+    if mode == "expected_return_threshold":
+        calibration = str(intraperiod_exit.get("calibration", "quantile_bins") or "quantile_bins").strip().lower()
+        if calibration not in SUPPORTED_INTRAPERIOD_EXIT_CALIBRATIONS:
+            raise ValueError(
+                f"Unsupported intraperiod exit calibration: {calibration}. "
+                f"Supported: {', '.join(SUPPORTED_INTRAPERIOD_EXIT_CALIBRATIONS)}"
+            )
+        out["calibration"] = calibration
+        out["n_bins"] = max(int(intraperiod_exit.get("n_bins", 20) or 20), 2)
+        out["min_history"] = max(int(intraperiod_exit.get("min_history", 200) or 200), 1)
+    return out
 
 
 def _resolve_intraperiod_exit_scores(
@@ -98,6 +110,170 @@ def _resolve_intraperiod_exit_scores(
         f"Unsupported intraperiod exit score_source: {score_source}. "
         f"Supported: {', '.join(SUPPORTED_EXIT_SCORE_SOURCES)}"
     )
+
+
+def _build_intraperiod_exit_score_matrix(
+    pred_matrix: pd.DataFrame,
+    *,
+    intraperiod_exit_cfg: dict[str, float | int | str] | None,
+    score_transform: str,
+    zscore_clip: float,
+) -> pd.DataFrame | None:
+    if intraperiod_exit_cfg is None:
+        return None
+    rows: list[pd.Series] = []
+    for date in pred_matrix.index:
+        rows.append(
+            _resolve_intraperiod_exit_scores(
+                pred_matrix.loc[date],
+                score_source=str(intraperiod_exit_cfg["score_source"]),
+                score_transform=score_transform,
+                zscore_clip=zscore_clip,
+            )
+        )
+    if not rows:
+        return None
+    return pd.DataFrame(rows, index=pred_matrix.index, columns=pred_matrix.columns, dtype=float)
+
+
+def _build_intraperiod_remaining_steps(index: pd.Index, *, rebalance_freq: int) -> pd.Series:
+    out = pd.Series(0, index=index, dtype=int)
+    total_dates = len(index)
+    for pos, date in enumerate(index):
+        if pos % rebalance_freq == 0:
+            continue
+        next_rebalance_pos = min(((pos // rebalance_freq) + 1) * rebalance_freq, total_dates)
+        out.loc[date] = max(next_rebalance_pos - pos, 0)
+    return out
+
+
+def _build_intraperiod_residual_return_matrix(
+    label_matrix: pd.DataFrame,
+    *,
+    remaining_steps: pd.Series,
+) -> pd.DataFrame:
+    values = label_matrix.to_numpy(dtype=float, copy=False)
+    out = np.full(values.shape, np.nan, dtype=float)
+    steps_array = remaining_steps.reindex(label_matrix.index).to_numpy(dtype=int, copy=False)
+
+    for pos, steps in enumerate(steps_array):
+        if steps <= 0:
+            continue
+        window = values[pos : pos + int(steps)]
+        if window.size == 0:
+            continue
+        valid = np.isfinite(window).all(axis=0)
+        if not valid.any():
+            continue
+        out[pos, valid] = np.prod(1.0 + window[:, valid], axis=0) - 1.0
+
+    return pd.DataFrame(out, index=label_matrix.index, columns=label_matrix.columns, dtype=float)
+
+
+def _get_intraperiod_history_arrays(
+    history_entry: dict[str, object] | None,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if history_entry is None:
+        return None, None
+    scores_cache = history_entry.get("scores_cache")
+    returns_cache = history_entry.get("returns_cache")
+    if isinstance(scores_cache, np.ndarray) and isinstance(returns_cache, np.ndarray):
+        return scores_cache, returns_cache
+
+    score_chunks = history_entry.get("score_chunks")
+    return_chunks = history_entry.get("return_chunks")
+    if not isinstance(score_chunks, list) or not isinstance(return_chunks, list) or not score_chunks:
+        return None, None
+
+    scores = np.concatenate(score_chunks).astype(float, copy=False)
+    returns = np.concatenate(return_chunks).astype(float, copy=False)
+    history_entry["scores_cache"] = scores
+    history_entry["returns_cache"] = returns
+    return scores, returns
+
+
+def _append_intraperiod_history(
+    history: dict[int, dict[str, object]],
+    *,
+    remaining_steps: int,
+    score_row: pd.Series,
+    residual_row: pd.Series,
+) -> None:
+    if remaining_steps <= 0:
+        return
+    valid_mask = score_row.notna() & residual_row.notna()
+    if not valid_mask.any():
+        return
+    entry = history.setdefault(
+        int(remaining_steps),
+        {
+            "score_chunks": [],
+            "return_chunks": [],
+            "scores_cache": None,
+            "returns_cache": None,
+        },
+    )
+    score_values = score_row.loc[valid_mask].to_numpy(dtype=float, copy=False)
+    residual_values = residual_row.loc[valid_mask].to_numpy(dtype=float, copy=False)
+    if score_values.size == 0:
+        return
+    score_chunks = entry["score_chunks"]
+    return_chunks = entry["return_chunks"]
+    if isinstance(score_chunks, list) and isinstance(return_chunks, list):
+        score_chunks.append(score_values)
+        return_chunks.append(residual_values)
+    entry["scores_cache"] = None
+    entry["returns_cache"] = None
+
+
+def _estimate_intraperiod_expected_returns(
+    score_row: pd.Series,
+    *,
+    history_entry: dict[str, object] | None,
+    n_bins: int,
+    min_history: int,
+) -> pd.Series:
+    out = pd.Series(np.nan, index=score_row.index, dtype=float)
+    history_scores, history_returns = _get_intraperiod_history_arrays(history_entry)
+    if history_scores is None or history_returns is None:
+        return out
+
+    valid_history = np.isfinite(history_scores) & np.isfinite(history_returns)
+    if int(valid_history.sum()) < int(min_history):
+        return out
+
+    history_scores = history_scores[valid_history]
+    history_returns = history_returns[valid_history]
+    if history_scores.size == 0:
+        return out
+
+    bin_count = max(1, min(int(n_bins), int(history_scores.size)))
+    if bin_count == 1:
+        out.loc[score_row.notna()] = float(history_returns.mean())
+        return out
+
+    quantiles = np.linspace(0.0, 1.0, bin_count + 1)
+    edges = np.quantile(history_scores, quantiles)
+    if not np.isfinite(edges).all() or np.isclose(edges[0], edges[-1]):
+        out.loc[score_row.notna()] = float(history_returns.mean())
+        return out
+
+    inner_edges = edges[1:-1]
+    history_bucket = np.searchsorted(inner_edges, history_scores, side="right")
+    bucket_counts = np.bincount(history_bucket, minlength=bin_count)
+    bucket_sums = np.bincount(history_bucket, weights=history_returns, minlength=bin_count)
+    global_mean = float(history_returns.mean())
+    bucket_means = np.full(bin_count, global_mean, dtype=float)
+    nonzero = bucket_counts > 0
+    bucket_means[nonzero] = bucket_sums[nonzero] / bucket_counts[nonzero]
+
+    current_values = score_row.to_numpy(dtype=float, copy=False)
+    valid_current = np.isfinite(current_values)
+    if not valid_current.any():
+        return out
+    current_bucket = np.searchsorted(inner_edges, current_values[valid_current], side="right")
+    out.iloc[np.flatnonzero(valid_current)] = bucket_means[current_bucket]
+    return out
 
 
 def _validate_risk_degree(value: float, field: str) -> float:
@@ -653,6 +829,24 @@ def run_native_backtest(
         score_transform=score_transform,
         zscore_clip=score_zscore_clip,
     )
+    intraperiod_score_matrix = _build_intraperiod_exit_score_matrix(
+        pred_matrix,
+        intraperiod_exit_cfg=intraperiod_exit_cfg,
+        score_transform=score_transform,
+        zscore_clip=score_zscore_clip,
+    )
+    intraperiod_remaining_steps = _build_intraperiod_remaining_steps(
+        pred_matrix.index,
+        rebalance_freq=rebalance_freq,
+    )
+    intraperiod_residual_matrix = None
+    intraperiod_history: dict[int, dict[str, object]] | None = None
+    if intraperiod_exit_cfg is not None and str(intraperiod_exit_cfg["mode"]) == "expected_return_threshold":
+        intraperiod_residual_matrix = _build_intraperiod_residual_return_matrix(
+            label_matrix,
+            remaining_steps=intraperiod_remaining_steps,
+        )
+        intraperiod_history = {}
     rebalance_dates = set(pred_matrix.index[::rebalance_freq])
     trace_dates_norm = None
     if trace_dates is not None:
@@ -679,6 +873,9 @@ def run_native_backtest(
         buy_count = 0
         sell_count = 0
         intraperiod_exit_count = 0
+        intraperiod_exit_signal_mean = np.nan
+        intraperiod_exit_signal_min = np.nan
+        intraperiod_exit_signal_values: dict[str, float] = {}
         frozen_holdings = 0
         date_returns = label_matrix.loc[date]
         locked_holdings = {
@@ -788,17 +985,29 @@ def run_native_backtest(
             target_weights = pd.Series(dtype=float)
             target_values = pd.Series(dtype=float)
             if intraperiod_exit_cfg is not None:
-                day_scores = _resolve_intraperiod_exit_scores(
-                    pred_matrix.loc[date],
-                    score_source=str(intraperiod_exit_cfg["score_source"]),
-                    score_transform=score_transform,
-                    zscore_clip=score_zscore_clip,
-                )
+                day_scores = intraperiod_score_matrix.loc[date] if intraperiod_score_matrix is not None else pd.Series(dtype=float)
                 threshold = float(intraperiod_exit_cfg["threshold"])
+                exit_mode = str(intraperiod_exit_cfg["mode"])
+                signal_values = day_scores
+                if exit_mode == "expected_return_threshold":
+                    remaining_steps = int(intraperiod_remaining_steps.get(date, 0))
+                    signal_values = _estimate_intraperiod_expected_returns(
+                        day_scores,
+                        history_entry=None if intraperiod_history is None else intraperiod_history.get(remaining_steps),
+                        n_bins=int(intraperiod_exit_cfg.get("n_bins", 20)),
+                        min_history=int(intraperiod_exit_cfg.get("min_history", 200)),
+                    )
+                held_signal_values = signal_values.reindex(list(holdings.keys())).dropna()
+                if not held_signal_values.empty:
+                    intraperiod_exit_signal_mean = float(held_signal_values.mean())
+                    intraperiod_exit_signal_min = float(held_signal_values.min())
+                    intraperiod_exit_signal_values = {
+                        stock: float(value) for stock, value in held_signal_values.items()
+                    }
                 for stock in list(holdings.keys()):
                     if stock in locked_holdings:
                         continue
-                    score_value = day_scores.get(stock, np.nan)
+                    score_value = signal_values.get(stock, np.nan)
                     if pd.isna(score_value) or float(score_value) > threshold:
                         continue
                     position_value = holdings.pop(stock, 0.0)
@@ -845,6 +1054,8 @@ def run_native_backtest(
                 "buy_count": buy_count,
                 "sell_count": sell_count,
                 "intraperiod_exit_count": intraperiod_exit_count,
+                "intraperiod_exit_signal_mean": intraperiod_exit_signal_mean,
+                "intraperiod_exit_signal_min": intraperiod_exit_signal_min,
                 "holdings": len(holdings),
                 "frozen_holdings": frozen_holdings,
                 "account_value": end_value,
@@ -875,6 +1086,13 @@ def run_native_backtest(
                     "intraperiod_exit_score_source": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["score_source"],
                     "intraperiod_exit_threshold": None if intraperiod_exit_cfg is None else float(intraperiod_exit_cfg["threshold"]),
                     "intraperiod_exit_count": int(intraperiod_exit_count),
+                    "intraperiod_exit_signal_mean": float(intraperiod_exit_signal_mean)
+                    if pd.notna(intraperiod_exit_signal_mean)
+                    else np.nan,
+                    "intraperiod_exit_signal_min": float(intraperiod_exit_signal_min)
+                    if pd.notna(intraperiod_exit_signal_min)
+                    else np.nan,
+                    "intraperiod_exit_signal_values": dict(intraperiod_exit_signal_values),
                     "score_transform": score_transform,
                     "score_zscore_clip": score_zscore_clip,
                     "keep_top_n": keep_top_n,
@@ -890,6 +1108,15 @@ def run_native_backtest(
                     "net_return": float(net_return),
                     "frozen_holdings": int(frozen_holdings),
                 }
+            )
+
+        if intraperiod_history is not None and intraperiod_score_matrix is not None and intraperiod_residual_matrix is not None:
+            remaining_steps = int(intraperiod_remaining_steps.get(date, 0))
+            _append_intraperiod_history(
+                intraperiod_history,
+                remaining_steps=remaining_steps,
+                score_row=intraperiod_score_matrix.loc[date],
+                residual_row=intraperiod_residual_matrix.loc[date],
             )
 
     report = pd.DataFrame.from_records(records).set_index("datetime")

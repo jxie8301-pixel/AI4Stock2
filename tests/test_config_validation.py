@@ -221,6 +221,25 @@ class ConfigValidationTest(unittest.TestCase):
 
         self.assertEqual(validated["backtest"]["risk_control"]["mode"], "benchmark_ma")
 
+    def test_validate_training_config_accepts_intraperiod_exit(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["intraperiod_exit"] = {
+            "mode": "score_threshold",
+            "score_source": "rank_pct",
+            "threshold": 0.0,
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["mode"], "score_threshold")
+
+    def test_validate_training_config_rejects_invalid_intraperiod_exit_mode(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["intraperiod_exit"] = {"mode": "demo"}
+
+        with self.assertRaisesRegex(ValueError, "backtest.intraperiod_exit.mode must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_invalid_risk_control_windows(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["risk_control"] = {

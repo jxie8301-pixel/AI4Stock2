@@ -138,6 +138,11 @@ TOP_LEVEL_SCHEMA = {
             "min_risk": None,
             "max_risk": None,
         },
+        "intraperiod_exit": {
+            "mode": None,
+            "score_source": None,
+            "threshold": None,
+        },
         "dynamic_risk": {
             "mode": None,
             "fast_window": None,
@@ -426,6 +431,22 @@ def validate_training_config(
             if max_signal_quantile is not None:
                 validated_risk_cfg["max_signal_quantile"] = max_signal_quantile
     backtest_cfg["risk_control"] = validated_risk_cfg
+    intraperiod_exit_cfg = backtest_cfg.get("intraperiod_exit")
+    if intraperiod_exit_cfg is not None:
+        if not isinstance(intraperiod_exit_cfg, dict):
+            raise ValueError("backtest.intraperiod_exit must be a mapping when provided")
+        exit_mode = str(intraperiod_exit_cfg.get("mode", "none") or "none").strip().lower()
+        if exit_mode not in {"none", "score_threshold"}:
+            raise ValueError("backtest.intraperiod_exit.mode must be one of: none, score_threshold")
+        intraperiod_exit_cfg["mode"] = exit_mode
+        if exit_mode == "score_threshold":
+            score_source = str(intraperiod_exit_cfg.get("score_source", "raw") or "raw").strip().lower()
+            if score_source not in {"raw", "transformed", "rank_pct", "zscore"}:
+                raise ValueError(
+                    "backtest.intraperiod_exit.score_source must be one of: raw, transformed, rank_pct, zscore"
+                )
+            intraperiod_exit_cfg["score_source"] = score_source
+            intraperiod_exit_cfg["threshold"] = float(intraperiod_exit_cfg.get("threshold", 0.0))
     benchmark_cfg = backtest_cfg.get("benchmark")
     if benchmark_cfg is not None:
         if not isinstance(benchmark_cfg, dict):

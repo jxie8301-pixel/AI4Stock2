@@ -726,6 +726,7 @@ def evaluate_prediction_bundle(
         min_score=cfg["strategy"].get("min_score"),
         benchmark_returns=bench_series,
         risk_control=cfg["backtest"].get("risk_control"),
+        intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
     )
     plot_report = backtest_report.rename(columns={"net_return": "return"})
     plot_report["bench"] = align_benchmark_to_report_index(

@@ -19,6 +19,8 @@ DEFAULT_SCORE_TRANSFORM = "none"
 SUPPORTED_SCORE_TRANSFORMS = ("none", "rank_pct", "zscore_clip")
 SUPPORTED_RISK_CONTROL_MODES = ("fixed", "benchmark_ma", "signal_strength", "benchmark_ma_signal_strength")
 SUPPORTED_SIGNAL_STRENGTH_METRICS = ("top1", "topk_mean", "topk_sum")
+SUPPORTED_INTRAPERIOD_EXIT_MODES = ("none", "score_threshold")
+SUPPORTED_EXIT_SCORE_SOURCES = ("raw", "transformed", "rank_pct", "zscore")
 
 
 def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
@@ -46,6 +48,56 @@ def _normalize_min_score(min_score: float | None) -> float | None:
     if min_score is None:
         return None
     return float(min_score)
+
+
+def _normalize_intraperiod_exit_config(
+    intraperiod_exit: dict[str, object] | None,
+) -> dict[str, float | str] | None:
+    if intraperiod_exit is None:
+        return None
+    if not isinstance(intraperiod_exit, dict):
+        raise ValueError("intraperiod_exit must be a mapping when provided")
+    mode = str(intraperiod_exit.get("mode", "none") or "none").strip().lower()
+    if mode == "none":
+        return None
+    if mode not in SUPPORTED_INTRAPERIOD_EXIT_MODES:
+        raise ValueError(
+            f"Unsupported intraperiod exit mode: {mode}. Supported: {', '.join(SUPPORTED_INTRAPERIOD_EXIT_MODES)}"
+        )
+    score_source = str(intraperiod_exit.get("score_source", "raw") or "raw").strip().lower()
+    if score_source not in SUPPORTED_EXIT_SCORE_SOURCES:
+        raise ValueError(
+            f"Unsupported intraperiod exit score_source: {score_source}. "
+            f"Supported: {', '.join(SUPPORTED_EXIT_SCORE_SOURCES)}"
+        )
+    threshold = float(intraperiod_exit.get("threshold", 0.0))
+    return {
+        "mode": mode,
+        "score_source": score_source,
+        "threshold": threshold,
+    }
+
+
+def _resolve_intraperiod_exit_scores(
+    scores: pd.Series,
+    *,
+    score_source: str,
+    score_transform: str,
+    zscore_clip: float,
+) -> pd.Series:
+    mode = str(score_source or "raw").strip().lower()
+    if mode == "raw":
+        return pd.to_numeric(scores, errors="coerce").astype(float)
+    if mode == "transformed":
+        return _transform_scores(scores, score_transform=score_transform, zscore_clip=zscore_clip)
+    if mode == "rank_pct":
+        return _transform_scores(scores, score_transform="rank_pct", zscore_clip=zscore_clip)
+    if mode == "zscore":
+        return _transform_scores(scores, score_transform="zscore_clip", zscore_clip=zscore_clip)
+    raise ValueError(
+        f"Unsupported intraperiod exit score_source: {score_source}. "
+        f"Supported: {', '.join(SUPPORTED_EXIT_SCORE_SOURCES)}"
+    )
 
 
 def _validate_risk_degree(value: float, field: str) -> float:
@@ -550,6 +602,7 @@ def run_native_backtest(
     min_score: float | None = None,
     benchmark_returns: pd.Series | None = None,
     risk_control: dict[str, object] | None = None,
+    intraperiod_exit: dict[str, object] | None = None,
     dynamic_risk: dict[str, object] | None = None,
     return_trace: bool = False,
     trace_dates: set[pd.Timestamp] | None = None,
@@ -569,6 +622,7 @@ def run_native_backtest(
     min_score = _normalize_min_score(min_score)
     risk_degree = _validate_risk_degree(float(risk_degree), "risk_degree")
     score_zscore_clip = max(float(score_zscore_clip), 0.0)
+    intraperiod_exit_cfg = _normalize_intraperiod_exit_config(intraperiod_exit)
     if risk_control is not None and dynamic_risk is not None:
         raise ValueError("Provide only one of risk_control or dynamic_risk")
     raw_risk_control = risk_control if risk_control is not None else dynamic_risk
@@ -624,6 +678,7 @@ def run_native_backtest(
         sell_value = 0.0
         buy_count = 0
         sell_count = 0
+        intraperiod_exit_count = 0
         frozen_holdings = 0
         date_returns = label_matrix.loc[date]
         locked_holdings = {
@@ -732,6 +787,31 @@ def run_native_backtest(
             trade_buy_list = []
             target_weights = pd.Series(dtype=float)
             target_values = pd.Series(dtype=float)
+            if intraperiod_exit_cfg is not None:
+                day_scores = _resolve_intraperiod_exit_scores(
+                    pred_matrix.loc[date],
+                    score_source=str(intraperiod_exit_cfg["score_source"]),
+                    score_transform=score_transform,
+                    zscore_clip=score_zscore_clip,
+                )
+                threshold = float(intraperiod_exit_cfg["threshold"])
+                for stock in list(holdings.keys()):
+                    if stock in locked_holdings:
+                        continue
+                    score_value = day_scores.get(stock, np.nan)
+                    if pd.isna(score_value) or float(score_value) > threshold:
+                        continue
+                    position_value = holdings.pop(stock, 0.0)
+                    if position_value <= 0:
+                        continue
+                    cost_value = _trade_cost(position_value, close_rate, min_cost)
+                    cash += position_value - cost_value
+                    trade_cost_value += cost_value
+                    sell_value += position_value
+                    sell_count += 1
+                    intraperiod_exit_count += 1
+                    sell_list.append(stock)
+                    trade_sell_list.append(stock)
 
         gross_pnl = 0.0
         for stock, position_value in list(holdings.items()):
@@ -764,6 +844,7 @@ def run_native_backtest(
                 else 0.0,
                 "buy_count": buy_count,
                 "sell_count": sell_count,
+                "intraperiod_exit_count": intraperiod_exit_count,
                 "holdings": len(holdings),
                 "frozen_holdings": frozen_holdings,
                 "account_value": end_value,
@@ -790,6 +871,10 @@ def run_native_backtest(
                     "risk_degree": current_risk_degree,
                     "risk_control_mode": risk_control_cfg["mode"],
                     "risk_control_signal": current_risk_signal,
+                    "intraperiod_exit_mode": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["mode"],
+                    "intraperiod_exit_score_source": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["score_source"],
+                    "intraperiod_exit_threshold": None if intraperiod_exit_cfg is None else float(intraperiod_exit_cfg["threshold"]),
+                    "intraperiod_exit_count": int(intraperiod_exit_count),
                     "score_transform": score_transform,
                     "score_zscore_clip": score_zscore_clip,
                     "keep_top_n": keep_top_n,

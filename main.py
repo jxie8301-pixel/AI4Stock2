@@ -380,6 +380,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         min_score=cfg["strategy"].get("min_score"),
         benchmark_returns=bench_series,
         risk_control=cfg["backtest"].get("risk_control"),
+        intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
     )
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
@@ -430,6 +431,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             min_score=cfg["strategy"].get("min_score"),
             benchmark_returns=bench_series,
             risk_control=cfg["backtest"].get("risk_control"),
+            intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
             return_trace=True,
             trace_dates=trace_dates,
         )[1],

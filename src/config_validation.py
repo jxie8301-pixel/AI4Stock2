@@ -130,6 +130,11 @@ TOP_LEVEL_SCHEMA = {
             "bull_risk": None,
             "neutral_risk": None,
             "bear_risk": None,
+            "signal_metric": None,
+            "min_signal": None,
+            "max_signal": None,
+            "min_risk": None,
+            "max_risk": None,
         },
         "dynamic_risk": {
             "mode": None,
@@ -138,6 +143,11 @@ TOP_LEVEL_SCHEMA = {
             "bull_risk": None,
             "neutral_risk": None,
             "bear_risk": None,
+            "signal_metric": None,
+            "min_signal": None,
+            "max_signal": None,
+            "min_risk": None,
+            "max_risk": None,
         },
     },
     "time": {
@@ -328,8 +338,8 @@ def validate_training_config(
         risk_mode = str(raw_risk_cfg.get("mode", "fixed") or "fixed").strip().lower()
         if risk_control_cfg is None and risk_mode == "none":
             risk_mode = "fixed"
-        if risk_mode not in {"fixed", "benchmark_ma"}:
-            raise ValueError("backtest.risk_control.mode must be one of: fixed, benchmark_ma")
+        if risk_mode not in {"fixed", "benchmark_ma", "signal_strength"}:
+            raise ValueError("backtest.risk_control.mode must be one of: fixed, benchmark_ma, signal_strength")
         validated_risk_cfg["mode"] = risk_mode
         if risk_mode == "fixed":
             fixed_risk = float(raw_risk_cfg.get("risk_degree", risk_degree))
@@ -358,6 +368,33 @@ def validate_training_config(
                     "bull_risk": bull_risk,
                     "neutral_risk": neutral_risk,
                     "bear_risk": bear_risk,
+                }
+            )
+        elif risk_mode == "signal_strength":
+            signal_metric = str(raw_risk_cfg.get("signal_metric", "topk_mean") or "topk_mean").strip().lower()
+            if signal_metric not in {"top1", "topk_mean", "topk_sum"}:
+                raise ValueError("backtest.risk_control.signal_metric must be one of: top1, topk_mean, topk_sum")
+            min_signal = float(raw_risk_cfg.get("min_signal", 0.0))
+            max_signal = float(raw_risk_cfg.get("max_signal", 2.0))
+            if max_signal <= min_signal:
+                raise ValueError("backtest.risk_control.max_signal must be greater than backtest.risk_control.min_signal")
+            min_risk = float(raw_risk_cfg.get("min_risk", min(risk_degree, 0.3)))
+            max_risk = float(raw_risk_cfg.get("max_risk", risk_degree))
+            for field_name, value in (
+                ("backtest.risk_control.min_risk", min_risk),
+                ("backtest.risk_control.max_risk", max_risk),
+            ):
+                if value < 0 or value > 1:
+                    raise ValueError(f"{field_name} must be in [0, 1]")
+            if max_risk < min_risk:
+                raise ValueError("backtest.risk_control.max_risk must be >= backtest.risk_control.min_risk")
+            validated_risk_cfg.update(
+                {
+                    "signal_metric": signal_metric,
+                    "min_signal": min_signal,
+                    "max_signal": max_signal,
+                    "min_risk": min_risk,
+                    "max_risk": max_risk,
                 }
             )
     backtest_cfg["risk_control"] = validated_risk_cfg

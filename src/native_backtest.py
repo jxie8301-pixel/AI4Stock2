@@ -17,7 +17,8 @@ DEFAULT_WEIGHTING = "equal"
 SUPPORTED_WEIGHTING_MODES = ("equal", "rank", "score_softmax")
 DEFAULT_SCORE_TRANSFORM = "none"
 SUPPORTED_SCORE_TRANSFORMS = ("none", "rank_pct", "zscore_clip")
-SUPPORTED_RISK_CONTROL_MODES = ("fixed", "benchmark_ma")
+SUPPORTED_RISK_CONTROL_MODES = ("fixed", "benchmark_ma", "signal_strength")
+SUPPORTED_SIGNAL_STRENGTH_METRICS = ("top1", "topk_mean", "topk_sum")
 
 
 def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
@@ -79,6 +80,36 @@ def _normalize_risk_control_config(
                 "risk_control.risk_degree",
             ),
         }
+    if mode == "signal_strength":
+        signal_metric = str(risk_control.get("signal_metric", "topk_mean") or "topk_mean").strip().lower()
+        if signal_metric not in SUPPORTED_SIGNAL_STRENGTH_METRICS:
+            raise ValueError(
+                "risk_control.signal_metric must be one of: "
+                + ", ".join(SUPPORTED_SIGNAL_STRENGTH_METRICS)
+            )
+        min_signal = float(risk_control.get("min_signal", 0.0))
+        max_signal = float(risk_control.get("max_signal", 2.0))
+        if max_signal <= min_signal:
+            raise ValueError("risk_control.max_signal must be greater than risk_control.min_signal")
+        min_risk = _validate_risk_degree(
+            float(risk_control.get("min_risk", min(fallback_risk_degree, 0.3))),
+            "risk_control.min_risk",
+        )
+        max_risk = _validate_risk_degree(
+            float(risk_control.get("max_risk", fallback_risk_degree)),
+            "risk_control.max_risk",
+        )
+        if max_risk < min_risk:
+            raise ValueError("risk_control.max_risk must be >= risk_control.min_risk")
+        return {
+            "mode": mode,
+            "risk_degree": _validate_risk_degree(float(fallback_risk_degree), "risk_control.risk_degree"),
+            "signal_metric": signal_metric,
+            "min_signal": min_signal,
+            "max_signal": max_signal,
+            "min_risk": min_risk,
+            "max_risk": max_risk,
+        }
     fast_window = max(int(risk_control.get("fast_window", 120) or 120), 1)
     slow_window = max(int(risk_control.get("slow_window", 250) or 250), 1)
     if fast_window >= slow_window:
@@ -100,15 +131,69 @@ def _normalize_risk_control_config(
     }
 
 
+def _compute_signal_strength_value(
+    scores: pd.Series,
+    *,
+    topk: int,
+    min_score: float | None,
+    score_transform: str,
+    zscore_clip: float,
+    signal_metric: str,
+) -> float:
+    transformed = _transform_scores(scores, score_transform=score_transform, zscore_clip=zscore_clip)
+    ranked = transformed.dropna().sort_values(ascending=False)
+    min_score_value = _normalize_min_score(min_score)
+    if min_score_value is not None:
+        ranked = ranked[ranked > min_score_value]
+    if ranked.empty:
+        return float("nan")
+    top_values = ranked.iloc[: max(int(topk), 1)]
+    if signal_metric == "top1":
+        return float(top_values.iloc[0])
+    if signal_metric == "topk_sum":
+        return float(top_values.sum())
+    return float(top_values.mean())
+
+
 def _build_risk_control_schedule(
     benchmark_returns: pd.Series | None,
+    pred_matrix: pd.DataFrame,
     *,
     risk_control: dict[str, float | int | str],
     fallback_risk_degree: float,
-) -> pd.Series | None:
+    topk: int,
+    min_score: float | None,
+    score_transform: str,
+    zscore_clip: float,
+) -> tuple[pd.Series | None, pd.Series | None]:
     mode = str(risk_control.get("mode") or "fixed")
     if mode == "fixed":
-        return None
+        return None, None
+    if mode == "signal_strength":
+        signal_metric = str(risk_control["signal_metric"])
+        signal_values = pd.Series(
+            {
+                date: _compute_signal_strength_value(
+                    pred_matrix.loc[date],
+                    topk=topk,
+                    min_score=min_score,
+                    score_transform=score_transform,
+                    zscore_clip=zscore_clip,
+                    signal_metric=signal_metric,
+                )
+                for date in pred_matrix.index
+            },
+            dtype=float,
+        ).sort_index()
+        min_signal = float(risk_control["min_signal"])
+        max_signal = float(risk_control["max_signal"])
+        scale = (signal_values - min_signal) / (max_signal - min_signal)
+        scale = scale.clip(lower=0.0, upper=1.0).fillna(0.0)
+        min_risk = float(risk_control["min_risk"])
+        max_risk = float(risk_control["max_risk"])
+        schedule = (min_risk + scale * (max_risk - min_risk)).astype(float)
+        return schedule, signal_values
+
     if benchmark_returns is None:
         raise ValueError("benchmark_returns is required when risk_control.mode needs benchmark context")
     benchmark_returns = pd.Series(benchmark_returns).astype(float).sort_index()
@@ -131,7 +216,7 @@ def _build_risk_control_schedule(
     raw_schedule.loc[nav >= fast_ma] = float(risk_control["bull_risk"])
 
     # Use only information available before the current trading day.
-    return raw_schedule.shift(1).fillna(float(fallback_risk_degree)).astype(float)
+    return raw_schedule.shift(1).fillna(float(fallback_risk_degree)).astype(float), None
 
 
 def _transform_scores(
@@ -385,11 +470,6 @@ def run_native_backtest(
         raise ValueError("Provide only one of risk_control or dynamic_risk")
     raw_risk_control = risk_control if risk_control is not None else dynamic_risk
     risk_control_cfg = _normalize_risk_control_config(raw_risk_control, fallback_risk_degree=risk_degree)
-    risk_schedule = _build_risk_control_schedule(
-        benchmark_returns,
-        risk_control=risk_control_cfg,
-        fallback_risk_degree=risk_degree,
-    )
     open_rate = float(cost_buy) + float(slippage)
     close_rate = float(cost_sell) + float(slippage)
 
@@ -406,6 +486,16 @@ def run_native_backtest(
     label_matrix = label_matrix.loc[valid_dates]
     if pred_matrix.empty:
         raise ValueError("Native backtest received no dates with any realized returns.")
+    risk_schedule, risk_signal_schedule = _build_risk_control_schedule(
+        benchmark_returns,
+        pred_matrix,
+        risk_control=risk_control_cfg,
+        fallback_risk_degree=risk_degree,
+        topk=topk,
+        min_score=min_score,
+        score_transform=score_transform,
+        zscore_clip=score_zscore_clip,
+    )
     rebalance_dates = set(pred_matrix.index[::rebalance_freq])
     trace_dates_norm = None
     if trace_dates is not None:
@@ -421,6 +511,11 @@ def run_native_backtest(
         holdings_before = _snapshot_holdings(holdings)
         start_value = cash + sum(holdings.values())
         current_risk_degree = float(risk_schedule.get(date, risk_control_cfg["risk_degree"])) if risk_schedule is not None else float(risk_control_cfg["risk_degree"])
+        current_risk_signal = (
+            float(risk_signal_schedule.get(date))
+            if risk_signal_schedule is not None and pd.notna(risk_signal_schedule.get(date))
+            else np.nan
+        )
         trade_cost_value = 0.0
         buy_value = 0.0
         sell_value = 0.0
@@ -570,6 +665,7 @@ def run_native_backtest(
                 "frozen_holdings": frozen_holdings,
                 "account_value": end_value,
                 "risk_degree": current_risk_degree,
+                "risk_control_signal": current_risk_signal,
             }
         )
         if return_trace and (trace_dates_norm is None or pd.Timestamp(date) in trace_dates_norm):
@@ -590,6 +686,7 @@ def run_native_backtest(
                     "weighting": weighting,
                     "risk_degree": current_risk_degree,
                     "risk_control_mode": risk_control_cfg["mode"],
+                    "risk_control_signal": current_risk_signal,
                     "score_transform": score_transform,
                     "score_zscore_clip": score_zscore_clip,
                     "keep_top_n": keep_top_n,

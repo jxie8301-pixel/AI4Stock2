@@ -133,6 +133,8 @@ TOP_LEVEL_SCHEMA = {
             "signal_metric": None,
             "min_signal": None,
             "max_signal": None,
+            "min_signal_quantile": None,
+            "max_signal_quantile": None,
             "min_risk": None,
             "max_risk": None,
         },
@@ -146,6 +148,8 @@ TOP_LEVEL_SCHEMA = {
             "signal_metric": None,
             "min_signal": None,
             "max_signal": None,
+            "min_signal_quantile": None,
+            "max_signal_quantile": None,
             "min_risk": None,
             "max_risk": None,
         },
@@ -338,15 +342,17 @@ def validate_training_config(
         risk_mode = str(raw_risk_cfg.get("mode", "fixed") or "fixed").strip().lower()
         if risk_control_cfg is None and risk_mode == "none":
             risk_mode = "fixed"
-        if risk_mode not in {"fixed", "benchmark_ma", "signal_strength"}:
-            raise ValueError("backtest.risk_control.mode must be one of: fixed, benchmark_ma, signal_strength")
+        if risk_mode not in {"fixed", "benchmark_ma", "signal_strength", "benchmark_ma_signal_strength"}:
+            raise ValueError(
+                "backtest.risk_control.mode must be one of: fixed, benchmark_ma, signal_strength, benchmark_ma_signal_strength"
+            )
         validated_risk_cfg["mode"] = risk_mode
         if risk_mode == "fixed":
             fixed_risk = float(raw_risk_cfg.get("risk_degree", risk_degree))
             if fixed_risk < 0 or fixed_risk > 1:
                 raise ValueError("backtest.risk_control.risk_degree must be in [0, 1]")
             validated_risk_cfg["risk_degree"] = fixed_risk
-        elif risk_mode == "benchmark_ma":
+        elif risk_mode in {"benchmark_ma", "benchmark_ma_signal_strength"}:
             fast_window = _expect_positive_int(raw_risk_cfg.get("fast_window", 120), "backtest.risk_control.fast_window")
             slow_window = _expect_positive_int(raw_risk_cfg.get("slow_window", 250), "backtest.risk_control.slow_window")
             if fast_window >= slow_window:
@@ -370,7 +376,7 @@ def validate_training_config(
                     "bear_risk": bear_risk,
                 }
             )
-        elif risk_mode == "signal_strength":
+        if risk_mode in {"signal_strength", "benchmark_ma_signal_strength"}:
             signal_metric = str(raw_risk_cfg.get("signal_metric", "topk_mean") or "topk_mean").strip().lower()
             if signal_metric not in {"top1", "topk_mean", "topk_sum"}:
                 raise ValueError("backtest.risk_control.signal_metric must be one of: top1, topk_mean, topk_sum")
@@ -378,6 +384,24 @@ def validate_training_config(
             max_signal = float(raw_risk_cfg.get("max_signal", 2.0))
             if max_signal <= min_signal:
                 raise ValueError("backtest.risk_control.max_signal must be greater than backtest.risk_control.min_signal")
+            min_signal_quantile = raw_risk_cfg.get("min_signal_quantile")
+            max_signal_quantile = raw_risk_cfg.get("max_signal_quantile")
+            if min_signal_quantile is not None:
+                min_signal_quantile = float(min_signal_quantile)
+                if min_signal_quantile < 0 or min_signal_quantile > 1:
+                    raise ValueError("backtest.risk_control.min_signal_quantile must be in [0, 1]")
+            if max_signal_quantile is not None:
+                max_signal_quantile = float(max_signal_quantile)
+                if max_signal_quantile < 0 or max_signal_quantile > 1:
+                    raise ValueError("backtest.risk_control.max_signal_quantile must be in [0, 1]")
+            if (
+                min_signal_quantile is not None
+                and max_signal_quantile is not None
+                and max_signal_quantile <= min_signal_quantile
+            ):
+                raise ValueError(
+                    "backtest.risk_control.max_signal_quantile must be greater than backtest.risk_control.min_signal_quantile"
+                )
             min_risk = float(raw_risk_cfg.get("min_risk", min(risk_degree, 0.3)))
             max_risk = float(raw_risk_cfg.get("max_risk", risk_degree))
             for field_name, value in (
@@ -397,6 +421,10 @@ def validate_training_config(
                     "max_risk": max_risk,
                 }
             )
+            if min_signal_quantile is not None:
+                validated_risk_cfg["min_signal_quantile"] = min_signal_quantile
+            if max_signal_quantile is not None:
+                validated_risk_cfg["max_signal_quantile"] = max_signal_quantile
     backtest_cfg["risk_control"] = validated_risk_cfg
     benchmark_cfg = backtest_cfg.get("benchmark")
     if benchmark_cfg is not None:

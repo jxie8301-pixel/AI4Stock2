@@ -165,6 +165,28 @@ class ConfigValidationTest(unittest.TestCase):
 
         self.assertEqual(validated["backtest"]["risk_control"]["mode"], "signal_strength")
 
+    def test_validate_training_config_accepts_risk_control_benchmark_ma_signal_strength(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["risk_control"] = {
+            "mode": "benchmark_ma_signal_strength",
+            "fast_window": 120,
+            "slow_window": 250,
+            "bull_risk": 0.95,
+            "neutral_risk": 0.80,
+            "bear_risk": 0.50,
+            "signal_metric": "topk_mean",
+            "min_signal": 0.0,
+            "max_signal": 2.0,
+            "min_risk": 0.40,
+            "max_risk": 0.95,
+            "min_signal_quantile": 0.2,
+            "max_signal_quantile": 0.8,
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["backtest"]["risk_control"]["mode"], "benchmark_ma_signal_strength")
+
     def test_validate_training_config_rejects_invalid_signal_strength_bounds(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["risk_control"] = {
@@ -174,6 +196,17 @@ class ConfigValidationTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "backtest.risk_control.max_signal must be greater"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_invalid_signal_strength_quantiles(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["risk_control"] = {
+            "mode": "signal_strength",
+            "min_signal_quantile": 0.8,
+            "max_signal_quantile": 0.2,
+        }
+
+        with self.assertRaisesRegex(ValueError, "backtest.risk_control.max_signal_quantile must be greater"):
             validate_training_config(cfg, check_paths=False)
 
     def test_validate_training_config_accepts_legacy_dynamic_risk_alias(self):

@@ -551,6 +551,92 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(trace["risk_control_mode"].tolist(), ["signal_strength", "signal_strength"])
         self.assertAlmostEqual(trace.loc[pd.Timestamp("2024-01-03"), "holdings_after"]["A"], 400.0, places=8)
 
+    def test_signal_strength_quantiles_use_lagged_history(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([1.0, 0.0, 3.0, 0.0, 2.0, 0.0], index=index)
+        labels = pd.Series(0.0, index=index)
+
+        report = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            risk_control={
+                "mode": "signal_strength",
+                "signal_metric": "top1",
+                "min_signal": 0.0,
+                "max_signal": 4.0,
+                "min_signal_quantile": 0.25,
+                "max_signal_quantile": 0.75,
+                "min_risk": 0.2,
+                "max_risk": 1.0,
+            },
+        )
+
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-02"), "risk_degree"]), 0.4, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "risk_degree"]), 0.8, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-04"), "risk_degree"]), 0.6, places=8)
+
+    def test_benchmark_ma_signal_strength_caps_signal_risk(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([3.0, 0.0, 3.0, 0.0, 3.0, 0.0], index=index)
+        labels = pd.Series(0.0, index=index)
+        benchmark_returns = pd.Series(
+            [0.0, -0.5, 0.0],
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+        )
+
+        report = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            benchmark_returns=benchmark_returns,
+            risk_control={
+                "mode": "benchmark_ma_signal_strength",
+                "fast_window": 2,
+                "slow_window": 3,
+                "bull_risk": 1.0,
+                "neutral_risk": 0.5,
+                "bear_risk": 0.0,
+                "signal_metric": "top1",
+                "min_signal": 0.0,
+                "max_signal": 3.0,
+                "min_risk": 0.4,
+                "max_risk": 1.0,
+            },
+        )
+
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-02"), "risk_degree"]), 1.0, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "risk_degree"]), 1.0, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-04"), "risk_degree"]), 0.0, places=8)
+
     def test_reference_backtest_matches_native_report(self):
         index = pd.MultiIndex.from_product(
             [

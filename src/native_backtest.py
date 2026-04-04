@@ -17,7 +17,7 @@ DEFAULT_WEIGHTING = "equal"
 SUPPORTED_WEIGHTING_MODES = ("equal", "rank", "score_softmax")
 DEFAULT_SCORE_TRANSFORM = "none"
 SUPPORTED_SCORE_TRANSFORMS = ("none", "rank_pct", "zscore_clip")
-SUPPORTED_DYNAMIC_RISK_MODES = ("none", "benchmark_ma")
+SUPPORTED_RISK_CONTROL_MODES = ("fixed", "benchmark_ma")
 
 
 def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
@@ -54,34 +54,44 @@ def _validate_risk_degree(value: float, field: str) -> float:
     return out
 
 
-def _normalize_dynamic_risk_config(
-    dynamic_risk: dict[str, object] | None,
+def _normalize_risk_control_config(
+    risk_control: dict[str, object] | None,
     *,
     fallback_risk_degree: float,
-) -> dict[str, float | int | str] | None:
-    if dynamic_risk is None:
-        return None
-    if not isinstance(dynamic_risk, dict):
-        raise ValueError("dynamic_risk must be a mapping when provided")
-    mode = str(dynamic_risk.get("mode", "none") or "none").strip().lower()
-    if mode == "none":
-        return None
-    if mode != "benchmark_ma":
+) -> dict[str, float | int | str]:
+    if risk_control is None:
+        return {
+            "mode": "fixed",
+            "risk_degree": _validate_risk_degree(float(fallback_risk_degree), "risk_control.risk_degree"),
+        }
+    if not isinstance(risk_control, dict):
+        raise ValueError("risk_control must be a mapping when provided")
+    mode = str(risk_control.get("mode", "fixed") or "fixed").strip().lower()
+    if mode not in SUPPORTED_RISK_CONTROL_MODES:
         raise ValueError(
-            f"Unsupported dynamic risk mode: {mode}. Supported: {', '.join(SUPPORTED_DYNAMIC_RISK_MODES)}"
+            f"Unsupported risk control mode: {mode}. Supported: {', '.join(SUPPORTED_RISK_CONTROL_MODES)}"
         )
-    fast_window = max(int(dynamic_risk.get("fast_window", 120) or 120), 1)
-    slow_window = max(int(dynamic_risk.get("slow_window", 250) or 250), 1)
+    if mode == "fixed":
+        return {
+            "mode": "fixed",
+            "risk_degree": _validate_risk_degree(
+                float(risk_control.get("risk_degree", fallback_risk_degree)),
+                "risk_control.risk_degree",
+            ),
+        }
+    fast_window = max(int(risk_control.get("fast_window", 120) or 120), 1)
+    slow_window = max(int(risk_control.get("slow_window", 250) or 250), 1)
     if fast_window >= slow_window:
-        raise ValueError("dynamic_risk.fast_window must be smaller than dynamic_risk.slow_window")
-    bull_risk = _validate_risk_degree(float(dynamic_risk.get("bull_risk", fallback_risk_degree)), "dynamic_risk.bull_risk")
+        raise ValueError("risk_control.fast_window must be smaller than risk_control.slow_window")
+    bull_risk = _validate_risk_degree(float(risk_control.get("bull_risk", fallback_risk_degree)), "risk_control.bull_risk")
     neutral_risk = _validate_risk_degree(
-        float(dynamic_risk.get("neutral_risk", min(fallback_risk_degree, 0.5))),
-        "dynamic_risk.neutral_risk",
+        float(risk_control.get("neutral_risk", min(fallback_risk_degree, 0.5))),
+        "risk_control.neutral_risk",
     )
-    bear_risk = _validate_risk_degree(float(dynamic_risk.get("bear_risk", 0.15)), "dynamic_risk.bear_risk")
+    bear_risk = _validate_risk_degree(float(risk_control.get("bear_risk", 0.15)), "risk_control.bear_risk")
     return {
         "mode": mode,
+        "risk_degree": _validate_risk_degree(float(fallback_risk_degree), "risk_control.risk_degree"),
         "fast_window": fast_window,
         "slow_window": slow_window,
         "bull_risk": bull_risk,
@@ -90,35 +100,35 @@ def _normalize_dynamic_risk_config(
     }
 
 
-def _build_dynamic_risk_schedule(
+def _build_risk_control_schedule(
     benchmark_returns: pd.Series | None,
     *,
-    dynamic_risk: dict[str, float | int | str] | None,
+    risk_control: dict[str, float | int | str],
     fallback_risk_degree: float,
 ) -> pd.Series | None:
-    if dynamic_risk is None:
+    mode = str(risk_control.get("mode") or "fixed")
+    if mode == "fixed":
         return None
     if benchmark_returns is None:
-        raise ValueError("benchmark_returns is required when dynamic_risk is enabled")
+        raise ValueError("benchmark_returns is required when risk_control.mode needs benchmark context")
     benchmark_returns = pd.Series(benchmark_returns).astype(float).sort_index()
     if benchmark_returns.empty:
-        raise ValueError("benchmark_returns is empty while dynamic_risk is enabled")
+        raise ValueError("benchmark_returns is empty while risk_control.mode needs benchmark context")
 
-    mode = str(dynamic_risk.get("mode") or "none")
     if mode != "benchmark_ma":
         raise ValueError(
-            f"Unsupported dynamic risk mode: {mode}. Supported: {', '.join(SUPPORTED_DYNAMIC_RISK_MODES)}"
+            f"Unsupported risk control mode: {mode}. Supported: {', '.join(SUPPORTED_RISK_CONTROL_MODES)}"
         )
 
     nav = (1.0 + benchmark_returns.fillna(0.0)).cumprod()
-    fast_window = int(dynamic_risk["fast_window"])
-    slow_window = int(dynamic_risk["slow_window"])
+    fast_window = int(risk_control["fast_window"])
+    slow_window = int(risk_control["slow_window"])
     fast_ma = nav.rolling(fast_window, min_periods=1).mean()
     slow_ma = nav.rolling(slow_window, min_periods=1).mean()
 
-    raw_schedule = pd.Series(float(dynamic_risk["bear_risk"]), index=nav.index, dtype=float)
-    raw_schedule.loc[nav >= slow_ma] = float(dynamic_risk["neutral_risk"])
-    raw_schedule.loc[nav >= fast_ma] = float(dynamic_risk["bull_risk"])
+    raw_schedule = pd.Series(float(risk_control["bear_risk"]), index=nav.index, dtype=float)
+    raw_schedule.loc[nav >= slow_ma] = float(risk_control["neutral_risk"])
+    raw_schedule.loc[nav >= fast_ma] = float(risk_control["bull_risk"])
 
     # Use only information available before the current trading day.
     return raw_schedule.shift(1).fillna(float(fallback_risk_degree)).astype(float)
@@ -351,6 +361,7 @@ def run_native_backtest(
     keep_top_n: int | None = None,
     min_score: float | None = None,
     benchmark_returns: pd.Series | None = None,
+    risk_control: dict[str, object] | None = None,
     dynamic_risk: dict[str, object] | None = None,
     return_trace: bool = False,
     trace_dates: set[pd.Timestamp] | None = None,
@@ -370,10 +381,13 @@ def run_native_backtest(
     min_score = _normalize_min_score(min_score)
     risk_degree = _validate_risk_degree(float(risk_degree), "risk_degree")
     score_zscore_clip = max(float(score_zscore_clip), 0.0)
-    dynamic_risk_cfg = _normalize_dynamic_risk_config(dynamic_risk, fallback_risk_degree=risk_degree)
-    risk_schedule = _build_dynamic_risk_schedule(
+    if risk_control is not None and dynamic_risk is not None:
+        raise ValueError("Provide only one of risk_control or dynamic_risk")
+    raw_risk_control = risk_control if risk_control is not None else dynamic_risk
+    risk_control_cfg = _normalize_risk_control_config(raw_risk_control, fallback_risk_degree=risk_degree)
+    risk_schedule = _build_risk_control_schedule(
         benchmark_returns,
-        dynamic_risk=dynamic_risk_cfg,
+        risk_control=risk_control_cfg,
         fallback_risk_degree=risk_degree,
     )
     open_rate = float(cost_buy) + float(slippage)
@@ -406,7 +420,7 @@ def run_native_backtest(
         cash_before = float(cash)
         holdings_before = _snapshot_holdings(holdings)
         start_value = cash + sum(holdings.values())
-        current_risk_degree = float(risk_schedule.get(date, risk_degree)) if risk_schedule is not None else float(risk_degree)
+        current_risk_degree = float(risk_schedule.get(date, risk_control_cfg["risk_degree"])) if risk_schedule is not None else float(risk_control_cfg["risk_degree"])
         trade_cost_value = 0.0
         buy_value = 0.0
         sell_value = 0.0
@@ -575,7 +589,7 @@ def run_native_backtest(
                     "trade_buy_list": list(trade_buy_list),
                     "weighting": weighting,
                     "risk_degree": current_risk_degree,
-                    "dynamic_risk_mode": None if dynamic_risk_cfg is None else dynamic_risk_cfg["mode"],
+                    "risk_control_mode": risk_control_cfg["mode"],
                     "score_transform": score_transform,
                     "score_zscore_clip": score_zscore_clip,
                     "keep_top_n": keep_top_n,

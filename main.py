@@ -379,7 +379,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         keep_top_n=cfg["strategy"].get("keep_top_n"),
         min_score=cfg["strategy"].get("min_score"),
         benchmark_returns=bench_series,
-        dynamic_risk=cfg["backtest"].get("dynamic_risk"),
+        risk_control=cfg["backtest"].get("risk_control"),
     )
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
@@ -429,7 +429,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             keep_top_n=cfg["strategy"].get("keep_top_n"),
             min_score=cfg["strategy"].get("min_score"),
             benchmark_returns=bench_series,
-            dynamic_risk=cfg["backtest"].get("dynamic_risk"),
+            risk_control=cfg["backtest"].get("risk_control"),
             return_trace=True,
             trace_dates=trace_dates,
         )[1],

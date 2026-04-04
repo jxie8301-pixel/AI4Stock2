@@ -135,9 +135,9 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "backtest.benchmark.mode must be one of"):
             validate_training_config(cfg, check_paths=False)
 
-    def test_validate_training_config_accepts_dynamic_risk_benchmark_ma(self):
+    def test_validate_training_config_accepts_risk_control_benchmark_ma(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
-        cfg["backtest"]["dynamic_risk"] = {
+        cfg["backtest"]["risk_control"] = {
             "mode": "benchmark_ma",
             "fast_window": 120,
             "slow_window": 250,
@@ -148,24 +148,44 @@ class ConfigValidationTest(unittest.TestCase):
 
         validated = validate_training_config(cfg, check_paths=False)
 
-        self.assertEqual(validated["backtest"]["dynamic_risk"]["mode"], "benchmark_ma")
+        self.assertEqual(validated["backtest"]["risk_control"]["mode"], "benchmark_ma")
 
-    def test_validate_training_config_rejects_invalid_dynamic_risk_windows(self):
+    def test_validate_training_config_accepts_legacy_dynamic_risk_alias(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["dynamic_risk"] = {
+            "mode": "benchmark_ma",
+            "fast_window": 120,
+            "slow_window": 250,
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["backtest"]["risk_control"]["mode"], "benchmark_ma")
+
+    def test_validate_training_config_rejects_invalid_risk_control_windows(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["risk_control"] = {
             "mode": "benchmark_ma",
             "fast_window": 250,
             "slow_window": 120,
         }
 
-        with self.assertRaisesRegex(ValueError, "backtest.dynamic_risk.fast_window must be smaller"):
+        with self.assertRaisesRegex(ValueError, "backtest.risk_control.fast_window must be smaller"):
             validate_training_config(cfg, check_paths=False)
 
-    def test_validate_training_config_rejects_invalid_dynamic_risk_mode(self):
+    def test_validate_training_config_rejects_invalid_risk_control_mode(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
-        cfg["backtest"]["dynamic_risk"] = {"mode": "demo"}
+        cfg["backtest"]["risk_control"] = {"mode": "demo"}
 
-        with self.assertRaisesRegex(ValueError, "backtest.dynamic_risk.mode must be one of"):
+        with self.assertRaisesRegex(ValueError, "backtest.risk_control.mode must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_both_risk_configs(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["risk_control"] = {"mode": "fixed", "risk_degree": 0.95}
+        cfg["backtest"]["dynamic_risk"] = {"mode": "benchmark_ma"}
+
+        with self.assertRaisesRegex(ValueError, "Use either backtest.risk_control or backtest.dynamic_risk"):
             validate_training_config(cfg, check_paths=False)
 
 

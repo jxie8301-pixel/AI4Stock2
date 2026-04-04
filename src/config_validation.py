@@ -122,6 +122,15 @@ TOP_LEVEL_SCHEMA = {
         "min_cost": None,
         "account": None,
         "risk_degree": None,
+        "risk_control": {
+            "mode": None,
+            "risk_degree": None,
+            "fast_window": None,
+            "slow_window": None,
+            "bull_risk": None,
+            "neutral_risk": None,
+            "bear_risk": None,
+        },
         "dynamic_risk": {
             "mode": None,
             "fast_window": None,
@@ -306,34 +315,52 @@ def validate_training_config(
     risk_degree = float(backtest_cfg.get("risk_degree", 0.0))
     if risk_degree <= 0 or risk_degree > 1:
         raise ValueError("backtest.risk_degree must be in (0, 1]")
+    risk_control_cfg = backtest_cfg.get("risk_control")
     dynamic_risk_cfg = backtest_cfg.get("dynamic_risk")
-    if dynamic_risk_cfg is not None:
-        if not isinstance(dynamic_risk_cfg, dict):
-            raise ValueError("backtest.dynamic_risk must be a mapping when provided")
-        dynamic_risk_mode = str(dynamic_risk_cfg.get("mode", "none") or "none").strip().lower()
-        if dynamic_risk_mode not in {"none", "benchmark_ma"}:
-            raise ValueError("backtest.dynamic_risk.mode must be one of: none, benchmark_ma")
-        dynamic_risk_cfg["mode"] = dynamic_risk_mode
-        if dynamic_risk_mode == "benchmark_ma":
-            fast_window = _expect_positive_int(dynamic_risk_cfg.get("fast_window", 120), "backtest.dynamic_risk.fast_window")
-            slow_window = _expect_positive_int(dynamic_risk_cfg.get("slow_window", 250), "backtest.dynamic_risk.slow_window")
+    if risk_control_cfg is not None and dynamic_risk_cfg is not None:
+        raise ValueError("Use either backtest.risk_control or backtest.dynamic_risk, not both")
+    raw_risk_cfg = risk_control_cfg if risk_control_cfg is not None else dynamic_risk_cfg
+    validated_risk_cfg = {"mode": "fixed", "risk_degree": risk_degree}
+    if raw_risk_cfg is not None:
+        if not isinstance(raw_risk_cfg, dict):
+            cfg_name = "backtest.risk_control" if risk_control_cfg is not None else "backtest.dynamic_risk"
+            raise ValueError(f"{cfg_name} must be a mapping when provided")
+        risk_mode = str(raw_risk_cfg.get("mode", "fixed") or "fixed").strip().lower()
+        if risk_control_cfg is None and risk_mode == "none":
+            risk_mode = "fixed"
+        if risk_mode not in {"fixed", "benchmark_ma"}:
+            raise ValueError("backtest.risk_control.mode must be one of: fixed, benchmark_ma")
+        validated_risk_cfg["mode"] = risk_mode
+        if risk_mode == "fixed":
+            fixed_risk = float(raw_risk_cfg.get("risk_degree", risk_degree))
+            if fixed_risk < 0 or fixed_risk > 1:
+                raise ValueError("backtest.risk_control.risk_degree must be in [0, 1]")
+            validated_risk_cfg["risk_degree"] = fixed_risk
+        elif risk_mode == "benchmark_ma":
+            fast_window = _expect_positive_int(raw_risk_cfg.get("fast_window", 120), "backtest.risk_control.fast_window")
+            slow_window = _expect_positive_int(raw_risk_cfg.get("slow_window", 250), "backtest.risk_control.slow_window")
             if fast_window >= slow_window:
-                raise ValueError("backtest.dynamic_risk.fast_window must be smaller than backtest.dynamic_risk.slow_window")
-            bull_risk = float(dynamic_risk_cfg.get("bull_risk", risk_degree))
-            neutral_risk = float(dynamic_risk_cfg.get("neutral_risk", min(risk_degree, 0.5)))
-            bear_risk = float(dynamic_risk_cfg.get("bear_risk", 0.15))
+                raise ValueError("backtest.risk_control.fast_window must be smaller than backtest.risk_control.slow_window")
+            bull_risk = float(raw_risk_cfg.get("bull_risk", risk_degree))
+            neutral_risk = float(raw_risk_cfg.get("neutral_risk", min(risk_degree, 0.5)))
+            bear_risk = float(raw_risk_cfg.get("bear_risk", 0.15))
             for field_name, value in (
-                ("backtest.dynamic_risk.bull_risk", bull_risk),
-                ("backtest.dynamic_risk.neutral_risk", neutral_risk),
-                ("backtest.dynamic_risk.bear_risk", bear_risk),
+                ("backtest.risk_control.bull_risk", bull_risk),
+                ("backtest.risk_control.neutral_risk", neutral_risk),
+                ("backtest.risk_control.bear_risk", bear_risk),
             ):
                 if value < 0 or value > 1:
                     raise ValueError(f"{field_name} must be in [0, 1]")
-            dynamic_risk_cfg["fast_window"] = fast_window
-            dynamic_risk_cfg["slow_window"] = slow_window
-            dynamic_risk_cfg["bull_risk"] = bull_risk
-            dynamic_risk_cfg["neutral_risk"] = neutral_risk
-            dynamic_risk_cfg["bear_risk"] = bear_risk
+            validated_risk_cfg.update(
+                {
+                    "fast_window": fast_window,
+                    "slow_window": slow_window,
+                    "bull_risk": bull_risk,
+                    "neutral_risk": neutral_risk,
+                    "bear_risk": bear_risk,
+                }
+            )
+    backtest_cfg["risk_control"] = validated_risk_cfg
     benchmark_cfg = backtest_cfg.get("benchmark")
     if benchmark_cfg is not None:
         if not isinstance(benchmark_cfg, dict):

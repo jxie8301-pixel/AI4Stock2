@@ -426,6 +426,90 @@ def get_all_factor_feature_names(
     return feature_names
 
 
+def get_known_exact_duplicate_feature_groups(
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+    temporal_config: dict[str, Any] | None = None,
+) -> list[tuple[str, ...]]:
+    """Return default full-factor columns that are generated from the same formula.
+
+    These groups exist because the unified factor space intentionally keeps
+    Alpha158, compact LGBM-style, and temporal families side by side. That is
+    useful for ablations, but some default windows produce exact duplicates.
+    Downstream profile builders can use this registry to keep only one
+    representative per group without rebuilding the entire factor store.
+    """
+
+    alpha_cfg = deepcopy(DEFAULT_ALPHA158_CONFIG)
+    if alpha158_config is not None:
+        alpha_cfg.update(alpha158_config)
+    lgbm_cfg = deepcopy(DEFAULT_LGBM_PURIFIED_CONFIG)
+    if lgbm_purified_config is not None:
+        lgbm_cfg.update(lgbm_purified_config)
+    temporal_cfg = deepcopy(DEFAULT_TEMPORAL_FACTOR_CONFIG)
+    if temporal_config is not None:
+        temporal_cfg.update(temporal_config)
+
+    alpha_rolling_cfg = alpha_cfg.get("rolling", {})
+    alpha_windows = {int(value) for value in alpha_rolling_cfg.get("windows", [5, 10, 20, 30, 60])}
+    alpha_include = alpha_rolling_cfg.get("include")
+    alpha_exclude = set(alpha_rolling_cfg.get("exclude", []))
+
+    def alpha_uses(op: str) -> bool:
+        return op not in alpha_exclude and (alpha_include is None or op in alpha_include)
+
+    temporal_windows = {int(value) for value in temporal_cfg.get("windows", [])}
+    temporal_groups = set(temporal_cfg.get("groups", []))
+
+    groups: list[tuple[str, ...]] = []
+
+    if alpha_uses("RSV") and "rsv" in temporal_groups:
+        for window in sorted(alpha_windows & temporal_windows):
+            groups.append((f"RSV{window}", f"{TEMPORAL_FACTOR_PREFIX}rsv_{window}"))
+
+    if alpha_uses("CORR") and "corr_cv" in temporal_groups:
+        for window in sorted(alpha_windows & temporal_windows):
+            groups.append((f"CORR{window}", f"{TEMPORAL_FACTOR_PREFIX}corr_cv_{window}"))
+
+    if "ret" in temporal_groups:
+        for window in sorted({int(value) for value in lgbm_cfg.get("momentum_windows", [])} & temporal_windows):
+            groups.append((f"{ALL_FACTORS_LGBM_PREFIX}ret_{window}", f"{TEMPORAL_FACTOR_PREFIX}ret_{window}"))
+
+    if "ma_gap" in temporal_groups:
+        for window in sorted({int(value) for value in lgbm_cfg.get("ma_windows", [])} & temporal_windows):
+            groups.append(
+                (f"{ALL_FACTORS_LGBM_PREFIX}dist_ma{window}", f"{TEMPORAL_FACTOR_PREFIX}ma_gap_{window}")
+            )
+
+    if "std" in temporal_groups:
+        vol_window = int(lgbm_cfg.get("vol_window", 60))
+        if vol_window in temporal_windows:
+            groups.append((f"{ALL_FACTORS_LGBM_PREFIX}std_60", f"{TEMPORAL_FACTOR_PREFIX}std_{vol_window}"))
+
+    if "amihud" in temporal_groups:
+        amihud_window = int(lgbm_cfg.get("amihud_window", 20))
+        if amihud_window in temporal_windows:
+            groups.append((f"{ALL_FACTORS_LGBM_PREFIX}amihud_20", f"{TEMPORAL_FACTOR_PREFIX}amihud_{amihud_window}"))
+
+    if "turnover_mean" in temporal_groups:
+        turnover_window = int(lgbm_cfg.get("turnover_window", 20))
+        if turnover_window in temporal_windows:
+            groups.append(
+                (
+                    f"{ALL_FACTORS_LGBM_PREFIX}turnover_20",
+                    f"{TEMPORAL_FACTOR_PREFIX}turnover_mean_{turnover_window}",
+                )
+            )
+
+    extreme_window = int(lgbm_cfg.get("extreme_window", 20))
+    if "high_gap" in temporal_groups and extreme_window in temporal_windows:
+        groups.append((f"{ALL_FACTORS_LGBM_PREFIX}dist_high_20", f"{TEMPORAL_FACTOR_PREFIX}high_gap_{extreme_window}"))
+    if "low_gap" in temporal_groups and extreme_window in temporal_windows:
+        groups.append((f"{ALL_FACTORS_LGBM_PREFIX}dist_low_20", f"{TEMPORAL_FACTOR_PREFIX}low_gap_{extreme_window}"))
+
+    return groups
+
+
 def get_lgbm_purified_feature_names(config: dict[str, Any] | None = None) -> list[str]:
     cfg = deepcopy(DEFAULT_LGBM_PURIFIED_CONFIG)
     if config is not None:

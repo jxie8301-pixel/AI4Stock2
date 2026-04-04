@@ -21,6 +21,7 @@ class RunNativeRollingTest(unittest.TestCase):
             final_predictions=pd.Series([0.1, 0.2], index=index, name="prediction"),
             label_series=pd.Series([0.01, 0.02], index=index, name="label"),
             backtest_label_series=pd.Series([0.001, 0.002], index=index, name="label"),
+            avg_factor_baseline_predictions=pd.Series([1.1, 1.2], index=index, name="prediction"),
             selected_feature_names=["f1", "f2"],
             metadata={"signal_horizon": 20, "test_start": "2024-01-02", "test_end": "2024-01-03"},
             feature_importance_frames=[],
@@ -35,6 +36,11 @@ class RunNativeRollingTest(unittest.TestCase):
         pd.testing.assert_series_equal(loaded.final_predictions, bundle.final_predictions, check_names=False)
         pd.testing.assert_series_equal(loaded.label_series, bundle.label_series, check_names=False)
         pd.testing.assert_series_equal(loaded.backtest_label_series, bundle.backtest_label_series, check_names=False)
+        pd.testing.assert_series_equal(
+            loaded.avg_factor_baseline_predictions,
+            bundle.avg_factor_baseline_predictions,
+            check_names=False,
+        )
         self.assertEqual(loaded.selected_feature_names, ["f1", "f2"])
         self.assertEqual(int(loaded.metadata["signal_horizon"]), 20)
 

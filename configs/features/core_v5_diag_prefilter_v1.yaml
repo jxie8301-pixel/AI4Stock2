@@ -1,0 +1,12 @@
+alpha: all_factors
+generation_space: full_factor_space
+factor_store_name: full_factor_space
+selected_columns:
+- CORR20
+- TEMP_ret_120
+- RSV60
+- TECH_trix_hist_15_9
+- TEMP_turnover_mean_20
+- LGBM_bp
+- TECH_adx_14
+- LGBM_log_mcap

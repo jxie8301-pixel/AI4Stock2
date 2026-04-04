@@ -34,19 +34,48 @@ What is true now:
 - The Tushare collector now supports symbol-level incremental updates, lifecycle-aware completion checks, segmented long-history backfill, and stage cooldown after rate-limit errors
 - The native training/feature pipeline now accepts `data.source: tushare` and stores its factor cache under `data/factor_store/tushare_*`
 - A first Tushare-specific feature family now exists, covering涨跌停结构, 自由流通占比, 自由换手, 市销率倒数, and股息率
+- Tushare side-input raw stages now include `fina_indicator`, `dividend`, `forecast`, and `express`
+- Tushare side-input features now include latest announced snapshots from `fina_indicator`, `dividend`, `forecast`, and `express`
 - `src/probe_tushare.py` can be used to inspect real Tushare endpoint columns and latency before integrating new tables into the formal pipeline
 
 ## Current Recommended Workflow
 
-1. Update or refresh Parquet data with `src/collector_akshare.py`
-2. Generate the unified all-factor cache once
-3. Train `lgbm` on rolling windows with `run_native_rolling.py`
-4. Compare experiments through `results/experiments/experiment_index.csv`
+1. Update or refresh Tushare raw / processed parquet with `src/collector_tushare.py`
+2. Generate the Tushare-backed unified factor store with `src/gen_feature.py`
+3. Run rolling `lgbm` baselines with `run_native_rolling.py`
+4. Run `run_single_factor_diagnostics.py` before broad model / strategy sweeps
+5. Compare experiments through `results/experiments/experiment_index.csv`
 
 Active migration note:
 
-- `src/collector_tushare.py` is already wired into the formal native pipeline as an optional `data.source`.
-- It should remain a selectable source until financial/event tables and the next feature layer are added.
+- `src/collector_tushare.py` is now the active research data path for the native pipeline.
+- `akshare` and `gm` should remain selectable comparison / fallback sources until the shared collector utility layer is cleaned up.
+
+## Current Technical Priorities
+
+1. Add single-factor diagnostics and use them to prune or validate new factor families before broad sweeps.
+2. Upgrade training-time feature transforms from one-off functions to a composable fit/transform pipeline.
+3. Compare `LightGBM` ranking objectives against the current regression baseline on the same factor set.
+4. Deduplicate `main.py` and `run_native_rolling.py` so new research features land once.
+5. Improve native backtest realism before reading too much into fine-grained strategy deltas.
+
+## Current Research Baselines
+
+The project now needs three baseline concepts instead of one:
+
+1. Feature baseline
+   - `core_v4_techlite`
+   - Use this as the default reference feature set for ablation and diagnostics.
+2. Offensive production baseline
+   - `core_v4_techlite` + the current primary strategy branch (`score_zscore_top20`)
+   - Use this as the main benchmark for new feature profiles and model objectives.
+3. Defensive production baseline
+   - `core_v4_techlite` + the current defensive strategy branch (`exp_zscore_top20`)
+   - Use this to evaluate whether a new feature set improves smoothness and downside control.
+
+The old `top30 + equal weight + no score transform + no intraperiod exit` rolling setup
+should remain available as a simple historical reference, but it is no longer the main
+system baseline for feature research.
 
 ## Immediate TODO
 
@@ -54,8 +83,12 @@ Active migration note:
 
 - [x] Finalize the first canonical Tushare market-data normalized schema for `combined` parquet
 - [x] Wire the Tushare collector into the formal native feature/training workflow as an optional `data.source`
-- [ ] Add Tushare financial/event raw tables to the formal collector path: `income`, `balancesheet`, `cashflow`, `fina_indicator`, `forecast`, `express`, `dividend`, `fina_audit`, `fina_mainbz`
+- [~] Add Tushare financial/event raw tables to the formal collector path: `income`, `balancesheet`, `cashflow`, `fina_indicator`, `forecast`, `express`, `dividend`, `fina_audit`, `fina_mainbz`
+  Current state: `fina_indicator`, `dividend`, `forecast`, `express` are already wired; next batch should be `income`, `balancesheet`, `cashflow`, then `fina_audit`, `fina_mainbz`
 - [ ] Design the second Tushare factor layer around financial/event tables instead of only daily market tables
+- [x] Finish a full `--stages all` Tushare backfill to a stable converged state and verify repeated reruns are purely incremental for the currently landed stage set
+- [x] Build the Tushare factor store after raw convergence: `uv run python src/gen_feature.py --data-source tushare --workers 16 --incremental`
+- [x] Run the first Tushare-native rolling baseline before adding more tables
 - [ ] Deduplicate `main.py` and `run_native_rolling.py` into shared training/prediction/evaluation helpers before continuing to add more run modes
 - [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
 - [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py`, `collector_gm.py`, and `collector_tushare.py` stop diverging
@@ -75,9 +108,12 @@ Active migration note:
 - [ ] Expand valuation/share-based factors from Eastmoney parquet fields: `ps`, `pcf`, `peg`, `circ_share`, `total_share`, float ratio
 - [ ] Decide whether and how to use the retained Eastmoney daily fields such as `amplitude`, `pct_chg`, and `change`
 - [ ] Expand Tushare-only factors from already-landed market columns: limit-band width/position dynamics, free-float turnover shocks, share-structure drift, and valuation/dividend change factors
-- [ ] Add a rolling single-factor diagnostics report: IC, RankIC, coverage, monotonicity, stability
-- [ ] Add automated prefiltering by minimum coverage plus minimum rolling IC / RankIC threshold
-- [ ] Add redundancy pruning on the selected feature set using correlation clustering before model training
+- [ ] Evaluate whether the newly added Tushare event-side features (`fina_indicator`, `dividend`, `forecast`, `express`) actually improve the rolling baseline before expanding to more statement tables
+- [x] Add a rolling single-factor diagnostics report: IC, RankIC, coverage, monotonicity, stability
+- [~] Add automated prefiltering by minimum coverage plus minimum rolling IC / RankIC threshold
+  Current state: standalone diagnostics-based prefilter tooling now exists; it still needs promotion into a repeatable experiment workflow and selection policy.
+- [~] Add redundancy pruning on the selected feature set using correlation clustering before model training
+  Current state: standalone greedy correlation-pruning tooling now exists for diagnostics-selected candidates; it is not yet integrated into the training path.
 - [ ] Separate factor research into three layers: raw factor generation, stable profile curation, optional training-time auto-filter
 
 ### 2. Training-Time Transforms
@@ -114,12 +150,14 @@ Active migration note:
 - [ ] Add explicit tradability flags for suspension / invalid rows where possible
 - [ ] Evaluate whether limit-up / limit-down blocking should be modeled in native backtest
 - [ ] Add higher-slippage sensitivity experiments
-- [ ] Add risk control experiments for lower turnover and lower drawdown
+- [~] Add risk control experiments for lower turnover and lower drawdown
+  Current state: signal-strength and benchmark-aware risk control modes are implemented and already in the current shortlist; realism and attribution work still remains.
 - [ ] Add embargo / gap controls between train, valid, and test windows to reduce boundary leakage in rolling runs
 
 ### 5. Strategy Layer
 
-- [ ] Add score-weighted portfolio construction instead of pure equal weight
+- [x] Add score-weighted portfolio construction instead of pure equal weight
+- [x] Promote the shortlist winner set into the current production baseline definition
 - [ ] Add sector / style exposure diagnostics
 - [ ] Add market-regime comparison for rebalance frequency
 - [ ] Compare `topk` / `n_drop` combinations systematically
@@ -133,8 +171,10 @@ Active migration note:
 - [ ] Add a unified save/load contract shared by all native models
 - [ ] Add CatBoost as the first non-LGBM tabular baseline
 - [ ] Add a simple linear baseline such as Ridge / ElasticNet for signal sanity checks
-- [ ] Evaluate whether rank objectives should be added before broadening to more tree models
-- [ ] Add a LightGBM ranking experiment path grouped by trade date and compare against regression on the same profiles
+- [~] Evaluate whether rank objectives should be added before broadening to more tree models
+  Current state: ranking losses are already wired into `NativeLGBM`; what remains is systematic head-to-head experimentation and promotion criteria.
+- [~] Add a LightGBM ranking experiment path grouped by trade date and compare against regression on the same profiles
+  Current state: grouped ranking support exists in the model wrapper and config profiles; a formal research sweep and result comparison are still pending.
 - [ ] Add model-profile level control for objective family, evaluation metric, and regularization regime
 - [ ] Defer AutoEncoder / GNN / multi-task sequence models until tabular baselines and ranking objectives are exhausted
 
@@ -156,7 +196,7 @@ Active migration note:
 If only one direction should be pursued next, it should be:
 
 1. native LightGBM
-2. better factor set
-3. training-time cross-sectional transforms
+2. single-factor diagnostics plus better factor set
+3. training-time feature transforms and ranking objectives
 
 This is more likely to improve results than adding another deep model right now.

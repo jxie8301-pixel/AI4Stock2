@@ -77,6 +77,13 @@ def _compute_chunked_period_returns(returns: pd.Series, period_size: int) -> pd.
     return out
 
 
+def _format_count_ratio(count: int, total: int) -> str:
+    total_value = max(int(total), 0)
+    count_value = max(int(count), 0)
+    pct = (count_value / total_value) if total_value > 0 else 0.0
+    return f"{count_value} / {total_value} = {pct:.2%}"
+
+
 def build_cross_section_benchmark(labels: pd.Series) -> pd.Series:
     """Compute daily cross-sectional mean return as a common reference series."""
     aligned_labels = labels.dropna()
@@ -341,14 +348,33 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     report.index = pd.to_datetime(report.index)
     monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
     result["monthly_return"] = monthly_ret.to_dict()
+    monthly_positive_count = int((monthly_ret > 0).sum()) if not monthly_ret.empty else 0
+    monthly_total_count = int(len(monthly_ret))
     result["monthly_win_rate"] = {"risk": float((monthly_ret > 0).mean()) if not monthly_ret.empty else 0.0}
+    result["profitable_month_count"] = monthly_positive_count
+    result["total_month_count"] = monthly_total_count
+    result["profitable_month_pct"] = {
+        "risk": float((monthly_positive_count / monthly_total_count) if monthly_total_count > 0 else 0.0)
+    }
+    result["profitable_month_summary"] = _format_count_ratio(monthly_positive_count, monthly_total_count)
     rebalance_freq = int(report.attrs.get("rebalance_freq", 0) or 0)
     if rebalance_freq > 0:
         rebalance_ret = _compute_chunked_period_returns(report["return"], rebalance_freq)
         result["rebalance_return"] = rebalance_ret.to_dict()
+        rebalance_positive_count = int((rebalance_ret > 0).sum()) if not rebalance_ret.empty else 0
+        rebalance_total_count = int(len(rebalance_ret))
         result["rebalance_win_rate"] = {
             "risk": float((rebalance_ret > 0).mean()) if not rebalance_ret.empty else 0.0
         }
+        result["profitable_rebalance_count"] = rebalance_positive_count
+        result["total_rebalance_count"] = rebalance_total_count
+        result["profitable_rebalance_pct"] = {
+            "risk": float((rebalance_positive_count / rebalance_total_count) if rebalance_total_count > 0 else 0.0)
+        }
+        result["profitable_rebalance_summary"] = _format_count_ratio(
+            rebalance_positive_count,
+            rebalance_total_count,
+        )
     if "turnover" in report.columns:
         result["turnover_mean"] = {"risk": float(report["turnover"].astype(float).mean())}
     
@@ -367,7 +393,16 @@ def plot_monthly_heatmap(report: pd.DataFrame, save_path: str = None):
     pivot_table = df_monthly.pivot(index="year", columns="month", values="ret")
     
     fig, ax = plt.subplots(figsize=(12, min(len(pivot_table) * 0.8 + 2, 8)))
-    sns.heatmap(pivot_table, annot=True, fmt=".2%", cmap="RdYlGn", center=0, ax=ax)
+    sns.heatmap(
+        pivot_table,
+        annot=True,
+        fmt=".2%",
+        cmap="RdYlGn_r",
+        center=0,
+        vmin=-0.5,
+        vmax=0.5,
+        ax=ax,
+    )
     ax.set_title("Monthly Returns Heatmap")
     
     plt.tight_layout()
@@ -388,6 +423,17 @@ def plot_cumulative_return(report: pd.DataFrame, save_path: str = None):
         cum_bench = (1 + report["bench"]).cumprod()
         bench_label = str(report.attrs.get("benchmark_name") or "Benchmark").strip() or "Benchmark"
         ax.plot(cum_bench.index, cum_bench.values, label=bench_label, linewidth=1.5, alpha=0.7)
+    if "avg_factor_baseline_return" in report.columns:
+        cum_avg_factor = (1 + report["avg_factor_baseline_return"]).cumprod()
+        avg_factor_label = str(report.attrs.get("avg_factor_baseline_name") or "Avg Factor Baseline").strip()
+        ax.plot(
+            cum_avg_factor.index,
+            cum_avg_factor.values,
+            label=avg_factor_label or "Avg Factor Baseline",
+            linewidth=1.5,
+            linestyle="--",
+            alpha=0.9,
+        )
     ax.set_title("Cumulative Return")
     ax.set_xlabel("Date")
     ax.set_ylabel("Cumulative Return")
@@ -663,6 +709,12 @@ def print_metrics(
         _print_metric_line("Daily win", _format_pct(_extract_metric(portfolio_metrics, "daily_win_rate")))
         _print_metric_line("Monthly win", _format_pct(_extract_metric(portfolio_metrics, "monthly_win_rate")))
         _print_metric_line("Rebalance win", _format_pct(_extract_metric(portfolio_metrics, "rebalance_win_rate")))
+        profitable_month_summary = portfolio_metrics.get("profitable_month_summary")
+        if profitable_month_summary:
+            _print_metric_line("Profitable months", str(profitable_month_summary))
+        profitable_rebalance_summary = portfolio_metrics.get("profitable_rebalance_summary")
+        if profitable_rebalance_summary:
+            _print_metric_line("Profitable rebal", str(profitable_rebalance_summary))
         benchmark_name = portfolio_metrics.get("benchmark_name")
         if benchmark_name:
             _print_metric_line("Benchmark", str(benchmark_name))

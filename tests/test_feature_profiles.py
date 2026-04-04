@@ -11,6 +11,7 @@ from src.gen_feature import (
     TUSHARE_FACTOR_PREFIX,
     get_all_factor_feature_names,
     get_alpha158_feature_config,
+    get_known_exact_duplicate_feature_groups,
     get_lgbm_purified_feature_names,
     get_technical_factor_feature_names,
     get_temporal_factor_feature_names,
@@ -25,13 +26,15 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertEqual(profile["data_source"], "akshare")
         self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
-        self.assertEqual(len(profile["selected_columns"]), 46)
+        self.assertEqual(len(profile["selected_columns"]), 39)
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v4_techlite.yaml"))
         self.assertEqual(profile["selected_columns"][0], "KMID")
         self.assertEqual(profile["selected_columns"][-1], f"{TECHNICAL_FACTOR_PREFIX}mfi_14")
         self.assertEqual(len(get_all_factor_feature_names()), 279)
         self.assertIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", get_all_factor_feature_names())
         self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}macd_hist_12_26_9", get_all_factor_feature_names())
+        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_20", profile["selected_columns"])
+        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}rsv_20", profile["selected_columns"])
 
     def test_full_profile_preserves_legacy_cache_dir(self):
         cfg = {
@@ -170,7 +173,7 @@ class FeatureProfilesTest(unittest.TestCase):
 
         self.assertTrue(str(no_ret120["profile_path"]).endswith("configs/feature_profiles.yaml::core_v4_techlite_no_ret120"))
         self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", no_ret120["selected_columns"])
-        self.assertEqual(len(no_ret120["selected_columns"]), 45)
+        self.assertEqual(len(no_ret120["selected_columns"]), 38)
 
     def test_core_v4_tushare_plus_profile_adds_ts_columns(self):
         profile = resolve_feature_profile(
@@ -186,6 +189,43 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", profile["selected_columns"])
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_ratio", profile["selected_columns"])
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_ttm", profile["selected_columns"])
+
+    def test_core_v5_diag_prefilter_profile_is_registered(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v5_diag_prefilter_v1"},
+            }
+        )
+
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v5_diag_prefilter_v1.yaml"))
+        self.assertEqual(profile["data_source"], "tushare")
+        self.assertEqual(len(profile["selected_columns"]), 8)
+        self.assertEqual(profile["selected_columns"][0], "CORR20")
+        self.assertIn("LGBM_bp", profile["selected_columns"])
+
+    def test_core_v5_diag_prefilter_v2_profile_is_registered(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v5_diag_prefilter_v2"},
+            }
+        )
+
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v5_diag_prefilter_v2.yaml"))
+        self.assertEqual(profile["data_source"], "tushare")
+        self.assertEqual(len(profile["selected_columns"]), 10)
+        self.assertEqual(profile["selected_columns"][0], "CORR20")
+        self.assertIn("LGBM_amihud_20", profile["selected_columns"])
+        self.assertNotIn("TEMP_corr_cv_20", profile["selected_columns"])
+
+    def test_known_exact_duplicate_groups_cover_core_overlaps(self):
+        duplicate_groups = get_known_exact_duplicate_feature_groups()
+
+        self.assertIn(("CORR20", "TEMP_corr_cv_20"), duplicate_groups)
+        self.assertIn(("RSV20", "TEMP_rsv_20"), duplicate_groups)
+        self.assertIn(("LGBM_ret_20", "TEMP_ret_20"), duplicate_groups)
+        self.assertIn(("LGBM_dist_ma60", "TEMP_ma_gap_60"), duplicate_groups)
 
     def test_inline_feature_profile_extends_with_drop_and_add_columns(self):
         with tempfile.TemporaryDirectory() as tmpdir:

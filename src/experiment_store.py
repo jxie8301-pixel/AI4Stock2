@@ -58,7 +58,15 @@ SUMMARY_FIELDS = [
     "excess_annualized_return",
     "excess_information_ratio",
     "monthly_win_rate",
+    "profitable_month_count",
+    "total_month_count",
+    "profitable_month_pct",
+    "profitable_month_summary",
     "rebalance_win_rate",
+    "profitable_rebalance_count",
+    "total_rebalance_count",
+    "profitable_rebalance_pct",
+    "profitable_rebalance_summary",
     "portfolio_annualized_return",
     "portfolio_information_ratio",
     "portfolio_max_drawdown",
@@ -343,9 +351,21 @@ def flatten_metrics(signal_metrics: dict | None, portfolio_metrics: dict | None)
         "monthly_win_rate": _safe_float(
             portfolio_metrics.get("monthly_win_rate", {}).get("risk")
         ),
+        "profitable_month_count": portfolio_metrics.get("profitable_month_count", ""),
+        "total_month_count": portfolio_metrics.get("total_month_count", ""),
+        "profitable_month_pct": _safe_float(
+            portfolio_metrics.get("profitable_month_pct", {}).get("risk")
+        ),
+        "profitable_month_summary": str(portfolio_metrics.get("profitable_month_summary") or ""),
         "rebalance_win_rate": _safe_float(
             portfolio_metrics.get("rebalance_win_rate", {}).get("risk")
         ),
+        "profitable_rebalance_count": portfolio_metrics.get("profitable_rebalance_count", ""),
+        "total_rebalance_count": portfolio_metrics.get("total_rebalance_count", ""),
+        "profitable_rebalance_pct": _safe_float(
+            portfolio_metrics.get("profitable_rebalance_pct", {}).get("risk")
+        ),
+        "profitable_rebalance_summary": str(portfolio_metrics.get("profitable_rebalance_summary") or ""),
         "portfolio_annualized_return": _safe_float(
             portfolio_metrics.get("annualized_return", {}).get("risk")
         ),

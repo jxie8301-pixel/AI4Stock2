@@ -1,0 +1,14 @@
+alpha: all_factors
+generation_space: full_factor_space
+factor_store_name: full_factor_space
+selected_columns:
+- CORR20
+- LGBM_ret_20
+- TECH_aroon_osc_25
+- LGBM_ep_ttm
+- TEMP_low_gap_20
+- STD20
+- LGBM_amihud_20
+- TECH_trix_hist_15_9
+- LGBM_dist_ma60
+- LGBM_ret_60

@@ -382,6 +382,39 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         risk_control=cfg["backtest"].get("risk_control"),
         intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
     )
+    avg_factor_baseline_report = None
+    avg_factor_scores = factor_frame.loc[test_valid_mask, selected_feature_names].apply(
+        pd.to_numeric,
+        errors="coerce",
+    ).mean(axis=1, skipna=True)
+    if not avg_factor_scores.empty:
+        avg_factor_pred_series = pd.Series(
+            avg_factor_scores.to_numpy(dtype=float, copy=False),
+            index=pred_series.index,
+            name="prediction",
+        ).sort_index()
+        avg_factor_baseline_report = run_native_backtest(
+            preds=avg_factor_pred_series,
+            labels=backtest_label_series,
+            topk=cfg["strategy"]["topk"],
+            n_drop=cfg["strategy"]["n_drop"],
+            cost_buy=cfg["backtest"]["cost"]["buy"],
+            cost_sell=cfg["backtest"]["cost"]["sell"],
+            min_cost=cfg["backtest"].get("min_cost", 5.0),
+            account=cfg["backtest"].get("account", 100_000_000),
+            risk_degree=cfg["backtest"].get("risk_degree", 0.95),
+            slippage=cfg["backtest"].get("slippage", 0.0),
+            rebalance_freq=rebalance_freq,
+            weighting=cfg["strategy"].get("weighting", "equal"),
+            score_transform=cfg["strategy"].get("score_transform", "none"),
+            score_zscore_clip=cfg["strategy"].get("score_zscore_clip", 3.0),
+            max_weight=cfg["strategy"].get("max_weight"),
+            keep_top_n=cfg["strategy"].get("keep_top_n"),
+            min_score=cfg["strategy"].get("min_score"),
+            benchmark_returns=bench_series,
+            risk_control=cfg["backtest"].get("risk_control"),
+            intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
+        )
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
     plot_report["bench"] = align_benchmark_to_report_index(
@@ -391,6 +424,11 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     ).to_numpy()
     plot_report.attrs["benchmark_name"] = benchmark_name
     plot_report.attrs["rebalance_freq"] = rebalance_freq
+    if avg_factor_baseline_report is not None:
+        plot_report["avg_factor_baseline_return"] = (
+            avg_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
+        )
+        plot_report.attrs["avg_factor_baseline_name"] = "Avg Factor Baseline"
 
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     monthly_summary = build_period_summary(metric_report, freq="ME")

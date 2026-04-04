@@ -192,6 +192,9 @@ class NativeModelMetricsTest(unittest.TestCase):
         )
         self.assertAlmostEqual(portfolio_metrics["daily_win_rate"]["risk"], 0.5, places=8)
         self.assertAlmostEqual(portfolio_metrics["monthly_win_rate"]["risk"], 0.0, places=8)
+        self.assertEqual(portfolio_metrics["profitable_month_count"], 0)
+        self.assertEqual(portfolio_metrics["total_month_count"], 1)
+        self.assertEqual(portfolio_metrics["profitable_month_summary"], "0 / 1 = 0.00%")
         self.assertAlmostEqual(portfolio_metrics["turnover_mean"]["risk"], 0.3, places=8)
 
     def test_compute_portfolio_metrics_converts_qlib_gross_return_to_net(self):
@@ -219,6 +222,9 @@ class NativeModelMetricsTest(unittest.TestCase):
         )
         self.assertAlmostEqual(portfolio_metrics["daily_win_rate"]["risk"], 1.0, places=8)
         self.assertAlmostEqual(portfolio_metrics["monthly_win_rate"]["risk"], 1.0, places=8)
+        self.assertEqual(portfolio_metrics["profitable_month_count"], 1)
+        self.assertEqual(portfolio_metrics["total_month_count"], 1)
+        self.assertEqual(portfolio_metrics["profitable_month_summary"], "1 / 1 = 100.00%")
 
     def test_build_benchmark_series_supports_close_file_input(self):
         with tempfile.TemporaryDirectory() as tmpdir:

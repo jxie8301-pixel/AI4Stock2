@@ -30,6 +30,8 @@ def run_backtest(
     max_weight: float | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
+    benchmark_returns: pd.Series | None = None,
+    dynamic_risk: dict[str, object] | None = None,
     return_trace: bool = False,
     trace_dates: set[pd.Timestamp] | None = None,
 ) -> tuple[pd.DataFrame, None] | tuple[tuple[pd.DataFrame, None], pd.DataFrame]:
@@ -72,6 +74,8 @@ def run_backtest(
         max_weight=max_weight,
         keep_top_n=keep_top_n,
         min_score=min_score,
+        benchmark_returns=benchmark_returns,
+        dynamic_risk=dynamic_risk,
         return_trace=return_trace,
         trace_dates=trace_dates,
     )

@@ -420,6 +420,55 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(trace.iloc[0]["keep_top_n"], 2)
         self.assertEqual(set(trace.iloc[0]["holdings_after"].keys()), {"A"})
 
+    def test_dynamic_risk_benchmark_ma_uses_lagged_schedule(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0, 2.0, 1.0, 2.0, 1.0], index=index)
+        labels = pd.Series([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], index=index)
+        benchmark_returns = pd.Series(
+            [0.0, -0.5, 0.0],
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+        )
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            benchmark_returns=benchmark_returns,
+            dynamic_risk={
+                "mode": "benchmark_ma",
+                "fast_window": 2,
+                "slow_window": 3,
+                "bull_risk": 1.0,
+                "neutral_risk": 0.5,
+                "bear_risk": 0.0,
+            },
+            return_trace=True,
+            trace_dates={
+                pd.Timestamp("2024-01-02"),
+                pd.Timestamp("2024-01-03"),
+                pd.Timestamp("2024-01-04"),
+            },
+        )
+
+        self.assertEqual(report["risk_degree"].tolist(), [1.0, 1.0, 0.0])
+        self.assertEqual(trace["dynamic_risk_mode"].tolist(), ["benchmark_ma", "benchmark_ma", "benchmark_ma"])
+        self.assertAlmostEqual(float(trace.loc[pd.Timestamp("2024-01-04"), "risk_degree"]), 0.0, places=8)
+        self.assertEqual(trace.loc[pd.Timestamp("2024-01-04"), "holdings_after"], {})
+
     def test_reference_backtest_matches_native_report(self):
         index = pd.MultiIndex.from_product(
             [

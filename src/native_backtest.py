@@ -17,6 +17,7 @@ DEFAULT_WEIGHTING = "equal"
 SUPPORTED_WEIGHTING_MODES = ("equal", "rank", "score_softmax")
 DEFAULT_SCORE_TRANSFORM = "none"
 SUPPORTED_SCORE_TRANSFORMS = ("none", "rank_pct", "zscore_clip")
+SUPPORTED_DYNAMIC_RISK_MODES = ("none", "benchmark_ma")
 
 
 def _snapshot_holdings(holdings: dict[str, float]) -> dict[str, float]:
@@ -44,6 +45,83 @@ def _normalize_min_score(min_score: float | None) -> float | None:
     if min_score is None:
         return None
     return float(min_score)
+
+
+def _validate_risk_degree(value: float, field: str) -> float:
+    out = float(value)
+    if out < 0.0 or out > 1.0:
+        raise ValueError(f"{field} must be in [0, 1]")
+    return out
+
+
+def _normalize_dynamic_risk_config(
+    dynamic_risk: dict[str, object] | None,
+    *,
+    fallback_risk_degree: float,
+) -> dict[str, float | int | str] | None:
+    if dynamic_risk is None:
+        return None
+    if not isinstance(dynamic_risk, dict):
+        raise ValueError("dynamic_risk must be a mapping when provided")
+    mode = str(dynamic_risk.get("mode", "none") or "none").strip().lower()
+    if mode == "none":
+        return None
+    if mode != "benchmark_ma":
+        raise ValueError(
+            f"Unsupported dynamic risk mode: {mode}. Supported: {', '.join(SUPPORTED_DYNAMIC_RISK_MODES)}"
+        )
+    fast_window = max(int(dynamic_risk.get("fast_window", 120) or 120), 1)
+    slow_window = max(int(dynamic_risk.get("slow_window", 250) or 250), 1)
+    if fast_window >= slow_window:
+        raise ValueError("dynamic_risk.fast_window must be smaller than dynamic_risk.slow_window")
+    bull_risk = _validate_risk_degree(float(dynamic_risk.get("bull_risk", fallback_risk_degree)), "dynamic_risk.bull_risk")
+    neutral_risk = _validate_risk_degree(
+        float(dynamic_risk.get("neutral_risk", min(fallback_risk_degree, 0.5))),
+        "dynamic_risk.neutral_risk",
+    )
+    bear_risk = _validate_risk_degree(float(dynamic_risk.get("bear_risk", 0.15)), "dynamic_risk.bear_risk")
+    return {
+        "mode": mode,
+        "fast_window": fast_window,
+        "slow_window": slow_window,
+        "bull_risk": bull_risk,
+        "neutral_risk": neutral_risk,
+        "bear_risk": bear_risk,
+    }
+
+
+def _build_dynamic_risk_schedule(
+    benchmark_returns: pd.Series | None,
+    *,
+    dynamic_risk: dict[str, float | int | str] | None,
+    fallback_risk_degree: float,
+) -> pd.Series | None:
+    if dynamic_risk is None:
+        return None
+    if benchmark_returns is None:
+        raise ValueError("benchmark_returns is required when dynamic_risk is enabled")
+    benchmark_returns = pd.Series(benchmark_returns).astype(float).sort_index()
+    if benchmark_returns.empty:
+        raise ValueError("benchmark_returns is empty while dynamic_risk is enabled")
+
+    mode = str(dynamic_risk.get("mode") or "none")
+    if mode != "benchmark_ma":
+        raise ValueError(
+            f"Unsupported dynamic risk mode: {mode}. Supported: {', '.join(SUPPORTED_DYNAMIC_RISK_MODES)}"
+        )
+
+    nav = (1.0 + benchmark_returns.fillna(0.0)).cumprod()
+    fast_window = int(dynamic_risk["fast_window"])
+    slow_window = int(dynamic_risk["slow_window"])
+    fast_ma = nav.rolling(fast_window, min_periods=1).mean()
+    slow_ma = nav.rolling(slow_window, min_periods=1).mean()
+
+    raw_schedule = pd.Series(float(dynamic_risk["bear_risk"]), index=nav.index, dtype=float)
+    raw_schedule.loc[nav >= slow_ma] = float(dynamic_risk["neutral_risk"])
+    raw_schedule.loc[nav >= fast_ma] = float(dynamic_risk["bull_risk"])
+
+    # Use only information available before the current trading day.
+    return raw_schedule.shift(1).fillna(float(fallback_risk_degree)).astype(float)
 
 
 def _transform_scores(
@@ -272,6 +350,8 @@ def run_native_backtest(
     max_weight: float | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
+    benchmark_returns: pd.Series | None = None,
+    dynamic_risk: dict[str, object] | None = None,
     return_trace: bool = False,
     trace_dates: set[pd.Timestamp] | None = None,
 ) -> pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]:
@@ -288,7 +368,14 @@ def run_native_backtest(
     score_transform = _normalize_score_transform(score_transform)
     keep_top_n = _normalize_keep_top_n(keep_top_n, topk)
     min_score = _normalize_min_score(min_score)
+    risk_degree = _validate_risk_degree(float(risk_degree), "risk_degree")
     score_zscore_clip = max(float(score_zscore_clip), 0.0)
+    dynamic_risk_cfg = _normalize_dynamic_risk_config(dynamic_risk, fallback_risk_degree=risk_degree)
+    risk_schedule = _build_dynamic_risk_schedule(
+        benchmark_returns,
+        dynamic_risk=dynamic_risk_cfg,
+        fallback_risk_degree=risk_degree,
+    )
     open_rate = float(cost_buy) + float(slippage)
     close_rate = float(cost_sell) + float(slippage)
 
@@ -319,6 +406,7 @@ def run_native_backtest(
         cash_before = float(cash)
         holdings_before = _snapshot_holdings(holdings)
         start_value = cash + sum(holdings.values())
+        current_risk_degree = float(risk_schedule.get(date, risk_degree)) if risk_schedule is not None else float(risk_degree)
         trade_cost_value = 0.0
         buy_value = 0.0
         sell_value = 0.0
@@ -382,7 +470,7 @@ def run_native_backtest(
                 zscore_clip=score_zscore_clip,
             )
             locked_value = float(sum(holdings.get(stock, 0.0) for stock in locked_holdings))
-            tradable_budget = max(start_value * float(risk_degree) - locked_value, 0.0)
+            tradable_budget = max(start_value * current_risk_degree - locked_value, 0.0)
             target_values = target_weights * tradable_budget
 
             for stock in list(tradable_holdings):
@@ -467,6 +555,7 @@ def run_native_backtest(
                 "holdings": len(holdings),
                 "frozen_holdings": frozen_holdings,
                 "account_value": end_value,
+                "risk_degree": current_risk_degree,
             }
         )
         if return_trace and (trace_dates_norm is None or pd.Timestamp(date) in trace_dates_norm):
@@ -485,6 +574,8 @@ def run_native_backtest(
                     "trade_sell_list": list(trade_sell_list),
                     "trade_buy_list": list(trade_buy_list),
                     "weighting": weighting,
+                    "risk_degree": current_risk_degree,
+                    "dynamic_risk_mode": None if dynamic_risk_cfg is None else dynamic_risk_cfg["mode"],
                     "score_transform": score_transform,
                     "score_zscore_clip": score_zscore_clip,
                     "keep_top_n": keep_top_n,

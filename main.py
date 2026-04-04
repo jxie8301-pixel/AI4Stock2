@@ -356,6 +356,10 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         f"signal_label={signal_horizon}d, "
         "backtest_label=1d"
     )
+    bench_series, benchmark_name = build_benchmark_series(
+        backtest_label_series,
+        cfg.get("backtest", {}).get("benchmark"),
+    )
     backtest_report = run_native_backtest(
         preds=pred_series,
         labels=backtest_label_series,
@@ -374,13 +378,11 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         max_weight=cfg["strategy"].get("max_weight"),
         keep_top_n=cfg["strategy"].get("keep_top_n"),
         min_score=cfg["strategy"].get("min_score"),
+        benchmark_returns=bench_series,
+        dynamic_risk=cfg["backtest"].get("dynamic_risk"),
     )
     
     plot_report = backtest_report.rename(columns={'net_return': 'return'})
-    bench_series, benchmark_name = build_benchmark_series(
-        backtest_label_series,
-        cfg.get("backtest", {}).get("benchmark"),
-    )
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,
         plot_report.index,
@@ -426,6 +428,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             max_weight=cfg["strategy"].get("max_weight"),
             keep_top_n=cfg["strategy"].get("keep_top_n"),
             min_score=cfg["strategy"].get("min_score"),
+            benchmark_returns=bench_series,
+            dynamic_risk=cfg["backtest"].get("dynamic_risk"),
             return_trace=True,
             trace_dates=trace_dates,
         )[1],

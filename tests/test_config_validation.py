@@ -135,6 +135,39 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "backtest.benchmark.mode must be one of"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_accepts_dynamic_risk_benchmark_ma(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["dynamic_risk"] = {
+            "mode": "benchmark_ma",
+            "fast_window": 120,
+            "slow_window": 250,
+            "bull_risk": 0.95,
+            "neutral_risk": 0.5,
+            "bear_risk": 0.15,
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["backtest"]["dynamic_risk"]["mode"], "benchmark_ma")
+
+    def test_validate_training_config_rejects_invalid_dynamic_risk_windows(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["dynamic_risk"] = {
+            "mode": "benchmark_ma",
+            "fast_window": 250,
+            "slow_window": 120,
+        }
+
+        with self.assertRaisesRegex(ValueError, "backtest.dynamic_risk.fast_window must be smaller"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_invalid_dynamic_risk_mode(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["dynamic_risk"] = {"mode": "demo"}
+
+        with self.assertRaisesRegex(ValueError, "backtest.dynamic_risk.mode must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
 
 if __name__ == "__main__":
     unittest.main()

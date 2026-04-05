@@ -120,6 +120,7 @@ class ExperimentStoreTest(unittest.TestCase):
                     "rebalances_beating_avg_factor_baseline_pct": {"risk": 0.58},
                     "rebalances_beating_avg_factor_baseline_summary": "56 / 97 = 57.73%",
                     "annualized_return": {"risk": 0.25},
+                    "sharpe_ratio": {"risk": 1.1},
                     "information_ratio": {"risk": 1.1},
                     "max_drawdown": {"risk": -0.15},
                 },
@@ -160,6 +161,7 @@ class ExperimentStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_pct"], "0.58")
             self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_summary"], "56 / 97 = 57.73%")
             self.assertEqual(rows[0]["portfolio_annualized_return"], "0.25")
+            self.assertEqual(rows[0]["portfolio_sharpe_ratio"], "1.1")
             self.assertEqual(rows[0]["weighting"], "rank")
             self.assertEqual(rows[0]["score_transform"], "zscore_clip")
             self.assertEqual(rows[0]["score_zscore_clip"], "2.5")

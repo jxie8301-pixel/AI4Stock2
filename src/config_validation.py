@@ -146,6 +146,10 @@ TOP_LEVEL_SCHEMA = {
             "calibration": None,
             "n_bins": None,
             "min_history": None,
+            "price_confirm": {
+                "mode": None,
+                "ma_window": None,
+            },
         },
         "dynamic_risk": {
             "mode": None,
@@ -460,6 +464,15 @@ def validate_training_config(
             intraperiod_exit_cfg["calibration"] = calibration
             intraperiod_exit_cfg["n_bins"] = max(int(intraperiod_exit_cfg.get("n_bins", 20) or 20), 2)
             intraperiod_exit_cfg["min_history"] = max(int(intraperiod_exit_cfg.get("min_history", 200) or 200), 1)
+        price_confirm_cfg = intraperiod_exit_cfg.get("price_confirm")
+        if price_confirm_cfg is not None:
+            if not isinstance(price_confirm_cfg, dict):
+                raise ValueError("backtest.intraperiod_exit.price_confirm must be a mapping when provided")
+            confirm_mode = str(price_confirm_cfg.get("mode", "close_below_ma") or "close_below_ma").strip().lower()
+            if confirm_mode not in {"close_below_ma"}:
+                raise ValueError("backtest.intraperiod_exit.price_confirm.mode must be one of: close_below_ma")
+            price_confirm_cfg["mode"] = confirm_mode
+            price_confirm_cfg["ma_window"] = max(int(price_confirm_cfg.get("ma_window", 10) or 10), 1)
     benchmark_cfg = backtest_cfg.get("benchmark")
     if benchmark_cfg is not None:
         if not isinstance(benchmark_cfg, dict):

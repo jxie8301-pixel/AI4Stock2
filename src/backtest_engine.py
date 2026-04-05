@@ -9,6 +9,7 @@ from src.backtest_controls import (
     SUPPORTED_EXIT_SCORE_SOURCES,
     append_intraperiod_history,
     build_intraperiod_remaining_steps,
+    build_intraperiod_price_confirm_matrix,
     build_intraperiod_residual_return_matrix,
     build_risk_control_schedule,
     estimate_intraperiod_expected_returns,
@@ -82,6 +83,7 @@ def run_native_backtest(
     keep_top_n: int | None = None,
     min_score: float | None = None,
     benchmark_returns: pd.Series | None = None,
+    market_data: pd.DataFrame | None = None,
     risk_control: dict[str, object] | None = None,
     intraperiod_exit: dict[str, object] | None = None,
     dynamic_risk: dict[str, object] | None = None,
@@ -138,6 +140,25 @@ def run_native_backtest(
         strategy_score_matrix=strategy_score_matrix,
         zscore_clip=score_zscore_clip,
     )
+    intraperiod_price_confirm_matrix = None
+    if intraperiod_exit_cfg is not None and "price_confirm_mode" in intraperiod_exit_cfg:
+        if market_data is None or "close" not in market_data.columns:
+            raise ValueError("market_data with a 'close' column is required when intraperiod_exit.price_confirm is enabled")
+        market_frame = market_data.copy()
+        if not isinstance(market_frame.index, pd.MultiIndex):
+            raise ValueError("market_data must use a MultiIndex of (datetime, instrument)")
+        market_frame.index = market_frame.index.set_names(["datetime", "instrument"])
+        close_matrix = (
+            market_frame["close"]
+            .astype(float)
+            .unstack(level="instrument")
+            .reindex(index=pred_matrix.index, columns=pred_matrix.columns)
+        )
+        intraperiod_price_confirm_matrix = build_intraperiod_price_confirm_matrix(
+            close_matrix,
+            confirm_mode=str(intraperiod_exit_cfg["price_confirm_mode"]),
+            ma_window=int(intraperiod_exit_cfg["price_confirm_ma_window"]),
+        )
     intraperiod_remaining_steps = build_intraperiod_remaining_steps(pred_matrix.index, rebalance_freq=rebalance_freq)
     intraperiod_residual_matrix = None
     intraperiod_history: dict[int, dict[str, object]] | None = None
@@ -158,6 +179,11 @@ def run_native_backtest(
     intraperiod_score_values = (
         intraperiod_score_matrix.to_numpy(dtype=float, copy=False)
         if intraperiod_score_matrix is not None
+        else None
+    )
+    intraperiod_price_confirm_values = (
+        intraperiod_price_confirm_matrix.to_numpy(dtype=bool, copy=False)
+        if intraperiod_price_confirm_matrix is not None
         else None
     )
     intraperiod_residual_values = (
@@ -191,6 +217,8 @@ def run_native_backtest(
         buy_count = 0
         sell_count = 0
         intraperiod_exit_count = 0
+        intraperiod_exit_score_candidate_count = 0
+        intraperiod_exit_price_confirm_blocked_count = 0
         intraperiod_exit_remaining_steps = 0
         intraperiod_exit_signal_mean = np.nan
         intraperiod_exit_signal_min = np.nan
@@ -335,6 +363,18 @@ def run_native_backtest(
                     score_value = signal_values.get(stock, np.nan)
                     if pd.isna(score_value) or float(score_value) > threshold:
                         continue
+                    intraperiod_exit_score_candidate_count += 1
+                    price_confirm_passed = True
+                    if intraperiod_price_confirm_values is not None:
+                        col_idx = instrument_to_col.get(str(stock))
+                        price_confirm_passed = bool(
+                            False
+                            if col_idx is None
+                            else intraperiod_price_confirm_values[pos, col_idx]
+                        )
+                        if not price_confirm_passed:
+                            intraperiod_exit_price_confirm_blocked_count += 1
+                            continue
                     position_value = holdings.pop(stock, 0.0)
                     if position_value <= 0:
                         continue
@@ -374,6 +414,7 @@ def run_native_backtest(
                             "saved_return_contribution": float(saved_return),
                             "missed_return_contribution": float(missed_return),
                             "remaining_steps": int(intraperiod_exit_remaining_steps),
+                            "price_confirm_passed": bool(price_confirm_passed),
                         }
                     )
                 if intraperiod_exit_residual_samples:
@@ -411,6 +452,8 @@ def run_native_backtest(
                 "buy_count": buy_count,
                 "sell_count": sell_count,
                 "intraperiod_exit_count": intraperiod_exit_count,
+                "intraperiod_exit_score_candidate_count": intraperiod_exit_score_candidate_count,
+                "intraperiod_exit_price_confirm_blocked_count": intraperiod_exit_price_confirm_blocked_count,
                 "intraperiod_exit_remaining_steps": intraperiod_exit_remaining_steps,
                 "intraperiod_exit_signal_mean": intraperiod_exit_signal_mean,
                 "intraperiod_exit_signal_min": intraperiod_exit_signal_min,
@@ -450,7 +493,11 @@ def run_native_backtest(
                     "intraperiod_exit_mode": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["mode"],
                     "intraperiod_exit_score_source": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["score_source"],
                     "intraperiod_exit_threshold": None if intraperiod_exit_cfg is None else float(intraperiod_exit_cfg["threshold"]),
+                    "intraperiod_exit_price_confirm_mode": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg.get("price_confirm_mode"),
+                    "intraperiod_exit_price_confirm_ma_window": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg.get("price_confirm_ma_window"),
                     "intraperiod_exit_count": int(intraperiod_exit_count),
+                    "intraperiod_exit_score_candidate_count": int(intraperiod_exit_score_candidate_count),
+                    "intraperiod_exit_price_confirm_blocked_count": int(intraperiod_exit_price_confirm_blocked_count),
                     "intraperiod_exit_remaining_steps": int(intraperiod_exit_remaining_steps),
                     "intraperiod_exit_signal_mean": float(intraperiod_exit_signal_mean) if pd.notna(intraperiod_exit_signal_mean) else np.nan,
                     "intraperiod_exit_signal_min": float(intraperiod_exit_signal_min) if pd.notna(intraperiod_exit_signal_min) else np.nan,

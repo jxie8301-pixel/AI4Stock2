@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from src.data_source import resolve_data_source_name
+from src.data_source import resolve_data_source_name, resolve_source_parquet_dir
 from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import (
@@ -26,6 +27,7 @@ def load_rolling_runtime_data(
     valid_days: int,
     label_column: str,
     backtest_label_column: str,
+    extra_columns: list[str] | None = None,
 ) -> RollingRuntimeData:
     factor_store_dir = get_native_factor_store_dir(cfg)
     data_source = resolve_data_source_name(cfg)
@@ -57,7 +59,14 @@ def load_rolling_runtime_data(
     first_test_idx = int(full_calendar.searchsorted(first_test_start))
     earliest_idx = max(0, first_test_idx - train_days - valid_days)
     load_start = full_calendar.iloc[earliest_idx]
-    load_columns = list(dict.fromkeys(selected_feature_sources + ([backtest_label_column] if backtest_label_column != label_column else [])))
+    extra_columns = list(extra_columns or [])
+    load_columns = list(
+        dict.fromkeys(
+            selected_feature_sources
+            + extra_columns
+            + ([backtest_label_column] if backtest_label_column != label_column else [])
+        )
+    )
     factor_frame = load_factor_frame(
         store_dir=factor_store_dir,
         columns=load_columns,
@@ -142,3 +151,68 @@ def build_prediction_metadata(
         "test_end": str(runtime_data.test_end.date()),
         "selected_feature_count": int(len(runtime_data.selected_feature_names)),
     }
+
+
+def build_market_data_frame(
+    runtime_data: RollingRuntimeData,
+    *,
+    columns: list[str],
+) -> pd.DataFrame:
+    required_columns = ["date", "symbol", *columns]
+    missing = [col for col in columns if col not in runtime_data.factor_frame.columns]
+    if missing:
+        raise ValueError(f"Missing market data columns in runtime_data.factor_frame: {missing}")
+    global_test_mask = (runtime_data.dt_index >= runtime_data.test_start) & (runtime_data.dt_index <= runtime_data.test_end)
+    frame = runtime_data.factor_frame.loc[global_test_mask, required_columns].copy()
+    frame["date"] = pd.to_datetime(frame["date"])
+    frame["symbol"] = frame["symbol"].astype(str)
+    return frame.set_index(["date", "symbol"]).sort_index()
+
+
+def load_source_market_data_frame(
+    cfg: dict[str, Any],
+    runtime_data: RollingRuntimeData,
+    *,
+    columns: list[str],
+) -> pd.DataFrame:
+    parquet_dir = Path(resolve_source_parquet_dir(cfg))
+    if not parquet_dir.exists():
+        raise FileNotFoundError(f"Source parquet dir does not exist: {parquet_dir}")
+
+    required_columns = ["date", *columns]
+    global_test_mask = (runtime_data.dt_index >= runtime_data.test_start) & (runtime_data.dt_index <= runtime_data.test_end)
+    symbols = (
+        runtime_data.factor_frame.loc[global_test_mask, "symbol"]
+        .astype(str)
+        .dropna()
+        .drop_duplicates()
+        .sort_values()
+        .tolist()
+    )
+    if not symbols:
+        return pd.DataFrame(columns=columns)
+
+    frames: list[pd.DataFrame] = []
+    for symbol in symbols:
+        path = parquet_dir / f"{symbol}.parquet"
+        if not path.exists():
+            continue
+        frame = pd.read_parquet(path, columns=required_columns)
+        if frame.empty:
+            continue
+        frame["date"] = pd.to_datetime(frame["date"])
+        frame = frame.loc[
+            (frame["date"] >= runtime_data.test_start) & (frame["date"] <= runtime_data.test_end),
+            required_columns,
+        ].copy()
+        if frame.empty:
+            continue
+        frame["symbol"] = symbol
+        frames.append(frame)
+
+    if not frames:
+        return pd.DataFrame(columns=columns)
+
+    out = pd.concat(frames, ignore_index=True)
+    out["symbol"] = out["symbol"].astype(str)
+    return out.set_index(["date", "symbol"]).sort_index()

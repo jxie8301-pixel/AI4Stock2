@@ -267,6 +267,23 @@ class ConfigValidationTest(unittest.TestCase):
         self.assertEqual(validated["backtest"]["intraperiod_exit"]["n_bins"], 8)
         self.assertEqual(validated["backtest"]["intraperiod_exit"]["min_history"], 16)
 
+    def test_validate_training_config_accepts_intraperiod_exit_price_confirm(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["intraperiod_exit"] = {
+            "mode": "score_threshold",
+            "score_source": "rank_pct",
+            "threshold": 0.45,
+            "price_confirm": {
+                "mode": "close_below_ma",
+                "ma_window": 10,
+            },
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["price_confirm"]["mode"], "close_below_ma")
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["price_confirm"]["ma_window"], 10)
+
     def test_validate_training_config_rejects_invalid_intraperiod_exit_mode(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["intraperiod_exit"] = {"mode": "demo"}
@@ -282,6 +299,18 @@ class ConfigValidationTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "backtest.intraperiod_exit.calibration must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_invalid_intraperiod_exit_price_confirm_mode(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["intraperiod_exit"] = {
+            "mode": "score_threshold",
+            "price_confirm": {
+                "mode": "demo",
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "backtest.intraperiod_exit.price_confirm.mode must be one of"):
             validate_training_config(cfg, check_paths=False)
 
     def test_validate_training_config_rejects_invalid_risk_control_windows(self):

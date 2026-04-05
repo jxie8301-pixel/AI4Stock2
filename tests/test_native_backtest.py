@@ -846,6 +846,106 @@ class NativeBacktestTest(unittest.TestCase):
             places=8,
         )
 
+    def test_intraperiod_exit_price_confirm_blocks_score_only_exit_without_close_break(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0, -0.1, 0.2, 0.5, 0.1], index=index)
+        labels = pd.Series([0.0, 0.0, -0.2, 0.0, 0.0, 0.0], index=index)
+        market_data = pd.DataFrame(
+            {
+                "close": [100.0, 50.0, 100.5, 51.0, 98.0, 52.0],
+            },
+            index=index,
+        )
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=2,
+            market_data=market_data,
+            intraperiod_exit={
+                "mode": "score_threshold",
+                "score_source": "raw",
+                "threshold": 0.0,
+                "price_confirm": {
+                    "mode": "close_below_ma",
+                    "ma_window": 2,
+                },
+            },
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-03")},
+        )
+
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_score_candidate_count"]), 1)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_blocked_count"]), 1)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_count"]), 0)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "holdings"]), 1)
+        self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "trade_sell_list"], [])
+        self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_mode"], "close_below_ma")
+        self.assertEqual(int(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_blocked_count"]), 1)
+
+    def test_intraperiod_exit_price_confirm_allows_exit_after_close_breaks_ma(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0, -0.1, 0.2, 0.5, 0.1], index=index)
+        labels = pd.Series([0.0, 0.0, -0.2, 0.0, 0.0, 0.0], index=index)
+        market_data = pd.DataFrame(
+            {
+                "close": [100.0, 50.0, 94.0, 51.0, 98.0, 52.0],
+            },
+            index=index,
+        )
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=2,
+            market_data=market_data,
+            intraperiod_exit={
+                "mode": "score_threshold",
+                "score_source": "raw",
+                "threshold": 0.0,
+                "price_confirm": {
+                    "mode": "close_below_ma",
+                    "ma_window": 2,
+                },
+            },
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-03")},
+        )
+
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_score_candidate_count"]), 1)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_blocked_count"]), 0)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_count"]), 1)
+        self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "trade_sell_list"], ["A"])
+        self.assertTrue(bool(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_events"][0]["price_confirm_passed"]))
+
     def test_reference_backtest_matches_native_report(self):
         index = pd.MultiIndex.from_product(
             [

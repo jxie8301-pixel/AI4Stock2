@@ -13,6 +13,7 @@ SUPPORTED_SIGNAL_STRENGTH_METRICS = ("top1", "topk_mean", "topk_sum")
 SUPPORTED_INTRAPERIOD_EXIT_MODES = ("none", "score_threshold", "expected_return_threshold")
 SUPPORTED_EXIT_SCORE_SOURCES = ("raw", "transformed", "rank_pct", "zscore")
 SUPPORTED_INTRAPERIOD_EXIT_CALIBRATIONS = ("quantile_bins",)
+SUPPORTED_INTRAPERIOD_PRICE_CONFIRM_MODES = ("close_below_ma",)
 
 
 def validate_risk_degree(value: float, field: str) -> float:
@@ -54,7 +55,37 @@ def normalize_intraperiod_exit_config(
         out["calibration"] = calibration
         out["n_bins"] = max(int(intraperiod_exit.get("n_bins", 20) or 20), 2)
         out["min_history"] = max(int(intraperiod_exit.get("min_history", 200) or 200), 1)
+    price_confirm = intraperiod_exit.get("price_confirm")
+    if price_confirm is not None:
+        if not isinstance(price_confirm, dict):
+            raise ValueError("intraperiod_exit.price_confirm must be a mapping when provided")
+        confirm_mode = str(price_confirm.get("mode", "close_below_ma") or "close_below_ma").strip().lower()
+        if confirm_mode not in SUPPORTED_INTRAPERIOD_PRICE_CONFIRM_MODES:
+            raise ValueError(
+                "Unsupported intraperiod_exit.price_confirm.mode: "
+                f"{confirm_mode}. Supported: {', '.join(SUPPORTED_INTRAPERIOD_PRICE_CONFIRM_MODES)}"
+            )
+        out["price_confirm_mode"] = confirm_mode
+        out["price_confirm_ma_window"] = max(int(price_confirm.get("ma_window", 10) or 10), 1)
     return out
+
+
+def build_intraperiod_price_confirm_matrix(
+    close_matrix: pd.DataFrame,
+    *,
+    confirm_mode: str,
+    ma_window: int,
+) -> pd.DataFrame:
+    close_matrix = close_matrix.astype(float)
+    confirm_mode = str(confirm_mode or "close_below_ma").strip().lower()
+    if confirm_mode == "close_below_ma":
+        rolling_ma = close_matrix.rolling(int(ma_window), min_periods=int(ma_window)).mean()
+        out = close_matrix.lt(rolling_ma)
+        return out.fillna(False)
+    raise ValueError(
+        "Unsupported intraperiod_exit.price_confirm.mode: "
+        f"{confirm_mode}. Supported: {', '.join(SUPPORTED_INTRAPERIOD_PRICE_CONFIRM_MODES)}"
+    )
 
 
 def build_intraperiod_remaining_steps(index: pd.Index, *, rebalance_freq: int) -> pd.Series:

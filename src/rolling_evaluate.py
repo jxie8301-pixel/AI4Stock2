@@ -16,7 +16,7 @@ from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
 )
-from src.rolling_runtime import load_rolling_runtime_data
+from src.rolling_runtime import load_rolling_runtime_data, load_source_market_data_frame
 from src.rolling_types import PredictionBundle, RollingPaths
 
 
@@ -54,32 +54,53 @@ def evaluate_prediction_bundle(
 
     signal_horizon = int(bundle.metadata.get("signal_horizon", resolve_signal_horizon(cfg)))
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
-    avg_factor_baseline_predictions = bundle.avg_factor_baseline_predictions
-    sign_aligned_factor_baseline_predictions = bundle.sign_aligned_factor_baseline_predictions
-    if avg_factor_baseline_predictions is None:
-        try:
-            runtime_data = load_rolling_runtime_data(
+    runtime_data_cache = None
+
+    def _ensure_runtime_data(*, extra_columns: list[str] | None = None):
+        nonlocal runtime_data_cache
+        needed_extra = list(extra_columns or [])
+        if runtime_data_cache is None:
+            runtime_data_cache = load_rolling_runtime_data(
                 cfg,
                 train_days=int(cfg.get("rolling", {}).get("train_days", 242)),
                 valid_days=int(cfg.get("rolling", {}).get("valid_days", 10)),
                 label_column=get_label_column_name(signal_horizon),
                 backtest_label_column=get_label_column_name(1),
+                extra_columns=needed_extra,
             )
+            return runtime_data_cache
+        missing = [col for col in needed_extra if col not in runtime_data_cache.factor_frame.columns]
+        if missing:
+            runtime_data_cache = load_rolling_runtime_data(
+                cfg,
+                train_days=int(cfg.get("rolling", {}).get("train_days", 242)),
+                valid_days=int(cfg.get("rolling", {}).get("valid_days", 10)),
+                label_column=get_label_column_name(signal_horizon),
+                backtest_label_column=get_label_column_name(1),
+                extra_columns=needed_extra,
+            )
+        return runtime_data_cache
+
+    avg_factor_baseline_predictions = bundle.avg_factor_baseline_predictions
+    sign_aligned_factor_baseline_predictions = bundle.sign_aligned_factor_baseline_predictions
+    if avg_factor_baseline_predictions is None:
+        try:
+            runtime_data = _ensure_runtime_data()
             avg_factor_baseline_predictions = build_average_factor_baseline_predictions(runtime_data)
         except Exception as exc:
             print(f"[!] Skipping avg-factor baseline reconstruction: {exc}")
     if sign_aligned_factor_baseline_predictions is None:
         try:
-            runtime_data = load_rolling_runtime_data(
-                cfg,
-                train_days=int(cfg.get("rolling", {}).get("train_days", 242)),
-                valid_days=int(cfg.get("rolling", {}).get("valid_days", 10)),
-                label_column=get_label_column_name(signal_horizon),
-                backtest_label_column=get_label_column_name(1),
-            )
+            runtime_data = _ensure_runtime_data()
             sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(runtime_data)
         except Exception as exc:
             print(f"[!] Skipping sign-aligned baseline reconstruction: {exc}")
+    market_data = None
+    intraperiod_exit_cfg = cfg.get("backtest", {}).get("intraperiod_exit") or {}
+    price_confirm_cfg = intraperiod_exit_cfg.get("price_confirm") if isinstance(intraperiod_exit_cfg, dict) else None
+    if isinstance(price_confirm_cfg, dict):
+        runtime_data = _ensure_runtime_data()
+        market_data = load_source_market_data_frame(cfg, runtime_data, columns=["close"])
 
     common_idx = bundle.final_predictions.index.intersection(bundle.label_series.index)
     aligned_preds = bundle.final_predictions.loc[common_idx]
@@ -123,6 +144,7 @@ def evaluate_prediction_bundle(
         "keep_top_n": cfg["strategy"].get("keep_top_n"),
         "min_score": cfg["strategy"].get("min_score"),
         "benchmark_returns": bench_series,
+        "market_data": market_data,
         "risk_control": cfg["backtest"].get("risk_control"),
         "intraperiod_exit": cfg["backtest"].get("intraperiod_exit"),
     }

@@ -390,8 +390,9 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     ann_ret = mean_ret * ann_factor
     ann_vol = std_ret * np.sqrt(ann_factor)
     
-    # Information Ratio (equivalent to Sharpe here since risk-free rate is often 0 in Qlib default)
-    info_ratio = (mean_ret / std_ret) * np.sqrt(ann_factor) if std_ret > 0 else 0.0
+    # Zero-risk-free Sharpe. Keep ``information_ratio`` as a backwards-compatible alias
+    # because historical experiment summaries already use that field name.
+    sharpe_ratio = (mean_ret / std_ret) * np.sqrt(ann_factor) if std_ret > 0 else 0.0
     
     # Max Drawdown
     cum_returns = (1 + returns).cumprod()
@@ -406,7 +407,8 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         "std": {"risk": std_ret},
         "annualized_return": {"risk": ann_ret},
         "annualized_volatility": {"risk": ann_vol},
-        "information_ratio": {"risk": info_ratio},
+        "sharpe_ratio": {"risk": sharpe_ratio},
+        "information_ratio": {"risk": sharpe_ratio},
         "max_drawdown": {"risk": max_drawdown},
         "daily_win_rate": {"risk": float((valid_returns > 0).mean()) if not valid_returns.empty else 0.0},
         "avg_win": {"risk": distribution_metrics["avg_win"]},
@@ -936,7 +938,7 @@ def print_metrics(
         print("=" * 72)
         _print_metric_line("AnnRet", _format_pct(_extract_metric(portfolio_metrics, "annualized_return")))
         _print_metric_line("AnnVol", _format_pct(_extract_metric(portfolio_metrics, "annualized_volatility")))
-        _print_metric_line("Sharpe", _format_number(_extract_metric(portfolio_metrics, "information_ratio")))
+        _print_metric_line("Sharpe", _format_number(_extract_metric(portfolio_metrics, "sharpe_ratio")))
         _print_metric_line("MaxDD", _format_pct(_extract_metric(portfolio_metrics, "max_drawdown")))
         _print_metric_line("Daily win", _format_pct(_extract_metric(portfolio_metrics, "daily_win_rate")))
         _print_metric_line("Monthly win", _format_pct(_extract_metric(portfolio_metrics, "monthly_win_rate")))

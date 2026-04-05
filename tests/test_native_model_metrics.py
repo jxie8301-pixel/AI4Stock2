@@ -272,6 +272,16 @@ class NativeModelMetricsTest(unittest.TestCase):
             np.std([1.0, -0.5], ddof=1) * np.sqrt(242),
             places=8,
         )
+        self.assertAlmostEqual(
+            portfolio_metrics["sharpe_ratio"]["risk"],
+            (np.mean([1.0, -0.5]) / np.std([1.0, -0.5], ddof=1)) * np.sqrt(242),
+            places=8,
+        )
+        self.assertAlmostEqual(
+            portfolio_metrics["information_ratio"]["risk"],
+            portfolio_metrics["sharpe_ratio"]["risk"],
+            places=8,
+        )
         self.assertAlmostEqual(portfolio_metrics["daily_win_rate"]["risk"], 0.5, places=8)
         self.assertAlmostEqual(portfolio_metrics["monthly_win_rate"]["risk"], 0.0, places=8)
         self.assertEqual(portfolio_metrics["profitable_month_count"], 0)

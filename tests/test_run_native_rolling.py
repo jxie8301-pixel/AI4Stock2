@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 
 import run_native_rolling
+from src.rolling_runtime import load_source_market_data_frame
 
 
 class RunNativeRollingTest(unittest.TestCase):
@@ -128,6 +129,47 @@ class RunNativeRollingTest(unittest.TestCase):
             resolved = run_native_rolling._resolve_prediction_artifact_dir(run_dir)
 
         self.assertEqual(resolved, artifact_dir)
+
+    def test_load_source_market_data_frame_reads_processed_close(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            parquet_dir = Path(tmpdir) / "processed"
+            parquet_dir.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                    "symbol": ["A", "A", "A"],
+                    "close": [10.0, 11.0, 12.0],
+                }
+            ).to_parquet(parquet_dir / "A.parquet", index=False)
+
+            runtime_data = run_native_rolling.RollingRuntimeData(
+                factor_frame=pd.DataFrame(
+                    {
+                        "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                        "symbol": ["A", "A"],
+                        "f1": [1.0, 2.0],
+                    }
+                ),
+                dt_index=pd.Series(pd.to_datetime(["2024-01-02", "2024-01-03"])),
+                y=np.array([0.1, 0.2], dtype=np.float32),
+                backtest_y=np.array([0.01, 0.02], dtype=np.float32),
+                full_calendar=pd.Series(pd.to_datetime(["2024-01-02", "2024-01-03"])),
+                test_start=pd.Timestamp("2024-01-02"),
+                test_end=pd.Timestamp("2024-01-03"),
+                test_calendar=pd.Series(pd.to_datetime(["2024-01-02", "2024-01-03"])),
+                selected_feature_names=["f1"],
+                selected_feature_sources=["f1"],
+                finite_feature_mask=np.array([True, True]),
+                lookback=20,
+                batch_size=2,
+            )
+            cfg = {"data": {"source": "tushare", "parquet_dir": str(parquet_dir)}}
+
+            market_data = load_source_market_data_frame(cfg, runtime_data, columns=["close"])
+
+        self.assertEqual(list(market_data.columns), ["close"])
+        self.assertEqual(list(market_data.index.get_level_values("symbol").unique()), ["A"])
+        self.assertEqual(market_data["close"].tolist(), [10.0, 11.0])
 
 
 if __name__ == "__main__":

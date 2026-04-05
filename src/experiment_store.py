@@ -80,6 +80,7 @@ SUMMARY_FIELDS = [
     "rebalances_beating_avg_factor_baseline_pct",
     "rebalances_beating_avg_factor_baseline_summary",
     "portfolio_annualized_return",
+    "portfolio_sharpe_ratio",
     "portfolio_information_ratio",
     "portfolio_max_drawdown",
     "results_dir",
@@ -416,6 +417,9 @@ def flatten_metrics(signal_metrics: dict | None, portfolio_metrics: dict | None)
         ),
         "portfolio_annualized_return": _safe_float(
             portfolio_metrics.get("annualized_return", {}).get("risk")
+        ),
+        "portfolio_sharpe_ratio": _safe_float(
+            portfolio_metrics.get("sharpe_ratio", {}).get("risk")
         ),
         "portfolio_information_ratio": _safe_float(
             portfolio_metrics.get("information_ratio", {}).get("risk")

@@ -22,6 +22,7 @@ from src.experiment_store import (
     resolve_rebalance_freq,
     resolve_retrain_step,
 )
+from src.evaluate import safe_cross_sectional_corr
 from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import (
@@ -40,6 +41,7 @@ PREDICTIONS_FILENAME = "final_predictions.parquet"
 SIGNAL_LABELS_FILENAME = "signal_labels.parquet"
 BACKTEST_LABELS_FILENAME = "backtest_labels.parquet"
 AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME = "avg_factor_baseline_predictions.parquet"
+SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME = "sign_aligned_factor_baseline_predictions.parquet"
 PREDICTION_METADATA_FILENAME = "metadata.json"
 
 
@@ -63,6 +65,7 @@ class RollingRuntimeData:
     test_end: pd.Timestamp
     test_calendar: pd.Series
     selected_feature_names: list[str]
+    selected_feature_sources: list[str]
     finite_feature_mask: np.ndarray
     lookback: int
     batch_size: int
@@ -74,6 +77,7 @@ class PredictionBundle:
     label_series: pd.Series
     backtest_label_series: pd.Series
     avg_factor_baseline_predictions: pd.Series | None
+    sign_aligned_factor_baseline_predictions: pd.Series | None
     selected_feature_names: list[str]
     metadata: dict[str, Any]
     feature_importance_frames: list[pd.DataFrame]
@@ -168,6 +172,11 @@ def _write_prediction_bundle(bundle: PredictionBundle, artifact_dir: Path) -> No
             artifact_dir / AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME,
             index=False,
         )
+    if bundle.sign_aligned_factor_baseline_predictions is not None:
+        _series_to_frame(bundle.sign_aligned_factor_baseline_predictions, "prediction").to_parquet(
+            artifact_dir / SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME,
+            index=False,
+        )
     metadata = {
         **bundle.metadata,
         "selected_features": list(bundle.selected_feature_names),
@@ -197,9 +206,15 @@ def load_prediction_bundle(raw_path: str | Path) -> PredictionBundle:
     label_series = _frame_to_series(pd.read_parquet(artifact_dir / SIGNAL_LABELS_FILENAME), "label")
     backtest_label_series = _frame_to_series(pd.read_parquet(artifact_dir / BACKTEST_LABELS_FILENAME), "label")
     avg_factor_path = artifact_dir / AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME
+    sign_aligned_factor_path = artifact_dir / SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME
     avg_factor_baseline_predictions = (
         _frame_to_series(pd.read_parquet(avg_factor_path), "prediction")
         if avg_factor_path.exists()
+        else None
+    )
+    sign_aligned_factor_baseline_predictions = (
+        _frame_to_series(pd.read_parquet(sign_aligned_factor_path), "prediction")
+        if sign_aligned_factor_path.exists()
         else None
     )
     return PredictionBundle(
@@ -207,6 +222,7 @@ def load_prediction_bundle(raw_path: str | Path) -> PredictionBundle:
         label_series=label_series,
         backtest_label_series=backtest_label_series,
         avg_factor_baseline_predictions=avg_factor_baseline_predictions,
+        sign_aligned_factor_baseline_predictions=sign_aligned_factor_baseline_predictions,
         selected_feature_names=list(metadata.get("selected_features", [])),
         metadata=metadata,
         feature_importance_frames=[],
@@ -289,6 +305,7 @@ def load_rolling_runtime_data(
         test_end=test_end,
         test_calendar=test_calendar,
         selected_feature_names=selected_feature_names,
+        selected_feature_sources=selected_feature_sources,
         finite_feature_mask=finite_feature_mask,
         lookback=lookback,
         batch_size=batch_size,
@@ -320,7 +337,8 @@ def _build_average_factor_baseline_predictions(
     global_test_mask = (runtime_data.dt_index >= runtime_data.test_start) & (runtime_data.dt_index <= runtime_data.test_end)
     if not np.any(global_test_mask):
         return None
-    feature_frame = runtime_data.factor_frame.loc[global_test_mask, runtime_data.selected_feature_names]
+    unique_source_columns = list(dict.fromkeys(runtime_data.selected_feature_sources))
+    feature_frame = runtime_data.factor_frame.loc[global_test_mask, unique_source_columns]
     baseline_scores = feature_frame.apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
     dates = pd.to_datetime(runtime_data.dt_index[global_test_mask])
     symbols = runtime_data.factor_frame.loc[global_test_mask, "symbol"].astype(str)
@@ -330,6 +348,56 @@ def _build_average_factor_baseline_predictions(
         name="prediction",
     ).sort_index()
     return out
+
+
+def _build_sign_aligned_factor_baseline_predictions(
+    runtime_data: RollingRuntimeData,
+) -> pd.Series | None:
+    unique_source_columns = list(dict.fromkeys(runtime_data.selected_feature_sources))
+    if not unique_source_columns:
+        return None
+
+    train_end = runtime_data.test_start - pd.Timedelta(days=1)
+    train_mask = runtime_data.dt_index <= train_end
+    if not np.any(train_mask):
+        return None
+    global_test_mask = (runtime_data.dt_index >= runtime_data.test_start) & (runtime_data.dt_index <= runtime_data.test_end)
+    if not np.any(global_test_mask):
+        return None
+
+    train_feature_frame = runtime_data.factor_frame.loc[train_mask, unique_source_columns].apply(pd.to_numeric, errors="coerce")
+    train_dates = pd.to_datetime(runtime_data.dt_index[train_mask])
+    train_labels = pd.Series(runtime_data.y[train_mask], dtype=float)
+
+    sign_map: dict[str, float] = {}
+    for feature_name in unique_source_columns:
+        feature_values = pd.Series(train_feature_frame[feature_name].to_numpy(dtype=float, copy=False), dtype=float)
+        frame = pd.DataFrame({"date": train_dates, "feature": feature_values, "label": train_labels}).dropna()
+        if frame.empty:
+            sign_map[feature_name] = 1.0
+            continue
+        daily_rank_ic = frame.groupby("date", sort=True).apply(
+            lambda x: safe_cross_sectional_corr(x["feature"], x["label"], method="spearman"),
+            include_groups=False,
+        ).dropna()
+        if daily_rank_ic.empty:
+            sign_map[feature_name] = 1.0
+            continue
+        mean_rank_ic = float(daily_rank_ic.mean())
+        sign_map[feature_name] = 1.0 if not np.isfinite(mean_rank_ic) or mean_rank_ic >= 0 else -1.0
+
+    test_feature_frame = runtime_data.factor_frame.loc[global_test_mask, unique_source_columns].apply(pd.to_numeric, errors="coerce")
+    aligned_feature_frame = test_feature_frame.copy()
+    for feature_name, sign_value in sign_map.items():
+        aligned_feature_frame[feature_name] = aligned_feature_frame[feature_name] * float(sign_value)
+    baseline_scores = aligned_feature_frame.mean(axis=1, skipna=True)
+    dates = pd.to_datetime(runtime_data.dt_index[global_test_mask])
+    symbols = runtime_data.factor_frame.loc[global_test_mask, "symbol"].astype(str)
+    return pd.Series(
+        baseline_scores.to_numpy(dtype=float, copy=False),
+        index=pd.MultiIndex.from_arrays([dates, symbols], names=["datetime", "instrument"]),
+        name="prediction",
+    ).sort_index()
 
 
 def _build_prediction_metadata(
@@ -672,11 +740,13 @@ def generate_prediction_bundle(
     final_predictions = pd.concat(all_predictions).sort_index()
     label_series, backtest_label_series = _build_label_series(runtime_data)
     avg_factor_baseline_predictions = _build_average_factor_baseline_predictions(runtime_data)
+    sign_aligned_factor_baseline_predictions = _build_sign_aligned_factor_baseline_predictions(runtime_data)
     return PredictionBundle(
         final_predictions=final_predictions,
         label_series=label_series,
         backtest_label_series=backtest_label_series,
         avg_factor_baseline_predictions=avg_factor_baseline_predictions,
+        sign_aligned_factor_baseline_predictions=sign_aligned_factor_baseline_predictions,
         selected_feature_names=list(runtime_data.selected_feature_names),
         metadata=_build_prediction_metadata(
             cfg,
@@ -727,6 +797,7 @@ def evaluate_prediction_bundle(
     signal_horizon = int(bundle.metadata.get("signal_horizon", resolve_signal_horizon(cfg)))
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
     avg_factor_baseline_predictions = bundle.avg_factor_baseline_predictions
+    sign_aligned_factor_baseline_predictions = bundle.sign_aligned_factor_baseline_predictions
     if avg_factor_baseline_predictions is None:
         try:
             runtime_data = load_rolling_runtime_data(
@@ -739,6 +810,18 @@ def evaluate_prediction_bundle(
             avg_factor_baseline_predictions = _build_average_factor_baseline_predictions(runtime_data)
         except Exception as exc:
             print(f"[!] Skipping avg-factor baseline reconstruction: {exc}")
+    if sign_aligned_factor_baseline_predictions is None:
+        try:
+            runtime_data = load_rolling_runtime_data(
+                cfg,
+                train_days=int(cfg.get("rolling", {}).get("train_days", 242)),
+                valid_days=int(cfg.get("rolling", {}).get("valid_days", 10)),
+                label_column=get_label_column_name(signal_horizon),
+                backtest_label_column=get_label_column_name(1),
+            )
+            sign_aligned_factor_baseline_predictions = _build_sign_aligned_factor_baseline_predictions(runtime_data)
+        except Exception as exc:
+            print(f"[!] Skipping sign-aligned baseline reconstruction: {exc}")
 
     common_idx = bundle.final_predictions.index.intersection(bundle.label_series.index)
     aligned_preds = bundle.final_predictions.loc[common_idx]
@@ -810,6 +893,30 @@ def evaluate_prediction_bundle(
             risk_control=cfg["backtest"].get("risk_control"),
             intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
         )
+    sign_aligned_factor_baseline_report = None
+    if sign_aligned_factor_baseline_predictions is not None and not sign_aligned_factor_baseline_predictions.empty:
+        sign_aligned_factor_baseline_report = run_native_backtest(
+            preds=sign_aligned_factor_baseline_predictions,
+            labels=bundle.backtest_label_series,
+            topk=cfg["strategy"]["topk"],
+            n_drop=cfg["strategy"]["n_drop"],
+            cost_buy=cfg["backtest"]["cost"]["buy"],
+            cost_sell=cfg["backtest"]["cost"]["sell"],
+            min_cost=cfg["backtest"].get("min_cost", 5.0),
+            account=cfg["backtest"].get("account", 100_000_000),
+            risk_degree=cfg["backtest"].get("risk_degree", 0.95),
+            slippage=cfg["backtest"].get("slippage", 0.0),
+            rebalance_freq=rebalance_freq,
+            weighting=cfg["strategy"].get("weighting", "equal"),
+            score_transform=cfg["strategy"].get("score_transform", "none"),
+            score_zscore_clip=cfg["strategy"].get("score_zscore_clip", 3.0),
+            max_weight=cfg["strategy"].get("max_weight"),
+            keep_top_n=cfg["strategy"].get("keep_top_n"),
+            min_score=cfg["strategy"].get("min_score"),
+            benchmark_returns=bench_series,
+            risk_control=cfg["backtest"].get("risk_control"),
+            intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
+        )
     plot_report = backtest_report.rename(columns={"net_return": "return"})
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,
@@ -822,7 +929,12 @@ def evaluate_prediction_bundle(
         plot_report["avg_factor_baseline_return"] = (
             avg_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
         )
-        plot_report.attrs["avg_factor_baseline_name"] = "Avg Factor Baseline"
+        plot_report.attrs["avg_factor_baseline_name"] = "Avg Unique Factor Baseline"
+    if sign_aligned_factor_baseline_report is not None:
+        plot_report["sign_aligned_factor_baseline_return"] = (
+            sign_aligned_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
+        )
+        plot_report.attrs["sign_aligned_factor_baseline_name"] = "Sign-Aligned Factor Baseline"
 
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     monthly_summary = build_period_summary(metric_report, freq="ME")

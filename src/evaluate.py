@@ -425,13 +425,26 @@ def plot_cumulative_return(report: pd.DataFrame, save_path: str = None):
         ax.plot(cum_bench.index, cum_bench.values, label=bench_label, linewidth=1.5, alpha=0.7)
     if "avg_factor_baseline_return" in report.columns:
         cum_avg_factor = (1 + report["avg_factor_baseline_return"]).cumprod()
-        avg_factor_label = str(report.attrs.get("avg_factor_baseline_name") or "Avg Factor Baseline").strip()
+        avg_factor_label = str(report.attrs.get("avg_factor_baseline_name") or "Avg Unique Factor Baseline").strip()
         ax.plot(
             cum_avg_factor.index,
             cum_avg_factor.values,
             label=avg_factor_label or "Avg Factor Baseline",
             linewidth=1.5,
             linestyle="--",
+            alpha=0.9,
+        )
+    if "sign_aligned_factor_baseline_return" in report.columns:
+        cum_sign_aligned = (1 + report["sign_aligned_factor_baseline_return"]).cumprod()
+        sign_aligned_label = str(
+            report.attrs.get("sign_aligned_factor_baseline_name") or "Sign-Aligned Factor Baseline"
+        ).strip()
+        ax.plot(
+            cum_sign_aligned.index,
+            cum_sign_aligned.values,
+            label=sign_aligned_label or "Sign-Aligned Factor Baseline",
+            linewidth=1.5,
+            linestyle=":",
             alpha=0.9,
         )
     ax.set_title("Cumulative Return")

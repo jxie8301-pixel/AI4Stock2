@@ -24,7 +24,12 @@ from src.experiment_store import (
 )
 from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
-from src.feature_selection import apply_feature_transforms, compute_finite_feature_mask_frame, resolve_selected_features
+from src.feature_selection import (
+    apply_feature_transforms,
+    compute_finite_feature_mask_frame,
+    materialize_selected_feature_frame,
+    resolve_selected_feature_columns,
+)
 from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
 from src.model_config import get_lgbm_config
 from src.runtime_cli import add_common_runtime_args, apply_common_runtime_overrides, load_validated_config_from_args
@@ -224,7 +229,7 @@ def load_rolling_runtime_data(
 
     print(f"\n[Step 1] Loading Parquet Factor Store Metadata (data_source={data_source})")
     meta = load_factor_store_metadata(factor_store_dir)
-    _, selected_feature_names = resolve_selected_features(meta, cfg)
+    selected_feature_names, selected_feature_sources = resolve_selected_feature_columns(meta, cfg)
     print(f"Selected features: {len(selected_feature_names)} / {len(meta['feature_names'])}")
 
     universe_name = cfg.get("universe", "all")
@@ -247,9 +252,10 @@ def load_rolling_runtime_data(
     first_test_idx = int(full_calendar.searchsorted(first_test_start))
     earliest_idx = max(0, first_test_idx - train_days - valid_days)
     load_start = full_calendar.iloc[earliest_idx]
+    load_columns = list(dict.fromkeys(selected_feature_sources + ([backtest_label_column] if backtest_label_column != label_column else [])))
     factor_frame = load_factor_frame(
         store_dir=factor_store_dir,
-        columns=selected_feature_names + ([backtest_label_column] if backtest_label_column != label_column else []),
+        columns=load_columns,
         label_column=label_column,
         date_start=load_start,
         date_end=test_end,
@@ -260,6 +266,11 @@ def load_rolling_runtime_data(
     )
     if factor_frame.empty:
         raise ValueError("Parquet factor store returned no rows for the configured rolling date range.")
+    factor_frame = materialize_selected_feature_frame(
+        factor_frame,
+        selected_columns=selected_feature_names,
+        source_columns=selected_feature_sources,
+    )
 
     y = factor_frame["label"].to_numpy(dtype=np.float32, copy=True)
     if backtest_label_column in factor_frame.columns:

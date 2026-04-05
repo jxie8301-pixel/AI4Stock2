@@ -5,43 +5,85 @@ from __future__ import annotations
 from typing import Any
 
 
-def resolve_selected_features(meta: dict[str, Any], cfg: dict[str, Any]) -> tuple[list[int], list[str]]:
-    """Resolve selected feature indices from cache metadata and config.
-
-    If ``features.selected_columns`` is omitted or empty, profile-defined columns are
-    used when available; otherwise all cached features are used.
-    """
+def resolve_selected_feature_columns(meta: dict[str, Any], cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
+    """Return (display_columns, source_columns) after applying profile expansion."""
     try:
         from src.feature_profiles import resolve_feature_profile
+        from src.gen_feature import get_exact_duplicate_feature_source_map
     except ModuleNotFoundError:
         from feature_profiles import resolve_feature_profile  # type: ignore
+        from gen_feature import get_exact_duplicate_feature_source_map  # type: ignore
 
     feature_names = meta.get("feature_names")
     if not isinstance(feature_names, list) or not feature_names:
         raise ValueError("Cache metadata missing non-empty feature_names.")
 
-    selected_columns = cfg.get("features", {}).get("selected_columns")
-    if not selected_columns:
-        selected_columns = resolve_feature_profile(cfg).get("selected_columns")
-    if not selected_columns:
-        return list(range(len(feature_names))), list(feature_names)
+    selected_columns_override = cfg.get("features", {}).get("selected_columns")
+    if selected_columns_override is not None:
+        if not isinstance(selected_columns_override, list) or not all(isinstance(col, str) for col in selected_columns_override):
+            raise ValueError("features.selected_columns must be a list of feature-name strings.")
+        display_columns = list(selected_columns_override)
+        source_columns = list(selected_columns_override)
+    else:
+        profile = resolve_feature_profile(cfg)
+        display_columns = list(profile.get("selected_columns") or [])
+        source_columns = list(profile.get("source_columns") or display_columns)
 
-    if not isinstance(selected_columns, list) or not all(isinstance(col, str) for col in selected_columns):
-        raise ValueError("features.selected_columns must be a list of feature-name strings.")
+    if not display_columns:
+        return list(feature_names), list(feature_names)
+    if len(display_columns) != len(source_columns):
+        raise ValueError("Resolved feature profile has mismatched display/source column lengths.")
+
+    duplicate_source_map = get_exact_duplicate_feature_source_map()
+    source_columns = [duplicate_source_map.get(name, name) for name in source_columns]
 
     index_by_name = {name: idx for idx, name in enumerate(feature_names)}
-    missing = [name for name in selected_columns if name not in index_by_name]
+    missing = [name for name in source_columns if name not in index_by_name]
     if missing:
         preview = ", ".join(feature_names[:12])
         raise ValueError(
             "Selected feature columns not found in cache metadata: "
             f"{missing}. Cache starts with: {preview}"
         )
+    return display_columns, source_columns
 
-    # Preserve user order but drop duplicates.
-    deduped_names = list(dict.fromkeys(selected_columns))
-    selected_idx = [index_by_name[name] for name in deduped_names]
-    return selected_idx, deduped_names
+
+def resolve_selected_features(meta: dict[str, Any], cfg: dict[str, Any]) -> tuple[list[int], list[str]]:
+    """Resolve selected feature indices from cache metadata and config.
+
+    If ``features.selected_columns`` is omitted or empty, profile-defined columns are
+    used when available; otherwise all cached features are used.
+    """
+    feature_names = meta.get("feature_names")
+    if not isinstance(feature_names, list) or not feature_names:
+        raise ValueError("Cache metadata missing non-empty feature_names.")
+
+    selected_columns, source_columns = resolve_selected_feature_columns(meta, cfg)
+    if not selected_columns:
+        return list(range(len(feature_names))), list(feature_names)
+
+    index_by_name = {name: idx for idx, name in enumerate(feature_names)}
+    selected_idx = [index_by_name[name] for name in source_columns]
+    return selected_idx, list(selected_columns)
+
+
+def materialize_selected_feature_frame(frame, selected_columns: list[str], source_columns: list[str]):
+    """Add alias/repeated feature columns required by the resolved profile."""
+    import pandas as pd
+
+    if len(selected_columns) != len(source_columns):
+        raise ValueError("selected_columns and source_columns must have the same length")
+    if frame.empty or not selected_columns:
+        return frame.copy()
+
+    expanded = frame.copy()
+    for selected_name, source_name in zip(selected_columns, source_columns):
+        if source_name not in expanded.columns:
+            raise ValueError(f"Missing source feature column: {source_name}")
+        if selected_name == source_name:
+            continue
+        expanded[selected_name] = expanded[source_name].to_numpy(copy=False)
+    return expanded
 
 
 def compute_finite_feature_mask(X, selected_idx: list[int], num_rows: int) -> Any:

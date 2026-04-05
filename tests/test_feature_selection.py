@@ -4,7 +4,13 @@ import numpy as np
 import pandas as pd
 
 from src.gen_feature import get_all_factor_feature_names
-from src.feature_selection import apply_cross_sectional_rank, apply_feature_transforms, compute_finite_feature_mask, resolve_selected_features
+from src.feature_selection import (
+    apply_cross_sectional_rank,
+    apply_feature_transforms,
+    compute_finite_feature_mask,
+    materialize_selected_feature_frame,
+    resolve_selected_features,
+)
 
 
 class FeatureSelectionTest(unittest.TestCase):
@@ -17,14 +23,14 @@ class FeatureSelectionTest(unittest.TestCase):
         self.assertEqual(idx, [0, 1, 2])
         self.assertEqual(names, ["A", "B", "C"])
 
-    def test_resolve_selected_features_preserves_order_and_dedupes(self):
+    def test_resolve_selected_features_preserves_order_for_inline_override(self):
         meta = {"feature_names": ["A", "B", "C"]}
         cfg = {"features": {"selected_columns": ["C", "A", "C"]}}
 
         idx, names = resolve_selected_features(meta, cfg)
 
-        self.assertEqual(idx, [2, 0])
-        self.assertEqual(names, ["C", "A"])
+        self.assertEqual(idx, [2, 0, 2])
+        self.assertEqual(names, ["C", "A", "C"])
 
     def test_resolve_selected_features_uses_profile_subset_when_columns_omitted(self):
         lgbm_cols = [f"LGBM_{name}" for name in [
@@ -43,17 +49,30 @@ class FeatureSelectionTest(unittest.TestCase):
             "ep_ttm",
             "is_loss",
             "bp",
-            "turnover_20",
-            "dist_high_20",
-            "dist_low_20",
         ]]
-        meta = {"feature_names": ["KMID", "MA5", "TEMP_ret_20", *lgbm_cols]}
+        meta = {
+            "feature_names": [
+                "KMID",
+                "MA5",
+                "TEMP_ret_20",
+                *lgbm_cols,
+                "LGBM_turnover_20",
+                "LGBM_dist_high_20",
+                "LGBM_dist_low_20",
+            ]
+        }
         cfg = {"features": {"profile": "lgbm_purified_v1"}}
 
         idx, names = resolve_selected_features(meta, cfg)
 
-        self.assertEqual(idx, list(range(3, 3 + len(lgbm_cols))))
-        self.assertEqual(names, lgbm_cols)
+        self.assertEqual(
+            idx,
+            list(range(3, 3 + len(lgbm_cols))) + [len(meta["feature_names"]) - 3, len(meta["feature_names"]) - 2, len(meta["feature_names"]) - 1],
+        )
+        self.assertEqual(
+            names,
+            lgbm_cols + ["LGBM_turnover_20", "LGBM_dist_high_20", "LGBM_dist_low_20"],
+        )
 
     def test_compute_finite_feature_mask_uses_selected_columns_only(self):
         X = np.array(
@@ -93,6 +112,18 @@ class FeatureSelectionTest(unittest.TestCase):
         self.assertEqual(transformed["f1"].tolist(), [0.5, 1.0])
         self.assertEqual(untouched["f1"].tolist(), [10.0, 20.0])
 
+    def test_materialize_selected_feature_frame_creates_alias_columns(self):
+        frame = pd.DataFrame({"A": [1.0, 2.0], "B": [3.0, 4.0]})
+
+        expanded = materialize_selected_feature_frame(
+            frame,
+            selected_columns=["A", "A__rep2", "B"],
+            source_columns=["A", "A", "B"],
+        )
+
+        self.assertEqual(expanded["A__rep2"].tolist(), [1.0, 2.0])
+        self.assertEqual(expanded["B"].tolist(), [3.0, 4.0])
+
     def test_all_factor_feature_names_are_unique(self):
         feature_names = get_all_factor_feature_names()
 
@@ -100,6 +131,8 @@ class FeatureSelectionTest(unittest.TestCase):
         self.assertIn("KMID", feature_names)
         self.assertIn("LGBM_ret_20", feature_names)
         self.assertIn("TEMP_ret_120", feature_names)
+        self.assertNotIn("TEMP_ret_20", feature_names)
+        self.assertNotIn("TEMP_corr_cv_20", feature_names)
 
 
 if __name__ == "__main__":

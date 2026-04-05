@@ -23,10 +23,12 @@ class TushareFeatureTest(unittest.TestCase):
         default_names = get_all_factor_feature_names()
         tushare_names = get_all_factor_feature_names(data_source="tushare")
 
-        self.assertEqual(len(default_names), 279)
+        self.assertEqual(len(default_names), 259)
         self.assertEqual(len(tushare_names), len(default_names) + len(get_tushare_factor_feature_names()))
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", tushare_names)
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", default_names)
+        self.assertNotIn("TEMP_ret_20", default_names)
+        self.assertNotIn("TEMP_corr_cv_20", default_names)
         self.assertEqual(len(tushare_names), len(set(tushare_names)))
 
     def test_compute_tushare_factor_features_uses_processed_market_fields(self):

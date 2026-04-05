@@ -423,7 +423,11 @@ def get_all_factor_feature_names(
             f"{TUSHARE_FACTOR_PREFIX}{name}"
             for name in get_tushare_factor_feature_names(tushare_config)
         ]
-    return feature_names
+    return deduplicate_exact_feature_names(
+        feature_names,
+        alpha158_config=alpha158_config,
+        lgbm_purified_config=lgbm_purified_config,
+    )
 
 
 def get_known_exact_duplicate_feature_groups(
@@ -508,6 +512,47 @@ def get_known_exact_duplicate_feature_groups(
         groups.append((f"{ALL_FACTORS_LGBM_PREFIX}dist_low_20", f"{TEMPORAL_FACTOR_PREFIX}low_gap_{extreme_window}"))
 
     return groups
+
+
+def get_exact_duplicate_feature_source_map(
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+    temporal_config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    source_map: dict[str, str] = {}
+    for group in get_known_exact_duplicate_feature_groups(
+        alpha158_config=alpha158_config,
+        lgbm_purified_config=lgbm_purified_config,
+        temporal_config=temporal_config,
+    ):
+        canonical = str(group[0])
+        source_map[canonical] = canonical
+        for feature_name in group[1:]:
+            source_map[str(feature_name)] = canonical
+    return source_map
+
+
+def deduplicate_exact_feature_names(
+    feature_names: list[str],
+    *,
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+    temporal_config: dict[str, Any] | None = None,
+) -> list[str]:
+    source_map = get_exact_duplicate_feature_source_map(
+        alpha158_config=alpha158_config,
+        lgbm_purified_config=lgbm_purified_config,
+        temporal_config=temporal_config,
+    )
+    deduped: list[str] = []
+    seen_sources: set[str] = set()
+    for feature_name in feature_names:
+        source_name = source_map.get(feature_name, feature_name)
+        if source_name in seen_sources:
+            continue
+        deduped.append(feature_name)
+        seen_sources.add(source_name)
+    return deduped
 
 
 def get_lgbm_purified_feature_names(config: dict[str, Any] | None = None) -> list[str]:

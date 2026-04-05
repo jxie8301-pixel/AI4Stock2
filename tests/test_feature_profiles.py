@@ -26,15 +26,18 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertEqual(profile["data_source"], "akshare")
         self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
-        self.assertEqual(len(profile["selected_columns"]), 39)
+        self.assertEqual(len(profile["selected_columns"]), 46)
+        self.assertEqual(len(profile["load_columns"]), 37)
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v4_techlite.yaml"))
         self.assertEqual(profile["selected_columns"][0], "KMID")
         self.assertEqual(profile["selected_columns"][-1], f"{TECHNICAL_FACTOR_PREFIX}mfi_14")
-        self.assertEqual(len(get_all_factor_feature_names()), 279)
+        self.assertEqual(len(get_all_factor_feature_names()), 259)
         self.assertIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", get_all_factor_feature_names())
         self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}macd_hist_12_26_9", get_all_factor_feature_names())
-        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_20", profile["selected_columns"])
-        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}rsv_20", profile["selected_columns"])
+        self.assertIn("CORR20__rep2", profile["selected_columns"])
+        self.assertIn("LGBM_ret_20__rep2", profile["selected_columns"])
+        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_20", profile["load_columns"])
+        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}rsv_20", profile["load_columns"])
 
     def test_full_profile_preserves_legacy_cache_dir(self):
         cfg = {
@@ -172,8 +175,9 @@ class FeatureProfilesTest(unittest.TestCase):
         no_ret120 = resolve_feature_profile({"features": {"profile": "core_v4_techlite_no_ret120"}})
 
         self.assertTrue(str(no_ret120["profile_path"]).endswith("configs/feature_profiles.yaml::core_v4_techlite_no_ret120"))
-        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", no_ret120["selected_columns"])
-        self.assertEqual(len(no_ret120["selected_columns"]), 38)
+        self.assertNotIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", no_ret120["load_columns"])
+        self.assertEqual(len(no_ret120["selected_columns"]), 45)
+        self.assertEqual(len(no_ret120["load_columns"]), 36)
 
     def test_core_v4_tushare_plus_profile_adds_ts_columns(self):
         profile = resolve_feature_profile(

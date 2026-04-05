@@ -41,6 +41,30 @@ def _normalize_profile_column_mutation(
     return list(value)
 
 
+def _normalize_profile_repeat_columns(
+    value: Any,
+    *,
+    field_name: str,
+) -> dict[str, int]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{field_name} must be a mapping of feature_name -> positive integer")
+    out: dict[str, int] = {}
+    for raw_name, raw_count in value.items():
+        name = str(raw_name).strip()
+        if not name:
+            raise ValueError(f"{field_name} keys must be non-empty strings")
+        try:
+            count = int(raw_count)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name}[{name!r}] must be a positive integer") from exc
+        if count <= 0:
+            raise ValueError(f"{field_name}[{name!r}] must be a positive integer")
+        out[name] = count
+    return out
+
+
 def _materialize_profile_selected_columns(profile: dict[str, Any]) -> list[str] | None:
     try:
         from src.gen_feature import (
@@ -72,6 +96,28 @@ def _materialize_profile_selected_columns(profile: dict[str, Any]) -> list[str] 
             for name in get_lgbm_purified_feature_names(profile.get("lgbm_purified"))
         ]
     return None
+
+
+def _expand_profile_selected_columns(profile: dict[str, Any]) -> tuple[list[str] | None, list[str] | None, list[str] | None]:
+    selected_columns = _materialize_profile_selected_columns(profile)
+    if selected_columns is None:
+        return None, None, None
+
+    repeat_columns = _normalize_profile_repeat_columns(
+        profile.get("repeat_columns"),
+        field_name=f"feature profile '{profile.get('name', '<inline>')}'.repeat_columns",
+    )
+    expanded_columns: list[str] = []
+    source_columns: list[str] = []
+    for column_name in selected_columns:
+        repeat_count = repeat_columns.get(column_name, 1)
+        for repeat_idx in range(repeat_count):
+            expanded_name = column_name if repeat_idx == 0 else f"{column_name}__rep{repeat_idx + 1}"
+            expanded_columns.append(expanded_name)
+            source_columns.append(column_name)
+
+    load_columns = list(dict.fromkeys(source_columns))
+    return expanded_columns, source_columns, load_columns
 
 
 def _resolve_profile_definition(
@@ -108,6 +154,10 @@ def _resolve_profile_definition(
         profile_entry.pop("add_columns", None),
         field_name=f"feature profile '{profile_name}'.add_columns",
     )
+    repeat_columns = _normalize_profile_repeat_columns(
+        profile_entry.pop("repeat_columns", None),
+        field_name=f"feature profile '{profile_name}'.repeat_columns",
+    )
 
     merged = deepcopy(loaded_profile)
     deep_update(merged, profile_entry)
@@ -139,6 +189,9 @@ def _resolve_profile_definition(
                 mutated_columns.append(item)
                 existing.add(item)
         merged["selected_columns"] = mutated_columns
+
+    if repeat_columns:
+        merged["repeat_columns"] = repeat_columns
 
     merged["path"] = source_path
     merged["name"] = profile_name
@@ -176,7 +229,7 @@ def resolve_feature_profile(
         data_source,
         factor_store_name=factor_store_name,
     )
-    profile_selected_columns = _materialize_profile_selected_columns(profile)
+    profile_selected_columns, profile_source_columns, profile_load_columns = _expand_profile_selected_columns(profile)
 
     return {
         "name": resolved_profile_name,
@@ -187,6 +240,8 @@ def resolve_feature_profile(
         "cache_dir": factor_store_dir,
         "alpha158_config": deepcopy(profile.get("alpha158")),
         "selected_columns": deepcopy(profile_selected_columns),
+        "source_columns": deepcopy(profile_source_columns),
+        "load_columns": deepcopy(profile_load_columns),
         "raw": profile,
         "profile_config_path": profile_config_path,
         "profile_path": profile.get("path"),

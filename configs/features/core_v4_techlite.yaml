@@ -28,8 +28,6 @@ selected_columns:
   - LGBM_log_mcap
   - TEMP_ret_5
   - TEMP_ret_120
-  - TEMP_ma_gap_20
-  - TEMP_ma_gap_60
   - TEMP_std_20
   - TEMP_volume_ratio_20
   - TEMP_turnover_mean_20
@@ -41,3 +39,13 @@ selected_columns:
   - TECH_trix_hist_15_9
   - TECH_macd_hist_12_26_9
   - TECH_mfi_14
+repeat_columns:
+  CORR20: 2
+  RSV20: 2
+  RSV60: 2
+  LGBM_ret_20: 2
+  LGBM_ret_60: 2
+  LGBM_dist_ma20: 2
+  LGBM_dist_ma60: 2
+  LGBM_std_60: 2
+  LGBM_amihud_20: 2

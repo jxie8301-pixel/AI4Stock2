@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
-from src.feature_selection import resolve_selected_features
+from src.feature_selection import resolve_selected_feature_columns
 from src.label_utils import get_label_column_name, resolve_signal_horizon
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 from src.single_factor_diagnostics import (
@@ -150,7 +150,8 @@ def main() -> None:
     if args.all_features:
         feature_names = list(factor_store_meta.get("feature_names", []))
     else:
-        _, feature_names = resolve_selected_features(factor_store_meta, cfg)
+        _, source_columns = resolve_selected_feature_columns(factor_store_meta, cfg)
+        feature_names = list(dict.fromkeys(source_columns))
     if not feature_names:
         raise ValueError("No features resolved for diagnostics.")
 

@@ -276,6 +276,8 @@ class ConfigValidationTest(unittest.TestCase):
             "price_confirm": {
                 "mode": "close_below_ma",
                 "ma_window": 10,
+                "min_remaining_steps": 3,
+                "force_exit_threshold": 0.25,
             },
         }
 
@@ -283,6 +285,8 @@ class ConfigValidationTest(unittest.TestCase):
 
         self.assertEqual(validated["backtest"]["intraperiod_exit"]["price_confirm"]["mode"], "close_below_ma")
         self.assertEqual(validated["backtest"]["intraperiod_exit"]["price_confirm"]["ma_window"], 10)
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["price_confirm"]["min_remaining_steps"], 3)
+        self.assertEqual(validated["backtest"]["intraperiod_exit"]["price_confirm"]["force_exit_threshold"], 0.25)
 
     def test_validate_training_config_rejects_invalid_intraperiod_exit_mode(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
@@ -311,6 +315,21 @@ class ConfigValidationTest(unittest.TestCase):
         }
 
         with self.assertRaisesRegex(ValueError, "backtest.intraperiod_exit.price_confirm.mode must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_price_confirm_force_threshold_above_exit_threshold(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["intraperiod_exit"] = {
+            "mode": "score_threshold",
+            "score_source": "rank_pct",
+            "threshold": 0.45,
+            "price_confirm": {
+                "mode": "close_below_ma",
+                "force_exit_threshold": 0.50,
+            },
+        }
+
+        with self.assertRaisesRegex(ValueError, "force_exit_threshold must be <="):
             validate_training_config(cfg, check_paths=False)
 
     def test_validate_training_config_rejects_invalid_risk_control_windows(self):

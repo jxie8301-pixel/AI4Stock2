@@ -67,6 +67,13 @@ def normalize_intraperiod_exit_config(
             )
         out["price_confirm_mode"] = confirm_mode
         out["price_confirm_ma_window"] = max(int(price_confirm.get("ma_window", 10) or 10), 1)
+        out["price_confirm_min_remaining_steps"] = max(
+            int(price_confirm.get("min_remaining_steps", 0) or 0),
+            0,
+        )
+        force_exit_threshold = price_confirm.get("force_exit_threshold")
+        if force_exit_threshold is not None:
+            out["price_confirm_force_exit_threshold"] = float(force_exit_threshold)
     return out
 
 

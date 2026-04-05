@@ -149,6 +149,8 @@ TOP_LEVEL_SCHEMA = {
             "price_confirm": {
                 "mode": None,
                 "ma_window": None,
+                "min_remaining_steps": None,
+                "force_exit_threshold": None,
             },
         },
         "dynamic_risk": {
@@ -473,6 +475,21 @@ def validate_training_config(
                 raise ValueError("backtest.intraperiod_exit.price_confirm.mode must be one of: close_below_ma")
             price_confirm_cfg["mode"] = confirm_mode
             price_confirm_cfg["ma_window"] = max(int(price_confirm_cfg.get("ma_window", 10) or 10), 1)
+            price_confirm_cfg["min_remaining_steps"] = max(
+                int(price_confirm_cfg.get("min_remaining_steps", 0) or 0),
+                0,
+            )
+            force_exit_threshold = price_confirm_cfg.get("force_exit_threshold")
+            if force_exit_threshold is not None:
+                force_exit_threshold = float(force_exit_threshold)
+                if exit_mode in {"score_threshold", "expected_return_threshold"} and force_exit_threshold > float(
+                    intraperiod_exit_cfg["threshold"]
+                ):
+                    raise ValueError(
+                        "backtest.intraperiod_exit.price_confirm.force_exit_threshold must be <= "
+                        "backtest.intraperiod_exit.threshold"
+                    )
+                price_confirm_cfg["force_exit_threshold"] = force_exit_threshold
     benchmark_cfg = backtest_cfg.get("benchmark")
     if benchmark_cfg is not None:
         if not isinstance(benchmark_cfg, dict):

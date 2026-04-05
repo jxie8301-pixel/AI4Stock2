@@ -141,11 +141,12 @@ def run_native_backtest(
     intraperiod_remaining_steps = build_intraperiod_remaining_steps(pred_matrix.index, rebalance_freq=rebalance_freq)
     intraperiod_residual_matrix = None
     intraperiod_history: dict[int, dict[str, object]] | None = None
-    if intraperiod_exit_cfg is not None and str(intraperiod_exit_cfg["mode"]) == "expected_return_threshold":
+    if intraperiod_exit_cfg is not None:
         intraperiod_residual_matrix = build_intraperiod_residual_return_matrix(
             label_matrix,
             remaining_steps=intraperiod_remaining_steps,
         )
+    if intraperiod_exit_cfg is not None and str(intraperiod_exit_cfg["mode"]) == "expected_return_threshold":
         intraperiod_history = {}
 
     trace_dates_norm = {pd.Timestamp(date) for date in trace_dates} if trace_dates is not None else None
@@ -190,9 +191,19 @@ def run_native_backtest(
         buy_count = 0
         sell_count = 0
         intraperiod_exit_count = 0
+        intraperiod_exit_remaining_steps = 0
         intraperiod_exit_signal_mean = np.nan
         intraperiod_exit_signal_min = np.nan
         intraperiod_exit_signal_values: dict[str, float] = {}
+        intraperiod_exit_residual_mean = np.nan
+        intraperiod_exit_residual_min = np.nan
+        intraperiod_exit_residual_max = np.nan
+        intraperiod_exit_residual_values: dict[str, float] = {}
+        intraperiod_exit_saved_return = 0.0
+        intraperiod_exit_missed_return = 0.0
+        intraperiod_exit_beneficial_count = 0
+        intraperiod_exit_harmful_count = 0
+        intraperiod_exit_events: list[dict[str, float | int | str | None]] = []
         frozen_holdings = 0
 
         date_return_values = label_values[pos]
@@ -294,6 +305,7 @@ def run_native_backtest(
             target_weights = pd.Series(dtype=float)
             target_values = pd.Series(dtype=float)
             if intraperiod_exit_cfg is not None:
+                intraperiod_exit_remaining_steps = int(intraperiod_remaining_steps.iloc[pos])
                 signal_values = (
                     pd.Series(intraperiod_score_values[pos], index=instruments, dtype=float, copy=False)
                     if intraperiod_score_values is not None
@@ -302,10 +314,11 @@ def run_native_backtest(
                 threshold = float(intraperiod_exit_cfg["threshold"])
                 exit_mode = str(intraperiod_exit_cfg["mode"])
                 if exit_mode == "expected_return_threshold":
-                    remaining_steps = int(intraperiod_remaining_steps.iloc[pos])
                     signal_values = estimate_intraperiod_expected_returns(
                         signal_values,
-                        history_entry=None if intraperiod_history is None else intraperiod_history.get(remaining_steps),
+                        history_entry=None
+                        if intraperiod_history is None
+                        else intraperiod_history.get(intraperiod_exit_remaining_steps),
                         n_bins=int(intraperiod_exit_cfg.get("n_bins", 20)),
                         min_history=int(intraperiod_exit_cfg.get("min_history", 200)),
                     )
@@ -314,6 +327,8 @@ def run_native_backtest(
                     intraperiod_exit_signal_mean = float(held_signal_values.mean())
                     intraperiod_exit_signal_min = float(held_signal_values.min())
                     intraperiod_exit_signal_values = {stock: float(value) for stock, value in held_signal_values.items()}
+                exit_denom = start_value if start_value > 0 else 1.0
+                intraperiod_exit_residual_samples: list[float] = []
                 for stock in list(holdings.keys()):
                     if stock in locked_holdings:
                         continue
@@ -323,6 +338,25 @@ def run_native_backtest(
                     position_value = holdings.pop(stock, 0.0)
                     if position_value <= 0:
                         continue
+                    col_idx = instrument_to_col.get(str(stock))
+                    residual_value = (
+                        np.nan
+                        if intraperiod_residual_values is None or col_idx is None
+                        else intraperiod_residual_values[pos, col_idx]
+                    )
+                    if pd.notna(residual_value):
+                        residual_value = float(residual_value)
+                        intraperiod_exit_residual_samples.append(residual_value)
+                        intraperiod_exit_residual_values[stock] = residual_value
+                        saved_return = max(-residual_value, 0.0) * float(position_value) / exit_denom
+                        missed_return = max(residual_value, 0.0) * float(position_value) / exit_denom
+                        intraperiod_exit_saved_return += saved_return
+                        intraperiod_exit_missed_return += missed_return
+                        intraperiod_exit_beneficial_count += int(residual_value < 0.0)
+                        intraperiod_exit_harmful_count += int(residual_value > 0.0)
+                    else:
+                        saved_return = 0.0
+                        missed_return = 0.0
                     cost_value = trade_cost(position_value, close_rate, min_cost)
                     cash += position_value - cost_value
                     trade_cost_value += cost_value
@@ -331,6 +365,22 @@ def run_native_backtest(
                     intraperiod_exit_count += 1
                     sell_list.append(stock)
                     trade_sell_list.append(stock)
+                    intraperiod_exit_events.append(
+                        {
+                            "stock": str(stock),
+                            "score_value": None if pd.isna(score_value) else float(score_value),
+                            "residual_return_if_held": None if pd.isna(residual_value) else float(residual_value),
+                            "position_value": float(position_value),
+                            "saved_return_contribution": float(saved_return),
+                            "missed_return_contribution": float(missed_return),
+                            "remaining_steps": int(intraperiod_exit_remaining_steps),
+                        }
+                    )
+                if intraperiod_exit_residual_samples:
+                    residual_array = np.asarray(intraperiod_exit_residual_samples, dtype=float)
+                    intraperiod_exit_residual_mean = float(residual_array.mean())
+                    intraperiod_exit_residual_min = float(residual_array.min())
+                    intraperiod_exit_residual_max = float(residual_array.max())
 
         gross_pnl = 0.0
         for stock, position_value in list(holdings.items()):
@@ -361,8 +411,16 @@ def run_native_backtest(
                 "buy_count": buy_count,
                 "sell_count": sell_count,
                 "intraperiod_exit_count": intraperiod_exit_count,
+                "intraperiod_exit_remaining_steps": intraperiod_exit_remaining_steps,
                 "intraperiod_exit_signal_mean": intraperiod_exit_signal_mean,
                 "intraperiod_exit_signal_min": intraperiod_exit_signal_min,
+                "intraperiod_exit_residual_mean": intraperiod_exit_residual_mean,
+                "intraperiod_exit_residual_min": intraperiod_exit_residual_min,
+                "intraperiod_exit_residual_max": intraperiod_exit_residual_max,
+                "intraperiod_exit_saved_return": intraperiod_exit_saved_return,
+                "intraperiod_exit_missed_return": intraperiod_exit_missed_return,
+                "intraperiod_exit_beneficial_count": intraperiod_exit_beneficial_count,
+                "intraperiod_exit_harmful_count": intraperiod_exit_harmful_count,
                 "holdings": len(holdings),
                 "frozen_holdings": frozen_holdings,
                 "account_value": end_value,
@@ -393,9 +451,19 @@ def run_native_backtest(
                     "intraperiod_exit_score_source": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["score_source"],
                     "intraperiod_exit_threshold": None if intraperiod_exit_cfg is None else float(intraperiod_exit_cfg["threshold"]),
                     "intraperiod_exit_count": int(intraperiod_exit_count),
+                    "intraperiod_exit_remaining_steps": int(intraperiod_exit_remaining_steps),
                     "intraperiod_exit_signal_mean": float(intraperiod_exit_signal_mean) if pd.notna(intraperiod_exit_signal_mean) else np.nan,
                     "intraperiod_exit_signal_min": float(intraperiod_exit_signal_min) if pd.notna(intraperiod_exit_signal_min) else np.nan,
+                    "intraperiod_exit_residual_mean": float(intraperiod_exit_residual_mean) if pd.notna(intraperiod_exit_residual_mean) else np.nan,
+                    "intraperiod_exit_residual_min": float(intraperiod_exit_residual_min) if pd.notna(intraperiod_exit_residual_min) else np.nan,
+                    "intraperiod_exit_residual_max": float(intraperiod_exit_residual_max) if pd.notna(intraperiod_exit_residual_max) else np.nan,
+                    "intraperiod_exit_saved_return": float(intraperiod_exit_saved_return),
+                    "intraperiod_exit_missed_return": float(intraperiod_exit_missed_return),
+                    "intraperiod_exit_beneficial_count": int(intraperiod_exit_beneficial_count),
+                    "intraperiod_exit_harmful_count": int(intraperiod_exit_harmful_count),
                     "intraperiod_exit_signal_values": dict(intraperiod_exit_signal_values),
+                    "intraperiod_exit_residual_values": dict(intraperiod_exit_residual_values),
+                    "intraperiod_exit_events": list(intraperiod_exit_events),
                     "score_transform": score_transform,
                     "score_zscore_clip": score_zscore_clip,
                     "keep_top_n": keep_top_n,

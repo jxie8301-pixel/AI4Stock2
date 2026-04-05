@@ -672,10 +672,25 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "net_return"]), 0.0, places=8)
         self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "sell_count"]), 1)
         self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_count"]), 1)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_residual_mean"]), -0.2, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_saved_return"]), 0.2, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_missed_return"]), 0.0, places=8)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_beneficial_count"]), 1)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_harmful_count"]), 0)
         self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "holdings"]), 0)
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "trade_sell_list"], ["A"])
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "holdings_after"], {})
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_mode"], "score_threshold")
+        self.assertAlmostEqual(
+            float(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_residual_values"]["A"]),
+            -0.2,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            float(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_events"][0]["saved_return_contribution"]),
+            0.2,
+            places=8,
+        )
 
     def test_intraperiod_exit_rank_pct_uses_cross_sectional_threshold(self):
         index = pd.MultiIndex.from_product(
@@ -786,6 +801,50 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-08"), "trade_sell_list"], ["A"])
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-08"), "intraperiod_exit_mode"], "expected_return_threshold")
         self.assertLess(float(trace.loc[pd.Timestamp("2024-01-08"), "intraperiod_exit_signal_values"]["A"]), 0.0)
+        self.assertLess(float(trace.loc[pd.Timestamp("2024-01-08"), "intraperiod_exit_residual_values"]["A"]), 0.0)
+
+    def test_intraperiod_exit_tracks_missed_gain_when_threshold_sells_winner(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0, -0.1, 0.2, 0.5, 0.1], index=index)
+        labels = pd.Series([0.0, 0.0, 0.1, 0.0, 0.0, 0.0], index=index)
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=2,
+            intraperiod_exit={
+                "mode": "score_threshold",
+                "score_source": "raw",
+                "threshold": 0.0,
+            },
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-03")},
+        )
+
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_residual_mean"]), 0.1, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_saved_return"]), 0.0, places=8)
+        self.assertAlmostEqual(float(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_missed_return"]), 0.1, places=8)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_beneficial_count"]), 0)
+        self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_harmful_count"]), 1)
+        self.assertAlmostEqual(
+            float(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_events"][0]["missed_return_contribution"]),
+            0.1,
+            places=8,
+        )
 
     def test_reference_backtest_matches_native_report(self):
         index = pd.MultiIndex.from_product(

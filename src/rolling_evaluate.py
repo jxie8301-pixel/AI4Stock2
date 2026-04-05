@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from src.experiment_store import finalize_run_store, resolve_rebalance_freq, resolve_retrain_step
+from src.backtest_trace import save_trace_artifacts, select_trace_dates
 from src.label_utils import get_label_column_name, resolve_signal_horizon
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
@@ -129,6 +130,23 @@ def evaluate_prediction_bundle(
         preds=bundle.final_predictions,
         **backtest_kwargs,
     )
+    trace_top_n = max(int(cfg.get("artifacts", {}).get("backtest_trace_top_n", 8) or 8), 0)
+    trace_dates: set[pd.Timestamp] = set(
+        select_trace_dates(backtest_report.rename(columns={"net_return": "return"}), top_n=trace_top_n)
+    )
+    if "intraperiod_exit_count" in backtest_report.columns:
+        exit_rows = backtest_report.loc[backtest_report["intraperiod_exit_count"].fillna(0).astype(int) > 0]
+        if not exit_rows.empty:
+            exit_focus_n = min(max(trace_top_n, 8), len(exit_rows))
+            trace_dates.update(pd.to_datetime(exit_rows["intraperiod_exit_count"].nlargest(exit_focus_n).index).tolist())
+            if "intraperiod_exit_saved_return" in exit_rows.columns:
+                trace_dates.update(
+                    pd.to_datetime(exit_rows["intraperiod_exit_saved_return"].abs().nlargest(exit_focus_n).index).tolist()
+                )
+            if "intraperiod_exit_missed_return" in exit_rows.columns:
+                trace_dates.update(
+                    pd.to_datetime(exit_rows["intraperiod_exit_missed_return"].abs().nlargest(exit_focus_n).index).tolist()
+                )
     avg_factor_baseline_report = None
     if avg_factor_baseline_predictions is not None and not avg_factor_baseline_predictions.empty:
         avg_factor_baseline_report = run_native_backtest(
@@ -169,8 +187,27 @@ def evaluate_prediction_bundle(
     plot_monthly_heatmap(metric_report, save_path=str(paths.results_dir / "native_monthly_heatmap.png"))
     save_monthly_report(metric_report, save_path=str(paths.results_dir / "native_monthly_report.csv"))
     metric_report.to_csv(paths.results_dir / "native_daily_report.csv", index=True)
+    if "intraperiod_exit_count" in metric_report.columns:
+        exit_daily_report = metric_report.loc[metric_report["intraperiod_exit_count"].fillna(0).astype(int) > 0].copy()
+        if not exit_daily_report.empty:
+            exit_daily_report.index.name = "datetime"
+            exit_daily_report.to_csv(paths.results_dir / "native_exit_daily_report.csv", index=True)
     save_period_summary(monthly_summary, paths.results_dir / "native_monthly_summary.csv")
     save_period_summary(rebalance_summary, paths.results_dir / "native_rebalance_summary.csv")
+    if trace_dates:
+        _, trace_df = run_native_backtest(
+            preds=bundle.final_predictions,
+            **backtest_kwargs,
+            return_trace=True,
+            trace_dates=set(trace_dates),
+        )
+        trace_path, trace_dates_path = save_trace_artifacts(
+            trace_df,
+            sorted(trace_dates),
+            paths.results_dir,
+            prefix="native",
+        )
+        print(f"Trace artifacts saved: {trace_path} ; {trace_dates_path}")
     print(f"Artifacts saved under: {paths.results_dir}")
 
     aggregated_importance_path: Path | None = None

@@ -12,6 +12,21 @@ from src.evaluate import safe_cross_sectional_corr
 
 
 def _daily_ic_metric_from_labels(preds: np.ndarray, labels: np.ndarray, dates: np.ndarray):
+    return _daily_corr_metric_from_labels(preds, labels, dates, method="pearson", metric_name="daily_ic")
+
+
+def _daily_rank_ic_metric_from_labels(preds: np.ndarray, labels: np.ndarray, dates: np.ndarray):
+    return _daily_corr_metric_from_labels(preds, labels, dates, method="spearman", metric_name="daily_rank_ic")
+
+
+def _daily_corr_metric_from_labels(
+    preds: np.ndarray,
+    labels: np.ndarray,
+    dates: np.ndarray,
+    *,
+    method: str,
+    metric_name: str,
+):
     frame = pd.DataFrame(
         {
             "pred": np.asarray(preds, dtype=np.float32),
@@ -20,15 +35,15 @@ def _daily_ic_metric_from_labels(preds: np.ndarray, labels: np.ndarray, dates: n
         }
     ).dropna()
     if frame.empty:
-        return "daily_ic", 0.0, True
+        return metric_name, 0.0, True
 
     daily_ic = frame.groupby("date", sort=True).apply(
-        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="pearson"),
+        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method=method),
         include_groups=False,
     ).dropna()
     if daily_ic.empty:
-        return "daily_ic", 0.0, True
-    return "daily_ic", float(daily_ic.mean()), True
+        return metric_name, 0.0, True
+    return metric_name, float(daily_ic.mean()), True
 
 
 def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray):
@@ -138,6 +153,7 @@ class NativeLGBM:
         seed: int = 42,
         train_weight_half_life: float | None = None,
         ranking_num_bins: int = 5,
+        early_stopping_metric: str = "default",
         **kwargs
     ):
         # Map generic loss names to lightgbm specific objectives
@@ -161,12 +177,13 @@ class NativeLGBM:
         self.eval_metric = eval_metric or default_metric
         self.is_ranking_objective = objective in {"lambdarank", "rank_xendcg"}
         self.ranking_num_bins = max(2, int(ranking_num_bins))
+        self.early_stopping_metric = str(early_stopping_metric or "default").strip().lower()
+        if self.early_stopping_metric not in {"default", "daily_ic", "daily_rank_ic"}:
+            raise ValueError("early_stopping_metric must be one of: default, daily_ic, daily_rank_ic")
+        metric_name = self.eval_metric if self.early_stopping_metric == "default" else "None"
         self.params = {
             "objective": objective,
-            # Use a stable regression metric for early stopping. Daily IC remains
-            # as an auxiliary validation metric, but it is too noisy for 10-day
-            # windows and can be undefined when predictions collapse.
-            "metric": self.eval_metric,
+            "metric": metric_name,
             "colsample_bytree": colsample_bytree,
             "learning_rate": learning_rate,
             "subsample": subsample,
@@ -272,7 +289,25 @@ class NativeLGBM:
             if valid_dates is not None:
                 raw_valid_labels = y_valid_use.to_numpy(dtype=np.float32, copy=False) if self.is_ranking_objective else y_valid.to_numpy(dtype=np.float32, copy=False)
                 raw_valid_dates = valid_dates_use if self.is_ranking_objective else valid_dates
-                feval = lambda preds, data: _daily_ic_metric_from_labels(preds, raw_valid_labels, raw_valid_dates)
+                def _feval(preds, data, *, labels=raw_valid_labels, dates=raw_valid_dates, primary=self.early_stopping_metric):
+                    if primary == "daily_ic":
+                        return [
+                            _daily_ic_metric_from_labels(preds, labels, dates),
+                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
+                        ]
+                    if primary == "daily_rank_ic":
+                        return [
+                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
+                            _daily_ic_metric_from_labels(preds, labels, dates),
+                        ]
+                    return [
+                        _daily_ic_metric_from_labels(preds, labels, dates),
+                        _daily_rank_ic_metric_from_labels(preds, labels, dates),
+                    ]
+
+                feval = _feval
+            elif self.early_stopping_metric != "default" and self.early_stop > 0:
+                raise ValueError("valid_dates is required when early_stopping_metric is daily_ic or daily_rank_ic")
             
         evals_result: dict[str, dict[str, list[float]]] = {}
         callbacks = []

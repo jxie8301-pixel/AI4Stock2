@@ -53,6 +53,21 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(profile["config"]["lgbm"]["loss"], "rank_xendcg")
         self.assertEqual(profile["config"]["lgbm"]["ranking_num_bins"], 5)
 
+    def test_resolve_rankic_model_profile(self):
+        profile = resolve_model_profile({"model": {"profile": "lgbm_ranker_rankic"}})
+
+        self.assertEqual(profile["name"], "lgbm_ranker_rankic")
+        self.assertTrue(profile["path"].endswith("configs/models/lgbm_ranker_rankic.yaml"))
+        self.assertEqual(profile["config"]["lgbm"]["loss"], "rank_xendcg")
+        self.assertEqual(profile["config"]["lgbm"]["early_stopping_metric"], "daily_rank_ic")
+
+    def test_load_config_supports_rankic_experiment_profiles(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_ranker_rankic_10x20x10")
+
+        self.assertEqual(cfg["model"]["profile"], "lgbm_ranker_rankic")
+        self.assertEqual(cfg["lgbm"]["loss"], "rank_xendcg")
+        self.assertEqual(cfg["lgbm"]["early_stopping_metric"], "daily_rank_ic")
+
     def test_load_config_requires_explicit_experiment_profile(self):
         with self.assertRaises(ValueError):
             load_config("configs/config.yaml")

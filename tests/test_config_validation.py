@@ -87,6 +87,23 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lgbm.train_weight_half_life must be > 0"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_accepts_lgbm_early_stopping_metric(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["early_stopping_metric"] = "daily_rank_ic"
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["lgbm"]["early_stopping_metric"], "daily_rank_ic")
+
+    def test_validate_training_config_rejects_invalid_lgbm_early_stopping_metric(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["early_stopping_metric"] = "demo"
+
+        with self.assertRaisesRegex(ValueError, "lgbm.early_stopping_metric must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_unknown_keys(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["unknown_knob"] = 1

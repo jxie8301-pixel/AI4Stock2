@@ -24,6 +24,7 @@ from src.models.pure_lightgbm import (
     _compute_time_decay_weights,
     _compute_ranking_groups,
     _daily_ic_metric,
+    _daily_rank_ic_metric_from_labels,
 )
 from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
 
@@ -70,6 +71,30 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(rank_model.params["metric"], "ndcg")
         self.assertEqual(rank_model.params["objective"], "rank_xendcg")
         self.assertEqual(custom_model.params["metric"], "rmse")
+
+    def test_daily_rank_ic_metric_uses_cross_sectional_spearman_mean(self):
+        predictions = np.array([1.0, 2.0, 1.0, 2.0], dtype=np.float32)
+        labels = np.array([1.0, 2.0, 2.0, 1.0], dtype=np.float32)
+        dates = np.array(
+            ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"],
+            dtype="datetime64[ns]",
+        )
+
+        metric_name, metric_value, higher_is_better = _daily_rank_ic_metric_from_labels(predictions, labels, dates)
+
+        self.assertEqual(metric_name, "daily_rank_ic")
+        self.assertTrue(higher_is_better)
+        self.assertAlmostEqual(metric_value, 0.0, places=8)
+
+    def test_native_lgbm_custom_early_stopping_metric_disables_builtin_metric(self):
+        model = NativeLGBM(loss="huber", early_stopping_metric="daily_rank_ic")
+
+        self.assertEqual(model.params["metric"], "None")
+        self.assertEqual(model.early_stopping_metric, "daily_rank_ic")
+
+    def test_native_lgbm_rejects_unknown_early_stopping_metric(self):
+        with self.assertRaisesRegex(ValueError, "early_stopping_metric must be one of"):
+            NativeLGBM(loss="huber", early_stopping_metric="demo")
 
     def test_native_lgbm_can_export_feature_importance_csv(self):
         model = NativeLGBM(loss="mse", early_stop=0, num_threads=1)
@@ -137,6 +162,62 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertIsNotNone(model.model)
         preds = model.predict(X_train)
         self.assertEqual(preds.shape[0], len(X_train))
+
+    def test_native_lgbm_custom_early_stopping_records_rank_metrics(self):
+        model = NativeLGBM(
+            loss="rank_xendcg",
+            early_stop=3,
+            num_boost_round=20,
+            num_threads=1,
+            ranking_num_bins=3,
+            early_stopping_metric="daily_rank_ic",
+            log_evaluation_period=1000,
+        )
+        X_train = pd.DataFrame(
+            {
+                "f1": [0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+                "f2": [2.0, 1.0, 0.0, 1.5, 0.5, -0.5],
+            }
+        )
+        y_train = pd.Series([0.0, 0.1, 0.3, -0.1, 0.2, 0.4])
+        train_dates = pd.to_datetime(
+            ["2024-01-01", "2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02", "2024-01-02"]
+        )
+        X_valid = pd.DataFrame(
+            {
+                "f1": [0.0, 1.0, 2.0, 0.0, 1.0, 2.0],
+                "f2": [1.8, 0.8, -0.2, 1.3, 0.3, -0.7],
+            }
+        )
+        y_valid = pd.Series([0.0, 0.05, 0.2, -0.2, 0.1, 0.3])
+        valid_dates = pd.to_datetime(
+            ["2024-01-03", "2024-01-03", "2024-01-03", "2024-01-04", "2024-01-04", "2024-01-04"]
+        )
+
+        model.fit(
+            X_train,
+            y_train,
+            X_valid=X_valid,
+            y_valid=y_valid,
+            train_dates=train_dates,
+            valid_dates=valid_dates,
+        )
+
+        history = model.get_training_history_frame()
+        self.assertIn("valid_daily_rank_ic", history.columns)
+        self.assertIn("valid_daily_ic", history.columns)
+        self.assertIsNotNone(model.best_iteration_)
+
+    def test_native_lgbm_custom_early_stopping_requires_valid_dates(self):
+        model = NativeLGBM(loss="huber", early_stop=5, num_threads=1, early_stopping_metric="daily_rank_ic")
+        X_train = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [1.0, 1.0, 0.0, 0.0]})
+        y_train = pd.Series([0.0, 0.1, 0.2, 0.3])
+        X_valid = pd.DataFrame({"f1": [0.5, 1.5], "f2": [1.0, 0.0]})
+        y_valid = pd.Series([0.05, 0.15])
+        train_dates = pd.to_datetime(["2024-01-01", "2024-01-05", "2024-01-10", "2024-01-20"])
+
+        with self.assertRaisesRegex(ValueError, "valid_dates is required"):
+            model.fit(X_train, y_train, X_valid=X_valid, y_valid=y_valid, train_dates=train_dates)
 
     def test_get_lgbm_config_uses_dedicated_block(self):
         cfg = {

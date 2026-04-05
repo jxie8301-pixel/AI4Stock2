@@ -4,6 +4,9 @@ profiles:
   lgbm_default:
     path: configs/models/lgbm_default.yaml
 
+  lgbm_default_rankic:
+    path: configs/models/lgbm_default_rankic.yaml
+
   lgbm_fast:
     path: configs/models/lgbm_fast.yaml
 
@@ -12,6 +15,9 @@ profiles:
 
   lgbm_ranker_default:
     path: configs/models/lgbm_ranker_default.yaml
+
+  lgbm_ranker_rankic:
+    path: configs/models/lgbm_ranker_rankic.yaml
 
   lstm_baseline:
     path: configs/models/lstm_baseline.yaml

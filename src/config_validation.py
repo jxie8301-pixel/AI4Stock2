@@ -67,6 +67,7 @@ TOP_LEVEL_SCHEMA = {
         "learning_rate": None,
         "num_boost_round": None,
         "early_stop": None,
+        "early_stopping_metric": None,
         "early_stopping_min_delta": None,
         "train_weight_half_life": None,
         "ranking_num_bins": None,
@@ -496,6 +497,10 @@ def validate_training_config(
         lgbm_cfg = cfg.get("lgbm")
         if not isinstance(lgbm_cfg, dict):
             raise ValueError("lgbm config block is required when model.name == 'lgbm'")
+        early_stopping_metric = str(lgbm_cfg.get("early_stopping_metric", "default") or "default").strip().lower()
+        if early_stopping_metric not in {"default", "daily_ic", "daily_rank_ic"}:
+            raise ValueError("lgbm.early_stopping_metric must be one of: default, daily_ic, daily_rank_ic")
+        lgbm_cfg["early_stopping_metric"] = early_stopping_metric
         _expect_positive_int(lgbm_cfg.get("num_boost_round"), "lgbm.num_boost_round")
         _expect_nonnegative_int(lgbm_cfg.get("early_stop"), "lgbm.early_stop")
         _expect_nonnegative_float(lgbm_cfg.get("early_stopping_min_delta", 0.0), "lgbm.early_stopping_min_delta")

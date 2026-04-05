@@ -106,7 +106,19 @@ class ExperimentStoreTest(unittest.TestCase):
                     "excess_annualized_return": {"risk": 0.17},
                     "excess_information_ratio": {"risk": 0.9},
                     "monthly_win_rate": {"risk": 0.6},
+                    "top_3_positive_month_share": {"risk": 0.4},
+                    "top_5_positive_month_share": {"risk": 0.75},
                     "rebalance_win_rate": {"risk": 0.55},
+                    "top_3_positive_rebalance_share": {"risk": 0.5},
+                    "top_5_positive_rebalance_share": {"risk": 0.8},
+                    "payoff_ratio": {"risk": 1.3},
+                    "profit_factor": {"risk": 1.6},
+                    "avg_factor_baseline_excess_annualized_return": {"risk": 0.03},
+                    "avg_factor_baseline_excess_information_ratio": {"risk": 0.4},
+                    "months_beating_avg_factor_baseline_pct": {"risk": 0.625},
+                    "months_beating_avg_factor_baseline_summary": "30 / 48 = 62.50%",
+                    "rebalances_beating_avg_factor_baseline_pct": {"risk": 0.58},
+                    "rebalances_beating_avg_factor_baseline_summary": "56 / 97 = 57.73%",
                     "annualized_return": {"risk": 0.25},
                     "information_ratio": {"risk": 1.1},
                     "max_drawdown": {"risk": -0.15},
@@ -134,7 +146,19 @@ class ExperimentStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["benchmark_annualized_return"], "0.08")
             self.assertEqual(rows[0]["excess_annualized_return"], "0.17")
             self.assertEqual(rows[0]["monthly_win_rate"], "0.6")
+            self.assertEqual(rows[0]["top_3_positive_month_share"], "0.4")
+            self.assertEqual(rows[0]["top_5_positive_month_share"], "0.75")
             self.assertEqual(rows[0]["rebalance_win_rate"], "0.55")
+            self.assertEqual(rows[0]["top_3_positive_rebalance_share"], "0.5")
+            self.assertEqual(rows[0]["top_5_positive_rebalance_share"], "0.8")
+            self.assertEqual(rows[0]["payoff_ratio"], "1.3")
+            self.assertEqual(rows[0]["profit_factor"], "1.6")
+            self.assertEqual(rows[0]["avg_factor_baseline_excess_annualized_return"], "0.03")
+            self.assertEqual(rows[0]["avg_factor_baseline_excess_information_ratio"], "0.4")
+            self.assertEqual(rows[0]["months_beating_avg_factor_baseline_pct"], "0.625")
+            self.assertEqual(rows[0]["months_beating_avg_factor_baseline_summary"], "30 / 48 = 62.50%")
+            self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_pct"], "0.58")
+            self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_summary"], "56 / 97 = 57.73%")
             self.assertEqual(rows[0]["portfolio_annualized_return"], "0.25")
             self.assertEqual(rows[0]["weighting"], "rank")
             self.assertEqual(rows[0]["score_transform"], "zscore_clip")

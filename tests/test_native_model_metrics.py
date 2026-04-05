@@ -15,6 +15,7 @@ from src.evaluate import (
     build_rebalance_period_summary,
     build_period_summary,
     compute_portfolio_metrics,
+    save_monthly_report,
 )
 from src.label_utils import sanitize_label_array, sanitize_label_series
 from src.model_config import get_lgbm_config
@@ -404,6 +405,34 @@ class NativeModelMetricsTest(unittest.TestCase):
 
         self.assertAlmostEqual(portfolio_metrics["rebalance_win_rate"]["risk"], 0.5, places=8)
 
+    def test_compute_portfolio_metrics_tracks_baseline_outperformance_and_concentration(self):
+        report = pd.DataFrame(
+            {
+                "return": [0.10, -0.05, 0.20, 0.05],
+                "bench": [0.02, -0.01, 0.03, 0.00],
+                "avg_factor_baseline_return": [0.08, -0.02, 0.25, 0.01],
+            },
+            index=pd.to_datetime(["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30"]),
+        )
+        report.attrs["avg_factor_baseline_name"] = "Avg Unique Factor Baseline"
+        report.attrs["rebalance_freq"] = 2
+
+        portfolio_metrics, _ = compute_portfolio_metrics((report, None))
+
+        self.assertEqual(portfolio_metrics["avg_factor_baseline_name"], "Avg Unique Factor Baseline")
+        self.assertEqual(portfolio_metrics["months_beating_avg_factor_baseline_summary"], "2 / 4 = 50.00%")
+        self.assertEqual(portfolio_metrics["rebalances_beating_avg_factor_baseline_summary"], "0 / 2 = 0.00%")
+        self.assertAlmostEqual(
+            portfolio_metrics["top_1_positive_month_share"]["risk"],
+            0.20 / (0.20 + 0.10 + 0.05),
+            places=8,
+        )
+        self.assertAlmostEqual(
+            portfolio_metrics["top_3_positive_month_share"]["risk"],
+            1.0,
+            places=8,
+        )
+
     def test_build_rebalance_period_summary_groups_by_fixed_trading_windows(self):
         report = pd.DataFrame(
             {
@@ -420,6 +449,26 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(summary.iloc[0]["return"], (1.10 * 0.95) - 1.0, places=8)
         self.assertEqual(summary.iloc[0]["days"], 2)
         self.assertEqual(summary.iloc[1]["days"], 1)
+
+    def test_build_rebalance_period_summary_includes_factor_baseline_excess(self):
+        report = pd.DataFrame(
+            {
+                "return": [0.10, -0.05, 0.02],
+                "avg_factor_baseline_return": [0.08, -0.02, 0.01],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+        )
+
+        summary = build_rebalance_period_summary(report, rebalance_freq=2)
+
+        self.assertIn("avg_factor_baseline_return", summary.columns)
+        self.assertIn("excess_vs_avg_factor_baseline", summary.columns)
+        self.assertAlmostEqual(summary.iloc[0]["avg_factor_baseline_return"], (1.08 * 0.98) - 1.0, places=8)
+        self.assertAlmostEqual(
+            summary.iloc[0]["excess_vs_avg_factor_baseline"],
+            ((1.10 * 0.95) - 1.0) - ((1.08 * 0.98) - 1.0),
+            places=8,
+        )
 
     def test_build_period_summary_includes_win_rate_and_turnover(self):
         report = pd.DataFrame(
@@ -438,6 +487,26 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertAlmostEqual(summary.iloc[0]["win_rate"], 0.5, places=8)
         self.assertAlmostEqual(summary.iloc[0]["avg_turnover"], 0.02, places=8)
         self.assertEqual(int(summary.iloc[0]["days"]), 2)
+
+    def test_save_monthly_report_includes_reference_series_columns(self):
+        report = pd.DataFrame(
+            {
+                "return": [0.10, -0.05, 0.02],
+                "bench": [0.01, -0.01, 0.00],
+                "avg_factor_baseline_return": [0.08, -0.02, 0.01],
+                "sign_aligned_factor_baseline_return": [0.09, -0.03, 0.03],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-02-01"]),
+        )
+
+        monthly = save_monthly_report(report)
+
+        self.assertIn("benchmark_monthly_return", monthly.columns)
+        self.assertIn("monthly_excess_vs_benchmark", monthly.columns)
+        self.assertIn("avg_factor_baseline_monthly_return", monthly.columns)
+        self.assertIn("monthly_excess_vs_avg_factor_baseline", monthly.columns)
+        self.assertIn("sign_aligned_factor_baseline_monthly_return", monthly.columns)
+        self.assertIn("monthly_excess_vs_sign_aligned_factor_baseline", monthly.columns)
 
     def test_train_epoch_returns_zero_for_empty_loader(self):
         trainer = NativeLSTMTrainer(d_feat=3, hidden_size=4, num_layers=1, device="cpu")

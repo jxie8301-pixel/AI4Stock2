@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.colors import LinearSegmentedColormap
 
 DEFAULT_BENCHMARK_MODE = "cross_section_mean"
 SUPPORTED_BENCHMARK_MODES = ("cross_section_mean", "file")
@@ -82,6 +83,101 @@ def _format_count_ratio(count: int, total: int) -> str:
     count_value = max(int(count), 0)
     pct = (count_value / total_value) if total_value > 0 else 0.0
     return f"{count_value} / {total_value} = {pct:.2%}"
+
+
+def _resample_compound_returns(returns: pd.Series, freq: str) -> pd.Series:
+    clean_returns = returns.astype(float)
+    return clean_returns.resample(freq).apply(lambda x: (1.0 + x).prod() - 1.0)
+
+
+def _compute_positive_period_concentration(returns: pd.Series) -> dict[str, float | None]:
+    clean_returns = returns.astype(float).dropna()
+    positive_returns = clean_returns[clean_returns > 0].sort_values(ascending=False)
+    total_positive = float(positive_returns.sum()) if not positive_returns.empty else 0.0
+    if total_positive <= 0:
+        return {
+            "top_1_positive_share": None,
+            "top_3_positive_share": None,
+            "top_5_positive_share": None,
+        }
+    return {
+        "top_1_positive_share": float(positive_returns.head(1).sum() / total_positive),
+        "top_3_positive_share": float(positive_returns.head(3).sum() / total_positive),
+        "top_5_positive_share": float(positive_returns.head(5).sum() / total_positive),
+    }
+
+
+def _attach_reference_metrics(
+    result: dict,
+    report: pd.DataFrame,
+    *,
+    reference_column: str,
+    prefix: str,
+    display_name: str,
+    strategy_returns: pd.Series,
+    ann_factor: int,
+    monthly_ret: pd.Series,
+    rebalance_freq: int,
+) -> None:
+    if reference_column not in report.columns:
+        return
+    reference_returns = report[reference_column].astype(float).dropna()
+    if reference_returns.empty:
+        return
+
+    reference_mean = float(reference_returns.mean())
+    reference_std = float(reference_returns.std()) if len(reference_returns) > 1 else 0.0
+    if pd.isna(reference_std):
+        reference_std = 0.0
+    aligned_strategy, aligned_reference = strategy_returns.align(reference_returns, join="inner")
+    excess_returns = aligned_strategy - aligned_reference
+    excess_mean = float(excess_returns.mean()) if not excess_returns.empty else 0.0
+    excess_std = float(excess_returns.std()) if len(excess_returns) > 1 else 0.0
+    if pd.isna(excess_std):
+        excess_std = 0.0
+
+    result[f"{prefix}_name"] = display_name
+    result[f"{prefix}_annualized_return"] = {"risk": reference_mean * ann_factor}
+    result[f"{prefix}_annualized_volatility"] = {"risk": reference_std * np.sqrt(ann_factor)}
+    result[f"{prefix}_information_ratio"] = {
+        "risk": (reference_mean / reference_std) * np.sqrt(ann_factor) if reference_std > 0 else 0.0
+    }
+    result[f"{prefix}_max_drawdown"] = {"risk": _compute_max_drawdown(reference_returns)}
+    result[f"{prefix}_excess_annualized_return"] = {"risk": excess_mean * ann_factor}
+    result[f"{prefix}_excess_information_ratio"] = {
+        "risk": (excess_mean / excess_std) * np.sqrt(ann_factor) if excess_std > 0 else 0.0
+    }
+
+    monthly_reference = _resample_compound_returns(reference_returns, "ME")
+    aligned_monthly_strategy, aligned_monthly_reference = monthly_ret.align(monthly_reference, join="inner")
+    monthly_beats = int((aligned_monthly_strategy > aligned_monthly_reference).sum()) if not aligned_monthly_strategy.empty else 0
+    monthly_total = int(len(aligned_monthly_strategy))
+    result[f"months_beating_{prefix}_count"] = monthly_beats
+    result[f"months_beating_{prefix}_total_count"] = monthly_total
+    result[f"months_beating_{prefix}_pct"] = {
+        "risk": float((monthly_beats / monthly_total) if monthly_total > 0 else 0.0)
+    }
+    result[f"months_beating_{prefix}_summary"] = _format_count_ratio(monthly_beats, monthly_total)
+
+    if rebalance_freq > 0:
+        reference_rebalance = _compute_chunked_period_returns(reference_returns, rebalance_freq)
+        strategy_rebalance = _compute_chunked_period_returns(strategy_returns, rebalance_freq)
+        aligned_rebalance_strategy, aligned_rebalance_reference = strategy_rebalance.align(
+            reference_rebalance,
+            join="inner",
+        )
+        rebalance_beats = (
+            int((aligned_rebalance_strategy > aligned_rebalance_reference).sum())
+            if not aligned_rebalance_strategy.empty
+            else 0
+        )
+        rebalance_total = int(len(aligned_rebalance_strategy))
+        result[f"rebalances_beating_{prefix}_count"] = rebalance_beats
+        result[f"rebalances_beating_{prefix}_total_count"] = rebalance_total
+        result[f"rebalances_beating_{prefix}_pct"] = {
+            "risk": float((rebalance_beats / rebalance_total) if rebalance_total > 0 else 0.0)
+        }
+        result[f"rebalances_beating_{prefix}_summary"] = _format_count_ratio(rebalance_beats, rebalance_total)
 
 
 def build_cross_section_benchmark(labels: pd.Series) -> pd.Series:
@@ -346,7 +442,7 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     
     # Add monthly returns calculation
     report.index = pd.to_datetime(report.index)
-    monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
+    monthly_ret = _resample_compound_returns(report["return"], "ME")
     result["monthly_return"] = monthly_ret.to_dict()
     monthly_positive_count = int((monthly_ret > 0).sum()) if not monthly_ret.empty else 0
     monthly_total_count = int(len(monthly_ret))
@@ -358,6 +454,10 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     }
     result["profitable_month_summary"] = _format_count_ratio(monthly_positive_count, monthly_total_count)
     rebalance_freq = int(report.attrs.get("rebalance_freq", 0) or 0)
+    monthly_concentration = _compute_positive_period_concentration(monthly_ret)
+    result["top_1_positive_month_share"] = {"risk": monthly_concentration["top_1_positive_share"]}
+    result["top_3_positive_month_share"] = {"risk": monthly_concentration["top_3_positive_share"]}
+    result["top_5_positive_month_share"] = {"risk": monthly_concentration["top_5_positive_share"]}
     if rebalance_freq > 0:
         rebalance_ret = _compute_chunked_period_returns(report["return"], rebalance_freq)
         result["rebalance_return"] = rebalance_ret.to_dict()
@@ -375,6 +475,36 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
             rebalance_positive_count,
             rebalance_total_count,
         )
+        rebalance_concentration = _compute_positive_period_concentration(rebalance_ret)
+        result["top_1_positive_rebalance_share"] = {"risk": rebalance_concentration["top_1_positive_share"]}
+        result["top_3_positive_rebalance_share"] = {"risk": rebalance_concentration["top_3_positive_share"]}
+        result["top_5_positive_rebalance_share"] = {"risk": rebalance_concentration["top_5_positive_share"]}
+    _attach_reference_metrics(
+        result,
+        report,
+        reference_column="avg_factor_baseline_return",
+        prefix="avg_factor_baseline",
+        display_name=str(report.attrs.get("avg_factor_baseline_name") or "Avg Unique Factor Baseline").strip()
+        or "Avg Unique Factor Baseline",
+        strategy_returns=returns,
+        ann_factor=ann_factor,
+        monthly_ret=monthly_ret,
+        rebalance_freq=rebalance_freq,
+    )
+    _attach_reference_metrics(
+        result,
+        report,
+        reference_column="sign_aligned_factor_baseline_return",
+        prefix="sign_aligned_factor_baseline",
+        display_name=str(
+            report.attrs.get("sign_aligned_factor_baseline_name") or "Sign-Aligned Factor Baseline"
+        ).strip()
+        or "Sign-Aligned Factor Baseline",
+        strategy_returns=returns,
+        ann_factor=ann_factor,
+        monthly_ret=monthly_ret,
+        rebalance_freq=rebalance_freq,
+    )
     if "turnover" in report.columns:
         result["turnover_mean"] = {"risk": float(report["turnover"].astype(float).mean())}
     
@@ -384,20 +514,25 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
 def plot_monthly_heatmap(report: pd.DataFrame, save_path: str = None):
     """Plot a heatmap of monthly returns (Year vs Month)."""
     import seaborn as sns
-    
-    monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
+
+    monthly_ret = _resample_compound_returns(report["return"], "ME")
     df_monthly = monthly_ret.to_frame(name="ret")
     df_monthly["year"] = df_monthly.index.year
     df_monthly["month"] = df_monthly.index.month
-    
+
     pivot_table = df_monthly.pivot(index="year", columns="month", values="ret")
-    
+    green_white_red = LinearSegmentedColormap.from_list(
+        "green_white_red",
+        ["#1a9850", "#ffffff", "#d73027"],
+        N=256,
+    )
+
     fig, ax = plt.subplots(figsize=(12, min(len(pivot_table) * 0.8 + 2, 8)))
     sns.heatmap(
         pivot_table,
         annot=True,
         fmt=".2%",
-        cmap="RdYlGn_r",
+        cmap=green_white_red,
         center=0,
         vmin=-0.5,
         vmax=0.5,
@@ -506,10 +641,28 @@ def plot_drawdown(report: pd.DataFrame, save_path: str = None):
 
 def save_monthly_report(report: pd.DataFrame, save_path: str = None):
     """Save monthly returns to a CSV file."""
-    monthly_ret = report["return"].resample("ME").apply(lambda x: (1 + x).prod() - 1)
+    monthly_ret = _resample_compound_returns(report["return"], "ME")
     df_monthly = monthly_ret.to_frame(name="monthly_return")
+    if "bench" in report.columns:
+        benchmark_monthly = _resample_compound_returns(report["bench"], "ME")
+        df_monthly["benchmark_monthly_return"] = benchmark_monthly.reindex(df_monthly.index)
+        df_monthly["monthly_excess_vs_benchmark"] = (
+            df_monthly["monthly_return"] - df_monthly["benchmark_monthly_return"]
+        )
+    if "avg_factor_baseline_return" in report.columns:
+        avg_factor_monthly = _resample_compound_returns(report["avg_factor_baseline_return"], "ME")
+        df_monthly["avg_factor_baseline_monthly_return"] = avg_factor_monthly.reindex(df_monthly.index)
+        df_monthly["monthly_excess_vs_avg_factor_baseline"] = (
+            df_monthly["monthly_return"] - df_monthly["avg_factor_baseline_monthly_return"]
+        )
+    if "sign_aligned_factor_baseline_return" in report.columns:
+        sign_aligned_monthly = _resample_compound_returns(report["sign_aligned_factor_baseline_return"], "ME")
+        df_monthly["sign_aligned_factor_baseline_monthly_return"] = sign_aligned_monthly.reindex(df_monthly.index)
+        df_monthly["monthly_excess_vs_sign_aligned_factor_baseline"] = (
+            df_monthly["monthly_return"] - df_monthly["sign_aligned_factor_baseline_monthly_return"]
+        )
     df_monthly.index.name = "date"
-    
+
     if save_path:
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         df_monthly.to_csv(save_path)
@@ -550,14 +703,36 @@ def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame
             if "bench" in period_frame.columns
             else pd.Series(dtype=float)
         )
+        avg_factor_baseline_returns = (
+            period_frame["avg_factor_baseline_return"].astype(float).dropna()
+            if "avg_factor_baseline_return" in period_frame.columns
+            else pd.Series(dtype=float)
+        )
+        sign_aligned_factor_baseline_returns = (
+            period_frame["sign_aligned_factor_baseline_return"].astype(float).dropna()
+            if "sign_aligned_factor_baseline_return" in period_frame.columns
+            else pd.Series(dtype=float)
+        )
         distribution_metrics = _compute_return_distribution_metrics(returns)
+        period_return = float((1.0 + returns).prod() - 1.0)
+        bench_return = float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan
+        avg_factor_baseline_return = (
+            float((1.0 + avg_factor_baseline_returns).prod() - 1.0)
+            if not avg_factor_baseline_returns.empty
+            else np.nan
+        )
+        sign_aligned_factor_baseline_return = (
+            float((1.0 + sign_aligned_factor_baseline_returns).prod() - 1.0)
+            if not sign_aligned_factor_baseline_returns.empty
+            else np.nan
+        )
         period_rows.append(
             {
                 "period": _format_period_label(pd.DatetimeIndex(period_frame.index), freq),
                 "period_start": str(pd.Timestamp(period_frame.index.min()).date()),
                 "period_end": str(pd.Timestamp(period_frame.index.max()).date()),
                 "days": int(len(returns)),
-                "return": float((1.0 + returns).prod() - 1.0),
+                "return": period_return,
                 "win_rate": float((returns > 0).mean()),
                 "avg_daily_return": float(returns.mean()),
                 "daily_volatility": float(returns.std()) if len(returns) > 1 else 0.0,
@@ -565,7 +740,18 @@ def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame
                 "avg_turnover": float(period_frame["turnover"].astype(float).mean())
                 if "turnover" in period_frame.columns
                 else np.nan,
-                "bench_return": float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan,
+                "bench_return": bench_return,
+                "excess_vs_benchmark": period_return - bench_return if pd.notna(bench_return) else np.nan,
+                "avg_factor_baseline_return": avg_factor_baseline_return,
+                "excess_vs_avg_factor_baseline": (
+                    period_return - avg_factor_baseline_return if pd.notna(avg_factor_baseline_return) else np.nan
+                ),
+                "sign_aligned_factor_baseline_return": sign_aligned_factor_baseline_return,
+                "excess_vs_sign_aligned_factor_baseline": (
+                    period_return - sign_aligned_factor_baseline_return
+                    if pd.notna(sign_aligned_factor_baseline_return)
+                    else np.nan
+                ),
                 "win_days": int(distribution_metrics["win_days"]),
                 "loss_days": int(distribution_metrics["loss_days"]),
                 "flat_days": int(distribution_metrics["flat_days"]),
@@ -598,14 +784,36 @@ def build_rebalance_period_summary(report: pd.DataFrame, rebalance_freq: int) ->
             if "bench" in period_frame.columns
             else pd.Series(dtype=float)
         )
+        avg_factor_baseline_returns = (
+            period_frame["avg_factor_baseline_return"].astype(float).dropna()
+            if "avg_factor_baseline_return" in period_frame.columns
+            else pd.Series(dtype=float)
+        )
+        sign_aligned_factor_baseline_returns = (
+            period_frame["sign_aligned_factor_baseline_return"].astype(float).dropna()
+            if "sign_aligned_factor_baseline_return" in period_frame.columns
+            else pd.Series(dtype=float)
+        )
         distribution_metrics = _compute_return_distribution_metrics(returns)
+        period_return = float((1.0 + returns).prod() - 1.0)
+        bench_return = float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan
+        avg_factor_baseline_return = (
+            float((1.0 + avg_factor_baseline_returns).prod() - 1.0)
+            if not avg_factor_baseline_returns.empty
+            else np.nan
+        )
+        sign_aligned_factor_baseline_return = (
+            float((1.0 + sign_aligned_factor_baseline_returns).prod() - 1.0)
+            if not sign_aligned_factor_baseline_returns.empty
+            else np.nan
+        )
         period_rows.append(
             {
                 "period": f"rebalance_{idx:03d}",
                 "period_start": str(pd.Timestamp(period_frame.index.min()).date()),
                 "period_end": str(pd.Timestamp(period_frame.index.max()).date()),
                 "days": int(len(returns)),
-                "return": float((1.0 + returns).prod() - 1.0),
+                "return": period_return,
                 "win_rate": float((returns > 0).mean()),
                 "avg_daily_return": float(returns.mean()),
                 "daily_volatility": float(returns.std()) if len(returns) > 1 else 0.0,
@@ -613,7 +821,18 @@ def build_rebalance_period_summary(report: pd.DataFrame, rebalance_freq: int) ->
                 "avg_turnover": float(period_frame["turnover"].astype(float).mean())
                 if "turnover" in period_frame.columns
                 else np.nan,
-                "bench_return": float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan,
+                "bench_return": bench_return,
+                "excess_vs_benchmark": period_return - bench_return if pd.notna(bench_return) else np.nan,
+                "avg_factor_baseline_return": avg_factor_baseline_return,
+                "excess_vs_avg_factor_baseline": (
+                    period_return - avg_factor_baseline_return if pd.notna(avg_factor_baseline_return) else np.nan
+                ),
+                "sign_aligned_factor_baseline_return": sign_aligned_factor_baseline_return,
+                "excess_vs_sign_aligned_factor_baseline": (
+                    period_return - sign_aligned_factor_baseline_return
+                    if pd.notna(sign_aligned_factor_baseline_return)
+                    else np.nan
+                ),
                 "win_days": int(distribution_metrics["win_days"]),
                 "loss_days": int(distribution_metrics["loss_days"]),
                 "flat_days": int(distribution_metrics["flat_days"]),
@@ -728,6 +947,18 @@ def print_metrics(
         profitable_rebalance_summary = portfolio_metrics.get("profitable_rebalance_summary")
         if profitable_rebalance_summary:
             _print_metric_line("Profitable rebal", str(profitable_rebalance_summary))
+        top_3_positive_month_share = _extract_metric(portfolio_metrics, "top_3_positive_month_share")
+        if top_3_positive_month_share is not None:
+            _print_metric_line("Top3 month share", _format_pct(top_3_positive_month_share))
+        top_5_positive_month_share = _extract_metric(portfolio_metrics, "top_5_positive_month_share")
+        if top_5_positive_month_share is not None:
+            _print_metric_line("Top5 month share", _format_pct(top_5_positive_month_share))
+        top_3_positive_rebalance_share = _extract_metric(portfolio_metrics, "top_3_positive_rebalance_share")
+        if top_3_positive_rebalance_share is not None:
+            _print_metric_line("Top3 rebal share", _format_pct(top_3_positive_rebalance_share))
+        top_5_positive_rebalance_share = _extract_metric(portfolio_metrics, "top_5_positive_rebalance_share")
+        if top_5_positive_rebalance_share is not None:
+            _print_metric_line("Top5 rebal share", _format_pct(top_5_positive_rebalance_share))
         benchmark_name = portfolio_metrics.get("benchmark_name")
         if benchmark_name:
             _print_metric_line("Benchmark", str(benchmark_name))
@@ -742,6 +973,25 @@ def print_metrics(
             _print_metric_line(
                 "Excess IR",
                 _format_number(_extract_metric(portfolio_metrics, "excess_information_ratio")),
+            )
+        avg_factor_baseline_name = portfolio_metrics.get("avg_factor_baseline_name")
+        if avg_factor_baseline_name:
+            _print_metric_line("Avg baseline", str(avg_factor_baseline_name))
+            _print_metric_line(
+                "Months > avg base",
+                str(portfolio_metrics.get("months_beating_avg_factor_baseline_summary") or "n/a"),
+            )
+            _print_metric_line(
+                "Rebal > avg base",
+                str(portfolio_metrics.get("rebalances_beating_avg_factor_baseline_summary") or "n/a"),
+            )
+            _print_metric_line(
+                "Excess vs avg",
+                _format_pct(_extract_metric(portfolio_metrics, "avg_factor_baseline_excess_annualized_return")),
+            )
+            _print_metric_line(
+                "Excess IR vs avg",
+                _format_number(_extract_metric(portfolio_metrics, "avg_factor_baseline_excess_information_ratio")),
             )
         print()
         _print_metric_line("Avg win", _format_pct(_extract_metric(portfolio_metrics, "avg_win")))

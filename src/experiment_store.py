@@ -62,11 +62,23 @@ SUMMARY_FIELDS = [
     "total_month_count",
     "profitable_month_pct",
     "profitable_month_summary",
+    "top_3_positive_month_share",
+    "top_5_positive_month_share",
     "rebalance_win_rate",
     "profitable_rebalance_count",
     "total_rebalance_count",
     "profitable_rebalance_pct",
     "profitable_rebalance_summary",
+    "top_3_positive_rebalance_share",
+    "top_5_positive_rebalance_share",
+    "payoff_ratio",
+    "profit_factor",
+    "avg_factor_baseline_excess_annualized_return",
+    "avg_factor_baseline_excess_information_ratio",
+    "months_beating_avg_factor_baseline_pct",
+    "months_beating_avg_factor_baseline_summary",
+    "rebalances_beating_avg_factor_baseline_pct",
+    "rebalances_beating_avg_factor_baseline_summary",
     "portfolio_annualized_return",
     "portfolio_information_ratio",
     "portfolio_max_drawdown",
@@ -357,6 +369,12 @@ def flatten_metrics(signal_metrics: dict | None, portfolio_metrics: dict | None)
             portfolio_metrics.get("profitable_month_pct", {}).get("risk")
         ),
         "profitable_month_summary": str(portfolio_metrics.get("profitable_month_summary") or ""),
+        "top_3_positive_month_share": _safe_float(
+            portfolio_metrics.get("top_3_positive_month_share", {}).get("risk")
+        ),
+        "top_5_positive_month_share": _safe_float(
+            portfolio_metrics.get("top_5_positive_month_share", {}).get("risk")
+        ),
         "rebalance_win_rate": _safe_float(
             portfolio_metrics.get("rebalance_win_rate", {}).get("risk")
         ),
@@ -366,6 +384,36 @@ def flatten_metrics(signal_metrics: dict | None, portfolio_metrics: dict | None)
             portfolio_metrics.get("profitable_rebalance_pct", {}).get("risk")
         ),
         "profitable_rebalance_summary": str(portfolio_metrics.get("profitable_rebalance_summary") or ""),
+        "top_3_positive_rebalance_share": _safe_float(
+            portfolio_metrics.get("top_3_positive_rebalance_share", {}).get("risk")
+        ),
+        "top_5_positive_rebalance_share": _safe_float(
+            portfolio_metrics.get("top_5_positive_rebalance_share", {}).get("risk")
+        ),
+        "payoff_ratio": _safe_float(
+            portfolio_metrics.get("payoff_ratio", {}).get("risk")
+        ),
+        "profit_factor": _safe_float(
+            portfolio_metrics.get("profit_factor", {}).get("risk")
+        ),
+        "avg_factor_baseline_excess_annualized_return": _safe_float(
+            portfolio_metrics.get("avg_factor_baseline_excess_annualized_return", {}).get("risk")
+        ),
+        "avg_factor_baseline_excess_information_ratio": _safe_float(
+            portfolio_metrics.get("avg_factor_baseline_excess_information_ratio", {}).get("risk")
+        ),
+        "months_beating_avg_factor_baseline_pct": _safe_float(
+            portfolio_metrics.get("months_beating_avg_factor_baseline_pct", {}).get("risk")
+        ),
+        "months_beating_avg_factor_baseline_summary": str(
+            portfolio_metrics.get("months_beating_avg_factor_baseline_summary") or ""
+        ),
+        "rebalances_beating_avg_factor_baseline_pct": _safe_float(
+            portfolio_metrics.get("rebalances_beating_avg_factor_baseline_pct", {}).get("risk")
+        ),
+        "rebalances_beating_avg_factor_baseline_summary": str(
+            portfolio_metrics.get("rebalances_beating_avg_factor_baseline_summary") or ""
+        ),
         "portfolio_annualized_return": _safe_float(
             portfolio_metrics.get("annualized_return", {}).get("risk")
         ),

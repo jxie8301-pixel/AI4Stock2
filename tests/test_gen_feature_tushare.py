@@ -6,10 +6,13 @@ import pandas as pd
 
 from src.gen_feature import (
     TUSHARE_FACTOR_PREFIX,
+    TUSHARE_INDUSTRY_CONTEXT_PATH,
     TUSHARE_RAW_DIVIDEND_DIR,
     TUSHARE_RAW_EXPRESS_DIR,
     TUSHARE_RAW_FINA_INDICATOR_DIR,
     TUSHARE_RAW_FORECAST_DIR,
+    TUSHARE_SYMBOL_CACHE_PATH,
+    _clear_tushare_context_caches,
     _augment_tushare_symbol_frame,
     compute_all_factor_features,
     compute_tushare_factor_features,
@@ -26,6 +29,7 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertEqual(len(default_names), 259)
         self.assertEqual(len(tushare_names), len(default_names) + len(get_tushare_factor_feature_names()))
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_ret_20", tushare_names)
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", default_names)
         self.assertNotIn("TEMP_ret_20", default_names)
         self.assertNotIn("TEMP_corr_cv_20", default_names)
@@ -62,6 +66,18 @@ class TushareFeatureTest(unittest.TestCase):
                 "limit_pre_close": [10.0, 11.0, 12.0],
                 "up_limit": [11.0, 12.1, 13.2],
                 "down_limit": [9.0, 9.9, 10.8],
+                "ind_member_count": [6.0, 6.0, 6.0],
+                "ind_daily_ret": [0.01, 0.02, -0.01],
+                "ind_excess_daily_ret": [0.005, 0.015, -0.005],
+                "ind_ret_5": [0.03, 0.04, 0.05],
+                "ind_ret_20": [0.10, 0.11, 0.12],
+                "ind_ret_60": [0.20, 0.21, 0.22],
+                "ind_std_5": [0.02, 0.02, 0.02],
+                "ind_std_20": [0.03, 0.03, 0.03],
+                "ind_std_60": [0.04, 0.04, 0.04],
+                "ind_excess_ret_5": [0.01, 0.015, 0.02],
+                "ind_excess_ret_20": [0.02, 0.025, 0.03],
+                "ind_excess_ret_60": [0.04, 0.045, 0.05],
             }
         )
 
@@ -86,6 +102,12 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[0]["hit_up_limit_count_5"]), 0.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["amplitude_mean_5"]), 8.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["pct_chg_mean_5"]), 4.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[0]["industry_member_count"]), 6.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[1]["industry_daily_ret"]), 0.02, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["industry_ret_20"]), 0.12, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["industry_excess_ret_60"]), 0.05, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["industry_std_20"]), 0.03, places=6)
+        self.assertTrue(pd.isna(feat.iloc[2]["industry_rel_ret_5"]))
         self.assertTrue(pd.notna(feat.iloc[2]["amplitude_zscore_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["pct_chg_zscore_20"]))
         self.assertTrue(pd.isna(feat.iloc[0]["free_float_ratio_change_20"]))
@@ -125,6 +147,18 @@ class TushareFeatureTest(unittest.TestCase):
                 "limit_pre_close": [10.0, 11.0],
                 "up_limit": [11.0, 12.1],
                 "down_limit": [9.0, 9.9],
+                "ind_member_count": [6.0, 6.0],
+                "ind_daily_ret": [0.01, 0.02],
+                "ind_excess_daily_ret": [0.005, 0.015],
+                "ind_ret_5": [0.03, 0.04],
+                "ind_ret_20": [0.10, 0.11],
+                "ind_ret_60": [0.20, 0.21],
+                "ind_std_5": [0.02, 0.02],
+                "ind_std_20": [0.03, 0.03],
+                "ind_std_60": [0.04, 0.04],
+                "ind_excess_ret_5": [0.01, 0.015],
+                "ind_excess_ret_20": [0.02, 0.025],
+                "ind_excess_ret_60": [0.04, 0.045],
             }
         )
 
@@ -138,6 +172,8 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}amplitude_mean_5", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}limit_band_pos_mean_5", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_ratio_zscore_20", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_ret_20", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_rel_ret_5", tushare_feat.columns)
 
     def test_augment_tushare_symbol_frame_loads_fina_indicator_sidecar(self):
         df = pd.DataFrame(
@@ -382,6 +418,64 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(out.loc[2, "exp_revenue"]), 1100.0, places=6)
         self.assertAlmostEqual(float(out.loc[2, "exp_yoy_sales"]), 18.0, places=6)
 
+    def test_augment_tushare_symbol_frame_loads_industry_context_sidecar(self):
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31", "2026-04-01"]),
+                "symbol": ["000001", "000001", "000001"],
+                "open": [10.0, 11.0, 12.0],
+                "high": [10.5, 11.5, 12.5],
+                "low": [9.8, 10.8, 11.8],
+                "close": [10.0, 11.0, 12.0],
+                "volume": [100.0, 120.0, 140.0],
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            meta_dir = Path(tmpdir)
+            symbol_cache = pd.DataFrame({"local_symbol": ["000001"], "industry": ["银行"]})
+            industry_context = pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+                    "industry": ["银行", "银行"],
+                    "ind_member_count": [24.0, 24.0],
+                    "ind_daily_ret": [0.01, 0.02],
+                    "ind_excess_daily_ret": [0.005, 0.015],
+                    "ind_ret_5": [0.03, 0.04],
+                    "ind_std_5": [0.02, 0.02],
+                    "ind_excess_ret_5": [0.01, 0.015],
+                    "ind_ret_20": [0.10, 0.11],
+                    "ind_std_20": [0.03, 0.03],
+                    "ind_excess_ret_20": [0.02, 0.025],
+                    "ind_ret_60": [0.20, 0.21],
+                    "ind_std_60": [0.04, 0.04],
+                    "ind_excess_ret_60": [0.04, 0.045],
+                }
+            )
+            symbol_cache_path = meta_dir / "symbol_cache.parquet"
+            industry_context_path = meta_dir / "industry_context.parquet"
+            symbol_cache.to_parquet(symbol_cache_path, index=False)
+            industry_context.to_parquet(industry_context_path, index=False)
+
+            from src import gen_feature as gen_feature_module
+
+            original_symbol_cache_path = gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH
+            original_industry_context_path = gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH
+            gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = symbol_cache_path
+            gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = industry_context_path
+            gen_feature_module._clear_tushare_context_caches()
+            try:
+                out = _augment_tushare_symbol_frame(df, symbol="000001")
+            finally:
+                gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = original_symbol_cache_path
+                gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = original_industry_context_path
+                gen_feature_module._clear_tushare_context_caches()
+
+        self.assertAlmostEqual(float(out.loc[0, "ind_member_count"]), 24.0, places=6)
+        self.assertAlmostEqual(float(out.loc[1, "ind_daily_ret"]), 0.02, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "ind_ret_20"]), 0.11, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "ind_excess_ret_60"]), 0.045, places=6)
+
     def test_compute_all_factor_features_uses_side_loaded_forecast_and_express_columns(self):
         df = pd.DataFrame(
             {
@@ -423,6 +517,18 @@ class TushareFeatureTest(unittest.TestCase):
                 "exp_operate_profit": [100.0, 120.0],
                 "exp_n_income": [80.0, 90.0],
                 "exp_yoy_sales": [15.0, 18.0],
+                "ind_member_count": [24.0, 24.0],
+                "ind_daily_ret": [0.01, 0.02],
+                "ind_excess_daily_ret": [0.005, 0.015],
+                "ind_ret_5": [0.03, 0.04],
+                "ind_ret_20": [0.10, 0.11],
+                "ind_ret_60": [0.20, 0.21],
+                "ind_std_5": [0.02, 0.02],
+                "ind_std_20": [0.03, 0.03],
+                "ind_std_60": [0.04, 0.04],
+                "ind_excess_ret_5": [0.01, 0.015],
+                "ind_excess_ret_20": [0.02, 0.025],
+                "ind_excess_ret_60": [0.04, 0.045],
             }
         )
 
@@ -430,6 +536,8 @@ class TushareFeatureTest(unittest.TestCase):
 
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_fc_p_change_max", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_exp_revenue", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_member_count", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_rel_ret_20", tushare_feat.columns)
         self.assertAlmostEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}latest_fc_p_change_max"]), 40.0, places=6)
         self.assertAlmostEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}latest_exp_revenue"]), 1100.0, places=6)
 

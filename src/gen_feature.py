@@ -13,6 +13,7 @@ import argparse
 import json
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +108,9 @@ TUSHARE_RAW_FINA_INDICATOR_DIR = Path("data/tushare/raw/fina_indicator")
 TUSHARE_RAW_DIVIDEND_DIR = Path("data/tushare/raw/dividend")
 TUSHARE_RAW_FORECAST_DIR = Path("data/tushare/raw/forecast")
 TUSHARE_RAW_EXPRESS_DIR = Path("data/tushare/raw/express")
+TUSHARE_RAW_META_DIR = Path("data/tushare/raw/meta")
+TUSHARE_SYMBOL_CACHE_PATH = TUSHARE_RAW_META_DIR / "symbol_cache.parquet"
+TUSHARE_INDUSTRY_CONTEXT_PATH = TUSHARE_RAW_META_DIR / "industry_context.parquet"
 SHARD_DIRNAME = "_shards"
 
 TUSHARE_FINA_INDICATOR_FEATURE_PAIRS = [
@@ -169,6 +173,140 @@ TUSHARE_EXPRESS_FEATURE_PAIRS = [
     ("yoy_assets", "exp_yoy_assets"),
 ]
 TUSHARE_EXPRESS_FEATURE_COLS = [target for _, target in TUSHARE_EXPRESS_FEATURE_PAIRS]
+
+
+def _get_tushare_industry_context_feature_cols() -> list[str]:
+    cols = [
+        "ind_member_count",
+        "ind_daily_ret",
+        "ind_excess_daily_ret",
+    ]
+    for raw_window in DEFAULT_TUSHARE_FACTOR_CONFIG["industry_windows"]:
+        window = int(raw_window)
+        cols += [
+            f"ind_ret_{window}",
+            f"ind_std_{window}",
+            f"ind_excess_ret_{window}",
+        ]
+    return cols
+
+
+def _rolling_compound_return(series: pd.Series, window: int) -> pd.Series:
+    safe = pd.to_numeric(series, errors="coerce").clip(lower=-0.999999)
+    return np.expm1(np.log1p(safe).rolling(int(window), min_periods=1).sum())
+
+
+def _clear_tushare_context_caches() -> None:
+    _load_tushare_symbol_industry_map.cache_clear()
+    _load_tushare_industry_context_frame.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _load_tushare_symbol_industry_map() -> dict[str, str]:
+    if not TUSHARE_SYMBOL_CACHE_PATH.exists():
+        return {}
+    frame = pd.read_parquet(TUSHARE_SYMBOL_CACHE_PATH, columns=["local_symbol", "industry"])
+    if frame.empty:
+        return {}
+    frame = frame.copy()
+    frame["local_symbol"] = frame["local_symbol"].astype(str).str.zfill(6)
+    frame["industry"] = frame["industry"].fillna("").replace("", "UNKNOWN")
+    frame = frame.drop_duplicates("local_symbol", keep="last")
+    return dict(zip(frame["local_symbol"], frame["industry"], strict=False))
+
+
+@lru_cache(maxsize=1)
+def _load_tushare_industry_context_frame() -> pd.DataFrame:
+    columns = _get_tushare_industry_context_feature_cols()
+    empty_index = pd.MultiIndex.from_arrays([[], []], names=["industry", "date"])
+    if not TUSHARE_INDUSTRY_CONTEXT_PATH.exists():
+        return pd.DataFrame(columns=columns, index=empty_index)
+    frame = pd.read_parquet(TUSHARE_INDUSTRY_CONTEXT_PATH)
+    if frame.empty:
+        return pd.DataFrame(columns=columns, index=empty_index)
+    frame = frame.copy()
+    frame["industry"] = frame["industry"].fillna("").replace("", "UNKNOWN")
+    frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+    frame = frame.dropna(subset=["date"]).sort_values(["industry", "date"]).set_index(["industry", "date"])
+    for col in columns:
+        if col not in frame.columns:
+            frame[col] = np.nan
+    return frame[columns]
+
+
+def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
+    symbol_to_industry = _load_tushare_symbol_industry_map()
+    rows: list[pd.DataFrame] = []
+    for file_path in sorted(parquet_dir.glob("*.parquet")):
+        symbol = file_path.stem
+        try:
+            frame = pd.read_parquet(file_path, columns=["date", "close"])
+        except Exception:
+            frame = pd.read_parquet(file_path)
+        if frame.empty or "date" not in frame.columns or "close" not in frame.columns:
+            continue
+        frame = frame.copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame["close"] = pd.to_numeric(frame["close"], errors="coerce")
+        frame = frame.dropna(subset=["date", "close"]).sort_values("date")
+        if frame.empty:
+            continue
+        rows.append(
+            pd.DataFrame(
+                {
+                    "date": frame["date"].to_numpy(copy=False),
+                    "industry": symbol_to_industry.get(symbol, "UNKNOWN"),
+                    "ret": frame["close"].pct_change(fill_method=None).to_numpy(copy=False),
+                }
+            )
+        )
+
+    if rows:
+        combined = pd.concat(rows, ignore_index=True).dropna(subset=["date", "ret"])
+        combined["industry"] = combined["industry"].fillna("").replace("", "UNKNOWN")
+        industry_daily = (
+            combined.groupby(["date", "industry"], observed=True)
+            .agg(ind_member_count=("ret", "count"), ind_daily_ret=("ret", "mean"))
+            .reset_index()
+        )
+        market_daily = (
+            combined.groupby("date", observed=True)
+            .agg(market_daily_ret=("ret", "mean"))
+            .reset_index()
+            .sort_values("date")
+        )
+        for raw_window in DEFAULT_TUSHARE_FACTOR_CONFIG["industry_windows"]:
+            window = int(raw_window)
+            market_daily[f"market_ret_{window}"] = _rolling_compound_return(market_daily["market_daily_ret"], window)
+        industry_daily = industry_daily.merge(market_daily, on="date", how="left").sort_values(["industry", "date"])
+        industry_daily["ind_excess_daily_ret"] = industry_daily["ind_daily_ret"] - industry_daily["market_daily_ret"]
+        grouped_daily_ret = industry_daily.groupby("industry", observed=True, sort=False)["ind_daily_ret"]
+        for raw_window in DEFAULT_TUSHARE_FACTOR_CONFIG["industry_windows"]:
+            window = int(raw_window)
+            industry_daily[f"ind_ret_{window}"] = grouped_daily_ret.transform(
+                lambda series, w=window: _rolling_compound_return(series, w)
+            )
+            industry_daily[f"ind_std_{window}"] = grouped_daily_ret.transform(
+                lambda series, w=window: series.rolling(w, min_periods=1).std()
+            )
+            industry_daily[f"ind_excess_ret_{window}"] = (
+                industry_daily[f"ind_ret_{window}"] - industry_daily[f"market_ret_{window}"]
+            )
+        output = industry_daily[["date", "industry", *_get_tushare_industry_context_feature_cols()]].copy()
+    else:
+        output = pd.DataFrame(columns=["date", "industry", *_get_tushare_industry_context_feature_cols()])
+
+    output["industry"] = output.get("industry", pd.Series(dtype=object)).fillna("").replace("", "UNKNOWN")
+    TUSHARE_INDUSTRY_CONTEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    output.to_parquet(TUSHARE_INDUSTRY_CONTEXT_PATH, index=False)
+    _clear_tushare_context_caches()
+    return TUSHARE_INDUSTRY_CONTEXT_PATH
+
+
+def _ensure_tushare_industry_context_cache(parquet_dir: Path) -> Path:
+    if TUSHARE_INDUSTRY_CONTEXT_PATH.exists():
+        return TUSHARE_INDUSTRY_CONTEXT_PATH
+    return _build_tushare_industry_context_cache(parquet_dir)
 
 
 def _load_tushare_sidecar_features(
@@ -267,6 +405,27 @@ def _load_tushare_express_features(symbol: str, date_index: pd.DatetimeIndex) ->
     )
 
 
+def _load_tushare_industry_features(symbol: str, date_index: pd.DatetimeIndex) -> pd.DataFrame | None:
+    industry = _load_tushare_symbol_industry_map().get(str(symbol).zfill(6), "UNKNOWN")
+    context = _load_tushare_industry_context_frame()
+    if context.empty:
+        return None
+    try:
+        right = context.loc[industry].reset_index().sort_values("date")
+    except KeyError:
+        return None
+    if right.empty:
+        return None
+    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
+    merged = pd.merge_asof(left, right, on="date", direction="backward")
+    merged = merged.set_index("date")
+    columns = _get_tushare_industry_context_feature_cols()
+    for col in columns:
+        if col not in merged.columns:
+            merged[col] = np.nan
+    return merged.reindex(columns=columns)
+
+
 def _augment_tushare_symbol_frame(
     df: pd.DataFrame,
     *,
@@ -292,6 +451,10 @@ def _augment_tushare_symbol_frame(
     if express is not None and not express.empty:
         aligned = express.reindex(date_index)
         out[aligned.columns] = aligned.to_numpy(copy=False)
+    industry_context = _load_tushare_industry_features(symbol, date_index)
+    if industry_context is not None and not industry_context.empty:
+        aligned = industry_context.reindex(date_index)
+        out[aligned.columns] = aligned.to_numpy(copy=False)
     return out
 
 
@@ -303,6 +466,7 @@ def _compute_symbol_feat_label(
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
     if data_source == "tushare":
+        _ensure_tushare_industry_context_cache(Path(file_path).resolve().parent)
         df = _augment_tushare_symbol_frame(df, symbol=symbol)
     base = _prepare_ohlcv(df)
     feat = compute_all_factor_features(df, data_source=data_source, _base=base)
@@ -319,6 +483,7 @@ def _compute_symbol_feat_labels(
     df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
     if data_source == "tushare":
+        _ensure_tushare_industry_context_cache(Path(file_path).resolve().parent)
         df = _augment_tushare_symbol_frame(df, symbol=symbol)
     base = _prepare_ohlcv(df)
     feat = compute_all_factor_features(df, data_source=data_source, _base=base)
@@ -576,6 +741,10 @@ def generate_factor_store(
     files = sorted(pdir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No parquet files found in {pdir}")
+
+    if data_source == "tushare":
+        print("[0/3] Ensuring Tushare industry context cache...")
+        _ensure_tushare_industry_context_cache(pdir)
 
     _remove_orphan_shards(shard_root=shard_root, shard_meta_root=shard_meta_root, source_files=files)
 

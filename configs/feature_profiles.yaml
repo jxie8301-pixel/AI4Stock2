@@ -42,6 +42,21 @@ profiles:
       - TS_sp_ttm
       - TS_dividend_yield_ttm
 
+  core_v4_techlite_tushare_plus_industry_v1:
+    extends: core_v4_techlite_tushare_plus
+    add_columns:
+      - TS_industry_member_count
+      - TS_industry_ret_5
+      - TS_industry_ret_20
+      - TS_industry_ret_60
+      - TS_industry_std_20
+      - TS_industry_std_60
+      - TS_industry_excess_ret_20
+      - TS_industry_excess_ret_60
+      - TS_industry_rel_ret_5
+      - TS_industry_rel_ret_20
+      - TS_industry_rel_ret_60
+
   core_v4_techlite_no_aroon:
     extends: core_v4_techlite
     drop_columns: [TECH_aroon_osc_25]

@@ -79,6 +79,7 @@ DEFAULT_TUSHARE_FACTOR_CONFIG: dict[str, Any] = {
     "pct_chg_windows": [5, 20],
     "ratio_change_windows": [20, 60],
     "valuation_change_windows": [20, 60],
+    "industry_windows": [5, 20, 60],
     "zscore_window": 20,
 }
 
@@ -411,6 +412,9 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "dividend_yield",
         "dividend_yield_ttm",
         "has_dividend",
+        "industry_member_count",
+        "industry_daily_ret",
+        "industry_excess_daily_ret",
     ]
     names += [f"free_turnover_mean_{int(window)}" for window in cfg["free_turnover_windows"]]
     names += [f"limit_band_pct_mean_{int(window)}" for window in cfg["limit_stat_windows"]]
@@ -426,6 +430,14 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     names += [f"float_mv_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
     names += [f"sp_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
     names += [f"dividend_yield_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
+    for window in cfg["industry_windows"]:
+        window = int(window)
+        names += [
+            f"industry_ret_{window}",
+            f"industry_std_{window}",
+            f"industry_excess_ret_{window}",
+            f"industry_rel_ret_{window}",
+        ]
     names += [
         "latest_eps",
         "latest_dt_eps",

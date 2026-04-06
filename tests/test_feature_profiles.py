@@ -194,6 +194,22 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_ratio", profile["selected_columns"])
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_ttm", profile["selected_columns"])
 
+    def test_core_v4_tushare_plus_industry_profile_adds_industry_columns(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v4_techlite_tushare_plus_industry_v1"},
+            }
+        )
+
+        self.assertTrue(
+            str(profile["profile_path"]).endswith("configs/feature_profiles.yaml::core_v4_techlite_tushare_plus_industry_v1")
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_member_count", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_ret_20", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_excess_ret_60", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_rel_ret_5", profile["selected_columns"])
+
     def test_core_v5_diag_prefilter_profile_is_registered(self):
         profile = resolve_feature_profile(
             {

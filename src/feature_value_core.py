@@ -748,6 +748,9 @@ def compute_tushare_factor_features(
     exp_yoy_roe = _series("exp_yoy_roe")
     exp_growth_assets = _series("exp_growth_assets")
     exp_yoy_assets = _series("exp_yoy_assets")
+    ind_member_count = _series("ind_member_count")
+    ind_daily_ret = _series("ind_daily_ret")
+    ind_excess_daily_ret = _series("ind_excess_daily_ret")
 
     out: dict[str, pd.Series | np.ndarray] = {}
     out["gap_up_limit"] = up_limit / close - 1.0
@@ -780,6 +783,9 @@ def compute_tushare_factor_features(
     out["dividend_yield"] = dv_ratio
     out["dividend_yield_ttm"] = dv_ttm
     out["has_dividend"] = np.where(np.isfinite(dv_ttm), (dv_ttm > 0).astype(float), np.nan)
+    out["industry_member_count"] = ind_member_count
+    out["industry_daily_ret"] = ind_daily_ret
+    out["industry_excess_daily_ret"] = ind_excess_daily_ret
     for window in cfg["limit_stat_windows"]:
         window = int(window)
         out[f"limit_band_pct_mean_{window}"] = pd.Series(out["limit_band_pct"], index=base.index).rolling(window, min_periods=1).mean()
@@ -801,6 +807,16 @@ def compute_tushare_factor_features(
         window = int(window)
         out[f"sp_ttm_change_{window}"] = pd.Series(out["sp_ttm"], index=base.index).pct_change(window, fill_method=None)
         out[f"dividend_yield_ttm_change_{window}"] = pd.Series(out["dividend_yield_ttm"], index=base.index).pct_change(window, fill_method=None)
+    for window in cfg["industry_windows"]:
+        window = int(window)
+        industry_ret = _series(f"ind_ret_{window}")
+        industry_std = _series(f"ind_std_{window}")
+        industry_excess_ret = _series(f"ind_excess_ret_{window}")
+        own_ret = close.pct_change(window, fill_method=None)
+        out[f"industry_ret_{window}"] = industry_ret
+        out[f"industry_std_{window}"] = industry_std
+        out[f"industry_excess_ret_{window}"] = industry_excess_ret
+        out[f"industry_rel_ret_{window}"] = own_ret - industry_ret
     zscore_window = int(cfg["zscore_window"])
     amplitude_mean = amplitude.rolling(zscore_window, min_periods=1).mean()
     amplitude_std = amplitude.rolling(zscore_window, min_periods=1).std()

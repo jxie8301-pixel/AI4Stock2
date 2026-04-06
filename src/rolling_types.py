@@ -17,6 +17,7 @@ BACKTEST_LABELS_FILENAME = "backtest_labels.parquet"
 AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME = "avg_factor_baseline_predictions.parquet"
 SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME = "sign_aligned_factor_baseline_predictions.parquet"
 PREDICTION_METADATA_FILENAME = "metadata.json"
+TRAINING_SUMMARY_FILENAME = "training_summary.csv"
 
 
 @dataclass(frozen=True)

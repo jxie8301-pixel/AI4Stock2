@@ -26,6 +26,41 @@ def _sanitize_dict_keys(data: Any) -> Any:
     return {str(key): _sanitize_dict_keys(value) for key, value in data.items()}
 
 
+def _build_validation_metric_signal_series(
+    bundle: PredictionBundle,
+    *,
+    metric_name: str,
+) -> pd.Series | None:
+    if not bundle.training_summary_records:
+        return None
+    unique_dates = pd.Index(
+        pd.to_datetime(bundle.final_predictions.index.get_level_values("datetime").unique()),
+        dtype="datetime64[ns]",
+    ).sort_values()
+    if unique_dates.empty:
+        return None
+
+    signal = pd.Series(index=unique_dates, dtype=float)
+    for record in bundle.training_summary_records:
+        if metric_name not in record:
+            continue
+        try:
+            value = float(record[metric_name])
+        except (TypeError, ValueError):
+            continue
+        if pd.isna(value):
+            continue
+        start = pd.to_datetime(record.get("window_start"))
+        end = pd.to_datetime(record.get("window_end"))
+        if pd.isna(start) or pd.isna(end):
+            continue
+        mask = (signal.index >= start) & (signal.index <= end)
+        if mask.any():
+            signal.loc[mask] = value
+    signal = signal.dropna()
+    return signal if not signal.empty else None
+
+
 def evaluate_prediction_bundle(
     cfg: dict[str, Any],
     args: argparse.Namespace,
@@ -126,6 +161,15 @@ def evaluate_prediction_bundle(
         bundle.backtest_label_series,
         cfg.get("backtest", {}).get("benchmark"),
     )
+    risk_control_cfg = cfg["backtest"].get("risk_control")
+    risk_control_signal_values = None
+    if isinstance(risk_control_cfg, dict):
+        signal_source = str(risk_control_cfg.get("signal_source", "score_strength") or "score_strength").strip().lower()
+        if signal_source == "validation_metric":
+            metric_name = str(risk_control_cfg.get("validation_metric", "valid_topk_label_mean") or "valid_topk_label_mean").strip().lower()
+            risk_control_signal_values = _build_validation_metric_signal_series(bundle, metric_name=metric_name)
+            if risk_control_signal_values is None:
+                print(f"[!] No rolling validation metric series available for risk control metric={metric_name}; backtest may fail.")
     backtest_kwargs = {
         "labels": bundle.backtest_label_series,
         "topk": cfg["strategy"]["topk"],
@@ -145,7 +189,8 @@ def evaluate_prediction_bundle(
         "min_score": cfg["strategy"].get("min_score"),
         "benchmark_returns": bench_series,
         "market_data": market_data,
-        "risk_control": cfg["backtest"].get("risk_control"),
+        "risk_control": risk_control_cfg,
+        "risk_control_signal_values": risk_control_signal_values,
         "intraperiod_exit": cfg["backtest"].get("intraperiod_exit"),
     }
     backtest_report = run_native_backtest(

@@ -28,7 +28,14 @@ class RunNativeRollingTest(unittest.TestCase):
             selected_feature_names=["f1", "f2"],
             metadata={"signal_horizon": 20, "test_start": "2024-01-02", "test_end": "2024-01-03"},
             feature_importance_frames=[],
-            training_summary_records=[],
+            training_summary_records=[
+                {
+                    "window_start": "2024-01-02",
+                    "window_end": "2024-01-03",
+                    "valid_topk_label_mean": 0.12,
+                    "best_valid_daily_rank_ic": 0.34,
+                }
+            ],
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -51,6 +58,8 @@ class RunNativeRollingTest(unittest.TestCase):
         )
         self.assertEqual(loaded.selected_feature_names, ["f1", "f2"])
         self.assertEqual(int(loaded.metadata["signal_horizon"]), 20)
+        self.assertEqual(len(loaded.training_summary_records), 1)
+        self.assertAlmostEqual(float(loaded.training_summary_records[0]["valid_topk_label_mean"]), 0.12, places=8)
 
     def test_average_factor_baseline_uses_unique_source_columns(self):
         runtime_data = run_native_rolling.RollingRuntimeData(

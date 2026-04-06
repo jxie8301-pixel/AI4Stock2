@@ -142,6 +142,8 @@ TOP_LEVEL_SCHEMA = {
             "neutral_risk": None,
             "bear_risk": None,
             "signal_metric": None,
+            "signal_source": None,
+            "validation_metric": None,
             "min_signal": None,
             "max_signal": None,
             "min_signal_quantile": None,
@@ -171,6 +173,8 @@ TOP_LEVEL_SCHEMA = {
             "neutral_risk": None,
             "bear_risk": None,
             "signal_metric": None,
+            "signal_source": None,
+            "validation_metric": None,
             "min_signal": None,
             "max_signal": None,
             "min_signal_quantile": None,
@@ -426,8 +430,33 @@ def validate_training_config(
             )
         if risk_mode in {"signal_strength", "benchmark_ma_signal_strength"}:
             signal_metric = str(raw_risk_cfg.get("signal_metric", "topk_mean") or "topk_mean").strip().lower()
+            signal_source = str(raw_risk_cfg.get("signal_source", "score_strength") or "score_strength").strip().lower()
+            if signal_source not in {"score_strength", "validation_metric"}:
+                raise ValueError(
+                    "backtest.risk_control.signal_source must be one of: score_strength, validation_metric"
+                )
             if signal_metric not in {"top1", "topk_mean", "topk_sum"}:
                 raise ValueError("backtest.risk_control.signal_metric must be one of: top1, topk_mean, topk_sum")
+            validation_metric = raw_risk_cfg.get("validation_metric")
+            if signal_source == "validation_metric":
+                validation_metric = str(validation_metric or "valid_topk_label_mean").strip().lower()
+                if validation_metric not in {
+                    "best_valid_daily_rank_ic",
+                    "best_valid_daily_ic",
+                    "valid_top1_label_mean",
+                    "valid_top1_positive_rate",
+                    "valid_topk_label_mean",
+                    "valid_topk_label_median",
+                    "valid_topk_min_label_mean",
+                    "valid_topk_positive_rate",
+                    "valid_topk_excess_mean",
+                }:
+                    raise ValueError(
+                        "backtest.risk_control.validation_metric must be one of: "
+                        "best_valid_daily_rank_ic, best_valid_daily_ic, valid_top1_label_mean, "
+                        "valid_top1_positive_rate, valid_topk_label_mean, valid_topk_label_median, "
+                        "valid_topk_min_label_mean, valid_topk_positive_rate, valid_topk_excess_mean"
+                    )
             min_signal = float(raw_risk_cfg.get("min_signal", 0.0))
             max_signal = float(raw_risk_cfg.get("max_signal", 2.0))
             if max_signal <= min_signal:
@@ -463,12 +492,15 @@ def validate_training_config(
             validated_risk_cfg.update(
                 {
                     "signal_metric": signal_metric,
+                    "signal_source": signal_source,
                     "min_signal": min_signal,
                     "max_signal": max_signal,
                     "min_risk": min_risk,
                     "max_risk": max_risk,
                 }
             )
+            if signal_source == "validation_metric":
+                validated_risk_cfg["validation_metric"] = validation_metric
             if min_signal_quantile is not None:
                 validated_risk_cfg["min_signal_quantile"] = min_signal_quantile
             if max_signal_quantile is not None:

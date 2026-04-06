@@ -210,6 +210,55 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(int(trace.iloc[0]["buy_count"]), 1)
         self.assertEqual(int(trace.iloc[0]["sell_count"]), 1)
 
+    def test_validation_metric_risk_control_scales_exposure(self):
+        index = pd.MultiIndex.from_product(
+            [
+                pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                ["A", "B"],
+            ],
+            names=["datetime", "instrument"],
+        )
+        preds = pd.Series([2.0, 1.0, 2.0, 1.0], index=index)
+        labels = pd.Series([0.1, 0.0, 0.1, 0.0], index=index)
+        validation_signal = pd.Series(
+            [0.0, 1.0],
+            index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            dtype=float,
+        )
+
+        report, trace = run_native_backtest(
+            preds=preds,
+            labels=labels,
+            topk=1,
+            n_drop=0,
+            cost_buy=0.0,
+            cost_sell=0.0,
+            min_cost=0.0,
+            account=1000.0,
+            risk_degree=1.0,
+            slippage=0.0,
+            rebalance_freq=1,
+            risk_control={
+                "mode": "signal_strength",
+                "signal_source": "validation_metric",
+                "validation_metric": "valid_topk_label_mean",
+                "min_signal": 0.0,
+                "max_signal": 1.0,
+                "min_risk": 0.0,
+                "max_risk": 1.0,
+            },
+            risk_control_signal_values=validation_signal,
+            return_trace=True,
+            trace_dates={pd.Timestamp("2024-01-02"), pd.Timestamp("2024-01-03")},
+        )
+
+        self.assertAlmostEqual(float(report.iloc[0]["risk_degree"]), 0.0, places=8)
+        self.assertAlmostEqual(float(report.iloc[1]["risk_degree"]), 1.0, places=8)
+        self.assertAlmostEqual(float(report.iloc[0]["risk_control_signal"]), 0.0, places=8)
+        self.assertAlmostEqual(float(report.iloc[1]["risk_control_signal"]), 1.0, places=8)
+        self.assertEqual(int(trace.iloc[0]["buy_count"]), 0)
+        self.assertEqual(int(trace.iloc[1]["buy_count"]), 1)
+
     def test_rank_weighting_allocates_more_capital_to_higher_rank(self):
         index = pd.MultiIndex.from_product(
             [

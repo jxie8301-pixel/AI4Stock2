@@ -15,6 +15,7 @@ from src.rolling_types import (
     BACKTEST_LABELS_FILENAME,
     SIGNAL_LABELS_FILENAME,
     SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME,
+    TRAINING_SUMMARY_FILENAME,
     PredictionBundle,
     RollingPaths,
 )
@@ -88,6 +89,11 @@ def write_prediction_bundle(bundle: PredictionBundle, artifact_dir: Path) -> Non
             artifact_dir / SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME,
             index=False,
         )
+    if bundle.training_summary_records:
+        pd.DataFrame(bundle.training_summary_records).to_csv(
+            artifact_dir / TRAINING_SUMMARY_FILENAME,
+            index=False,
+        )
     metadata = {
         **bundle.metadata,
         "selected_features": list(bundle.selected_feature_names),
@@ -128,6 +134,12 @@ def load_prediction_bundle(raw_path: str | Path) -> PredictionBundle:
         if sign_aligned_factor_path.exists()
         else None
     )
+    training_summary_path = artifact_dir / TRAINING_SUMMARY_FILENAME
+    training_summary_records = (
+        pd.read_csv(training_summary_path).to_dict(orient="records")
+        if training_summary_path.exists()
+        else []
+    )
     return PredictionBundle(
         final_predictions=final_predictions,
         label_series=label_series,
@@ -137,5 +149,5 @@ def load_prediction_bundle(raw_path: str | Path) -> PredictionBundle:
         selected_feature_names=list(metadata.get("selected_features", [])),
         metadata=metadata,
         feature_importance_frames=[],
-        training_summary_records=[],
+        training_summary_records=training_summary_records,
     )

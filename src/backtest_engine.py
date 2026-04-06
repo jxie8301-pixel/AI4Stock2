@@ -85,6 +85,7 @@ def run_native_backtest(
     benchmark_returns: pd.Series | None = None,
     market_data: pd.DataFrame | None = None,
     risk_control: dict[str, object] | None = None,
+    risk_control_signal_values: pd.Series | None = None,
     intraperiod_exit: dict[str, object] | None = None,
     dynamic_risk: dict[str, object] | None = None,
     return_trace: bool = False,
@@ -133,6 +134,7 @@ def run_native_backtest(
         fallback_risk_degree=risk_degree,
         topk=topk,
         min_score=min_score,
+        external_signal_values=risk_control_signal_values,
     )
     intraperiod_score_matrix = _build_exit_score_matrix(
         pred_matrix,

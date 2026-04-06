@@ -10,6 +10,18 @@ from src.backtest_scoring import compute_signal_strength_value, normalize_min_sc
 
 SUPPORTED_RISK_CONTROL_MODES = ("fixed", "benchmark_ma", "signal_strength", "benchmark_ma_signal_strength")
 SUPPORTED_SIGNAL_STRENGTH_METRICS = ("top1", "topk_mean", "topk_sum")
+SUPPORTED_SIGNAL_SOURCES = ("score_strength", "validation_metric")
+SUPPORTED_VALIDATION_SIGNAL_METRICS = (
+    "best_valid_daily_rank_ic",
+    "best_valid_daily_ic",
+    "valid_top1_label_mean",
+    "valid_top1_positive_rate",
+    "valid_topk_label_mean",
+    "valid_topk_label_median",
+    "valid_topk_min_label_mean",
+    "valid_topk_positive_rate",
+    "valid_topk_excess_mean",
+)
 SUPPORTED_INTRAPERIOD_EXIT_MODES = ("none", "score_threshold", "expected_return_threshold")
 SUPPORTED_EXIT_SCORE_SOURCES = ("raw", "transformed", "rank_pct", "zscore")
 SUPPORTED_INTRAPERIOD_EXIT_CALIBRATIONS = ("quantile_bins",)
@@ -249,6 +261,9 @@ def normalize_risk_control_config(
         signal_metric = str(risk_control.get("signal_metric", "topk_mean") or "topk_mean").strip().lower()
         if signal_metric not in SUPPORTED_SIGNAL_STRENGTH_METRICS:
             raise ValueError("risk_control.signal_metric must be one of: " + ", ".join(SUPPORTED_SIGNAL_STRENGTH_METRICS))
+        signal_source = str(risk_control.get("signal_source", "score_strength") or "score_strength").strip().lower()
+        if signal_source not in SUPPORTED_SIGNAL_SOURCES:
+            raise ValueError("risk_control.signal_source must be one of: " + ", ".join(SUPPORTED_SIGNAL_SOURCES))
         min_signal = float(risk_control.get("min_signal", 0.0))
         max_signal = float(risk_control.get("max_signal", 2.0))
         if max_signal <= min_signal:
@@ -273,11 +288,20 @@ def normalize_risk_control_config(
             "mode": mode,
             "risk_degree": validate_risk_degree(float(fallback_risk_degree), "risk_control.risk_degree"),
             "signal_metric": signal_metric,
+            "signal_source": signal_source,
             "min_signal": min_signal,
             "max_signal": max_signal,
             "min_risk": min_risk,
             "max_risk": max_risk,
         }
+        if signal_source == "validation_metric":
+            validation_metric = str(risk_control.get("validation_metric", "valid_topk_label_mean") or "valid_topk_label_mean").strip().lower()
+            if validation_metric not in SUPPORTED_VALIDATION_SIGNAL_METRICS:
+                raise ValueError(
+                    "risk_control.validation_metric must be one of: "
+                    + ", ".join(SUPPORTED_VALIDATION_SIGNAL_METRICS)
+                )
+            out["validation_metric"] = validation_metric
         if min_signal_quantile is not None:
             out["min_signal_quantile"] = min_signal_quantile
         if max_signal_quantile is not None:
@@ -357,6 +381,15 @@ def build_signal_strength_schedule(
         min_score=min_score,
         signal_metric=signal_metric,
     )
+    return build_signal_schedule_from_series(signal_values, risk_control=risk_control)
+
+
+def build_signal_schedule_from_series(
+    signal_values: pd.Series,
+    *,
+    risk_control: dict[str, float | int | str],
+) -> tuple[pd.Series, pd.Series]:
+    signal_values = pd.Series(signal_values, copy=False).astype(float).sort_index()
     min_threshold = pd.Series(float(risk_control["min_signal"]), index=signal_values.index, dtype=float)
     max_threshold = pd.Series(float(risk_control["max_signal"]), index=signal_values.index, dtype=float)
     min_q = risk_control.get("min_signal_quantile")
@@ -439,11 +472,17 @@ def build_risk_control_schedule(
     fallback_risk_degree: float,
     topk: int,
     min_score: float | None,
+    external_signal_values: pd.Series | None = None,
 ) -> tuple[pd.Series | None, pd.Series | None]:
     mode = str(risk_control.get("mode") or "fixed")
+    signal_source = str(risk_control.get("signal_source") or "score_strength")
     if mode == "fixed":
         return None, None
     if mode == "signal_strength":
+        if signal_source == "validation_metric":
+            if external_signal_values is None:
+                raise ValueError("external_signal_values is required when risk_control.signal_source == 'validation_metric'")
+            return build_signal_schedule_from_series(external_signal_values, risk_control=risk_control)
         return build_signal_strength_schedule(
             transformed_score_matrix,
             risk_control=risk_control,
@@ -462,12 +501,17 @@ def build_risk_control_schedule(
             risk_control=risk_control,
             fallback_risk_degree=fallback_risk_degree,
         )
-        signal_schedule, signal_values = build_signal_strength_schedule(
-            transformed_score_matrix,
-            risk_control=risk_control,
-            topk=topk,
-            min_score=min_score,
-        )
+        if signal_source == "validation_metric":
+            if external_signal_values is None:
+                raise ValueError("external_signal_values is required when risk_control.signal_source == 'validation_metric'")
+            signal_schedule, signal_values = build_signal_schedule_from_series(external_signal_values, risk_control=risk_control)
+        else:
+            signal_schedule, signal_values = build_signal_strength_schedule(
+                transformed_score_matrix,
+                risk_control=risk_control,
+                topk=topk,
+                min_score=min_score,
+            )
         combined = pd.concat([bench_schedule.rename("bench"), signal_schedule.rename("signal")], axis=1)
         return combined.min(axis=1).astype(float), signal_values
     raise ValueError(

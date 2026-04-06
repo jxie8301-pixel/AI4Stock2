@@ -140,6 +140,23 @@ class ConfigValidationTest(unittest.TestCase):
 
         self.assertEqual(validated["lgbm"]["validation_topk"], 12)
 
+    def test_validate_training_config_accepts_validation_metric_risk_control(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["backtest"]["risk_control"] = {
+            "mode": "signal_strength",
+            "signal_source": "validation_metric",
+            "validation_metric": "valid_topk_label_mean",
+            "min_signal": -0.02,
+            "max_signal": 0.05,
+            "min_risk": 0.0,
+            "max_risk": 0.95,
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["backtest"]["risk_control"]["signal_source"], "validation_metric")
+        self.assertEqual(validated["backtest"]["risk_control"]["validation_metric"], "valid_topk_label_mean")
+
     def test_validate_training_config_accepts_label_train_transform(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["label"]["train_transform"] = {

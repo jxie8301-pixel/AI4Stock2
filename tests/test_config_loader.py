@@ -52,6 +52,7 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertTrue(profile["path"].endswith("configs/models/lgbm_ranker_default.yaml"))
         self.assertEqual(profile["config"]["lgbm"]["loss"], "rank_xendcg")
         self.assertEqual(profile["config"]["lgbm"]["ranking_num_bins"], 5)
+        self.assertEqual(profile["config"]["lgbm"]["early_stopping_metric"], "daily_rank_ic")
 
     def test_resolve_rankic_model_profile(self):
         profile = resolve_model_profile({"model": {"profile": "lgbm_ranker_rankic"}})

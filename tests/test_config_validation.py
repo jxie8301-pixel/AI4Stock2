@@ -131,6 +131,45 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lgbm.early_stopping_metric must be one of"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_accepts_label_train_transform(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["label"]["train_transform"] = {
+            "mode": "profit_bucket",
+            "neutral_band": 0.01,
+            "tail_band": 0.03,
+        }
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["label"]["train_transform"]["mode"], "profit_bucket")
+        self.assertEqual(validated["label"]["train_transform"]["neutral_band"], 0.01)
+        self.assertEqual(validated["label"]["train_transform"]["tail_band"], 0.03)
+
+    def test_validate_training_config_rejects_invalid_label_train_transform_mode(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["label"]["train_transform"] = {"mode": "demo"}
+
+        with self.assertRaisesRegex(ValueError, "unsupported training label transform mode"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_nonpositive_label_train_transform_scale(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["label"]["train_transform"] = {"mode": "profit_tanh", "scale_multiplier": 0}
+
+        with self.assertRaisesRegex(ValueError, "label.train_transform.scale_multiplier must be > 0"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_label_train_transform_tail_band_below_neutral_band(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["label"]["train_transform"] = {
+            "mode": "profit_bucket",
+            "neutral_band": 0.02,
+            "tail_band": 0.01,
+        }
+
+        with self.assertRaisesRegex(ValueError, "label.train_transform.tail_band must be >="):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_unknown_keys(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["unknown_knob"] = 1

@@ -12,6 +12,7 @@ import torch
 
 from src.experiment_store import resolve_rebalance_freq
 from src.feature_selection import apply_feature_transforms
+from src.label_utils import resolve_train_label_transform_cfg, transform_training_label_series
 from src.model_config import get_lgbm_config
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
@@ -32,6 +33,77 @@ def _prediction_series_from_arrays(preds_arr: np.ndarray, pred_dates: pd.Series,
         ),
         name="prediction",
     ).sort_index()
+
+
+def _compute_validation_topk_summary(
+    predictions: np.ndarray | pd.Series,
+    labels: pd.Series,
+    dates: np.ndarray | pd.Series,
+    *,
+    topk: int,
+) -> dict[str, float | int]:
+    topk = max(1, int(topk))
+    frame = pd.DataFrame(
+        {
+            "prediction": np.asarray(predictions, dtype=np.float32),
+            "label": pd.to_numeric(labels, errors="coerce").to_numpy(dtype=np.float32, copy=False),
+            "date": pd.to_datetime(pd.Series(dates)).to_numpy(),
+        }
+    ).dropna()
+    if frame.empty:
+        return {
+            "valid_topk_days": 0,
+            "valid_top1_label_mean": float("nan"),
+            "valid_top1_positive_rate": float("nan"),
+            "valid_topk_label_mean": float("nan"),
+            "valid_topk_label_median": float("nan"),
+            "valid_topk_min_label_mean": float("nan"),
+            "valid_topk_positive_rate": float("nan"),
+            "valid_topk_excess_mean": float("nan"),
+        }
+
+    daily_rows: list[dict[str, float]] = []
+    for _, group in frame.groupby("date", sort=True):
+        ranked = group.sort_values("prediction", ascending=False, kind="stable")
+        selected = ranked.head(topk)
+        if selected.empty:
+            continue
+        selected_labels = selected["label"].to_numpy(dtype=np.float64, copy=False)
+        daily_rows.append(
+            {
+                "top1_label": float(selected_labels[0]),
+                "top1_positive": float(selected_labels[0] > 0.0),
+                "topk_label_mean": float(selected_labels.mean()),
+                "topk_label_median": float(np.median(selected_labels)),
+                "topk_min_label": float(selected_labels.min()),
+                "topk_positive_rate": float((selected_labels > 0.0).mean()),
+                "topk_excess_mean": float(selected_labels.mean() - group["label"].mean()),
+            }
+        )
+
+    if not daily_rows:
+        return {
+            "valid_topk_days": 0,
+            "valid_top1_label_mean": float("nan"),
+            "valid_top1_positive_rate": float("nan"),
+            "valid_topk_label_mean": float("nan"),
+            "valid_topk_label_median": float("nan"),
+            "valid_topk_min_label_mean": float("nan"),
+            "valid_topk_positive_rate": float("nan"),
+            "valid_topk_excess_mean": float("nan"),
+        }
+
+    daily = pd.DataFrame(daily_rows)
+    return {
+        "valid_topk_days": int(len(daily)),
+        "valid_top1_label_mean": float(daily["top1_label"].mean()),
+        "valid_top1_positive_rate": float(daily["top1_positive"].mean()),
+        "valid_topk_label_mean": float(daily["topk_label_mean"].mean()),
+        "valid_topk_label_median": float(daily["topk_label_median"].mean()),
+        "valid_topk_min_label_mean": float(daily["topk_min_label"].mean()),
+        "valid_topk_positive_rate": float(daily["topk_positive_rate"].mean()),
+        "valid_topk_excess_mean": float(daily["topk_excess_mean"].mean()),
+    }
 
 
 def _run_lgbm_window(
@@ -67,11 +139,15 @@ def _run_lgbm_window(
     X_train_df = runtime_data.factor_frame.loc[valid_train_mask, feature_names].reset_index(drop=True)
     y_train_series = pd.Series(runtime_data.y[valid_train_mask])
     X_valid_df = runtime_data.factor_frame.loc[valid_valid_mask, feature_names].reset_index(drop=True)
-    y_valid_series = pd.Series(runtime_data.y[valid_valid_mask])
+    raw_y_valid_series = pd.Series(runtime_data.y[valid_valid_mask])
+    y_valid_series = raw_y_valid_series.copy()
     train_dates = pd.to_datetime(runtime_data.dt_index[valid_train_mask]).reset_index(drop=True)
     valid_dates = pd.to_datetime(runtime_data.dt_index[valid_valid_mask]).reset_index(drop=True)
+    y_train_series = transform_training_label_series(y_train_series, train_dates, cfg)
+    y_valid_series = transform_training_label_series(y_valid_series, valid_dates, cfg)
     X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
     X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
+    train_label_transform = resolve_train_label_transform_cfg(cfg)
 
     model_path = paths.models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
     model = NativeLGBM(**get_lgbm_config(cfg))
@@ -102,6 +178,12 @@ def _run_lgbm_window(
 
     history_path = paths.training_history_dir / f"training_history_{current_test_start.strftime('%Y-%m-%d')}.csv"
     saved_history_path = model.save_training_history(history_path)
+    valid_topk_summary = _compute_validation_topk_summary(
+        model.predict(X_valid_df),
+        raw_y_valid_series,
+        valid_dates,
+        topk=int(cfg["strategy"]["topk"]),
+    )
     training_summary = {
         "window_start": current_test_start.strftime("%Y-%m-%d"),
         "window_end": current_test_end.strftime("%Y-%m-%d"),
@@ -110,11 +192,16 @@ def _run_lgbm_window(
         "valid_start": valid_start.strftime("%Y-%m-%d"),
         "valid_end": valid_end.strftime("%Y-%m-%d"),
         "signal_horizon": int(signal_horizon),
+        "train_label_transform_mode": str(train_label_transform["mode"]),
+        "train_label_transform_neutral_band": float(train_label_transform["neutral_band"]),
+        "train_label_transform_tail_band": float(train_label_transform["tail_band"]),
+        "train_label_transform_scale_multiplier": float(train_label_transform["scale_multiplier"]),
         "train_rows": int(len(X_train_df)),
         "valid_rows": int(len(X_valid_df)),
         "feature_count": int(len(feature_names)),
         "loaded_model": bool(loaded_model),
         "training_history_path": str(saved_history_path) if saved_history_path else "",
+        **valid_topk_summary,
         **model.get_training_summary(),
     }
 
@@ -155,7 +242,8 @@ def _run_lstm_window(
     seq_symbol_ids, unique_symbols = pd.factorize(seq_symbols_str, sort=True)
     id_to_symbol = {idx: symbol for idx, symbol in enumerate(unique_symbols)}
     X = seq_frame[runtime_data.selected_feature_names].to_numpy(dtype=np.float32, copy=True)
-    y_seq = seq_frame["label"].to_numpy(dtype=np.float32, copy=True)
+    seq_train_labels = transform_training_label_series(seq_frame["label"], seq_dt_index, cfg)
+    y_seq = seq_train_labels.to_numpy(dtype=np.float32, copy=True)
     feature_indices = np.arange(len(runtime_data.selected_feature_names))
 
     train_mask_seq = (seq_dt_index >= train_start) & (seq_dt_index <= train_end)

@@ -17,15 +17,17 @@ from src.evaluate import (
     compute_portfolio_metrics,
     save_monthly_report,
 )
-from src.label_utils import sanitize_label_array, sanitize_label_series
+from src.label_utils import sanitize_label_array, sanitize_label_series, transform_training_label_series
 from src.model_config import get_lgbm_config
 from src.models.pure_lightgbm import (
     NativeLGBM,
+    _build_direct_ranking_relevance_labels,
     _build_ranking_relevance_labels,
     _compute_time_decay_weights,
     _compute_ranking_groups,
     _daily_ic_metric,
     _daily_rank_ic_metric_from_labels,
+    _should_use_direct_ranking_relevance_labels,
 )
 from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
 
@@ -179,6 +181,96 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(groups.tolist(), [3, 3])
         self.assertEqual(rel.tolist()[:3], [2, 1, 0])
         self.assertEqual(rel.tolist()[3:], [2, 1, 0])
+
+    def test_should_use_direct_ranking_relevance_labels_detects_bucket_labels(self):
+        labels = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+
+        self.assertTrue(_should_use_direct_ranking_relevance_labels(labels, max_unique_values=5))
+
+    def test_should_use_direct_ranking_relevance_labels_rejects_continuous_returns(self):
+        labels = np.array([0.01, 0.02, -0.03, 0.04], dtype=np.float32)
+
+        self.assertFalse(_should_use_direct_ranking_relevance_labels(labels, max_unique_values=5))
+
+    def test_build_direct_ranking_relevance_labels_shifts_to_zero_based(self):
+        labels = np.array([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=np.float32)
+
+        rel = _build_direct_ranking_relevance_labels(labels)
+
+        self.assertEqual(rel.tolist(), [0, 1, 2, 3, 4])
+
+    def test_transform_training_label_series_profit_tanh_suppresses_tails(self):
+        labels = pd.Series([0.01, 0.02, 0.30, -0.03], dtype=float)
+        dates = pd.to_datetime(["2024-01-02"] * 4)
+
+        transformed = transform_training_label_series(
+            labels,
+            dates,
+            {"label": {"train_transform": {"mode": "profit_tanh"}}},
+        )
+
+        self.assertGreater(float(transformed.iloc[2]), float(transformed.iloc[1]))
+        self.assertGreater(float(transformed.iloc[1]), float(transformed.iloc[0]))
+        self.assertLess(float(transformed.iloc[3]), 0.0)
+        self.assertLess(float(transformed.iloc[2]), 1.0)
+
+    def test_transform_training_label_series_profit_tanh_applies_neutral_band(self):
+        labels = pd.Series([0.004, -0.004, 0.03], dtype=float)
+        dates = pd.to_datetime(["2024-01-02"] * 3)
+
+        transformed = transform_training_label_series(
+            labels,
+            dates,
+            {"label": {"train_transform": {"mode": "profit_tanh", "neutral_band": 0.01}}},
+        )
+
+        self.assertAlmostEqual(float(transformed.iloc[0]), 0.0, places=8)
+        self.assertAlmostEqual(float(transformed.iloc[1]), 0.0, places=8)
+        self.assertGreater(float(transformed.iloc[2]), 0.0)
+
+    def test_transform_training_label_series_cross_section_rank_centers_ranks(self):
+        labels = pd.Series([0.10, 0.00, -0.10], dtype=float)
+        dates = pd.to_datetime(["2024-01-02"] * 3)
+
+        transformed = transform_training_label_series(
+            labels,
+            dates,
+            {"label": {"train_transform": {"mode": "cross_section_rank"}}},
+        )
+
+        self.assertEqual(transformed.round(6).tolist(), [0.5, 0.0, -0.5])
+
+    def test_transform_training_label_series_profit_bucket_maps_profit_loss_states(self):
+        labels = pd.Series([-0.06, -0.02, 0.0, 0.02, 0.08], dtype=float)
+        dates = pd.to_datetime(["2024-01-02"] * 5)
+
+        transformed = transform_training_label_series(
+            labels,
+            dates,
+            {
+                "label": {
+                    "train_transform": {
+                        "mode": "profit_bucket",
+                        "neutral_band": 0.01,
+                        "tail_band": 0.05,
+                    }
+                }
+            },
+        )
+
+        self.assertEqual(transformed.tolist(), [-2.0, -1.0, 0.0, 1.0, 2.0])
+
+    def test_transform_training_label_series_profit_bucket_uses_default_tail_band(self):
+        labels = pd.Series([-0.04, -0.015, 0.0, 0.015, 0.04], dtype=float)
+        dates = pd.to_datetime(["2024-01-02"] * 5)
+
+        transformed = transform_training_label_series(
+            labels,
+            dates,
+            {"label": {"train_transform": {"mode": "profit_bucket", "neutral_band": 0.01}}},
+        )
+
+        self.assertEqual(transformed.tolist(), [-2.0, -1.0, 0.0, 1.0, 2.0])
 
     def test_native_lgbm_accepts_ranking_objective(self):
         model = NativeLGBM(loss="rank_xendcg", early_stop=0, num_threads=1, ranking_num_bins=3)

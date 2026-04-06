@@ -9,6 +9,13 @@ import pandas as pd
 DEFAULT_LABEL_ABS_CAP = 0.35
 DEFAULT_SIGNAL_HORIZON = 10
 DEFAULT_LABEL_HORIZONS = (1, 5, 10, 20)
+DEFAULT_TRAIN_LABEL_TRANSFORM_MODE = "raw"
+SUPPORTED_TRAIN_LABEL_TRANSFORM_MODES = (
+    "raw",
+    "profit_tanh",
+    "profit_bucket",
+    "cross_section_rank",
+)
 
 
 def sanitize_label_array(
@@ -35,6 +42,140 @@ def sanitize_label_series(
         invalid |= np.abs(out.to_numpy(dtype=np.float64, copy=False)) > float(abs_cap)
     out.iloc[np.where(invalid)[0]] = np.nan
     return out
+
+
+def normalize_train_label_transform_mode(value: str | None) -> str:
+    mode = str(value or DEFAULT_TRAIN_LABEL_TRANSFORM_MODE).strip().lower()
+    if mode not in SUPPORTED_TRAIN_LABEL_TRANSFORM_MODES:
+        supported = ", ".join(SUPPORTED_TRAIN_LABEL_TRANSFORM_MODES)
+        raise ValueError(f"unsupported training label transform mode: {mode}. Supported: {supported}")
+    return mode
+
+
+def resolve_train_label_transform_cfg(cfg: dict | None = None) -> dict[str, float | str]:
+    cfg = cfg or {}
+    label_cfg = cfg.get("label", {}) if isinstance(cfg, dict) else {}
+    transform_cfg = label_cfg.get("train_transform", {}) if isinstance(label_cfg, dict) else {}
+    if transform_cfg is None:
+        transform_cfg = {}
+    if not isinstance(transform_cfg, dict):
+        raise ValueError("label.train_transform must be a mapping when provided")
+
+    mode = normalize_train_label_transform_mode(transform_cfg.get("mode"))
+    neutral_band = float(transform_cfg.get("neutral_band", 0.0))
+    if neutral_band < 0:
+        raise ValueError("label.train_transform.neutral_band must be >= 0")
+    default_tail_band = (neutral_band * 3.0) if neutral_band > 0 else 0.03
+    tail_band = float(transform_cfg.get("tail_band", default_tail_band))
+    if tail_band < neutral_band:
+        raise ValueError("label.train_transform.tail_band must be >= label.train_transform.neutral_band")
+    scale_multiplier = float(transform_cfg.get("scale_multiplier", 1.0))
+    if scale_multiplier <= 0:
+        raise ValueError("label.train_transform.scale_multiplier must be > 0")
+    min_scale = float(transform_cfg.get("min_scale", 1e-4))
+    if min_scale <= 0:
+        raise ValueError("label.train_transform.min_scale must be > 0")
+    return {
+        "mode": mode,
+        "neutral_band": neutral_band,
+        "tail_band": tail_band,
+        "scale_multiplier": scale_multiplier,
+        "min_scale": min_scale,
+    }
+
+
+def _compute_group_robust_scale(values: np.ndarray, *, min_scale: float) -> float:
+    finite_values = np.asarray(values, dtype=np.float64)
+    finite_values = finite_values[np.isfinite(finite_values)]
+    if finite_values.size == 0:
+        return float(min_scale)
+
+    median = float(np.median(finite_values))
+    mad = float(np.median(np.abs(finite_values - median)) * 1.4826)
+    if np.isfinite(mad) and mad >= min_scale:
+        return mad
+
+    std = float(np.std(finite_values))
+    if np.isfinite(std) and std >= min_scale:
+        return std
+
+    abs_median = float(np.median(np.abs(finite_values)))
+    if np.isfinite(abs_median) and abs_median >= min_scale:
+        return abs_median
+    return float(min_scale)
+
+
+def _bucketize_profit_labels(
+    values: np.ndarray,
+    *,
+    neutral_band: float,
+    tail_band: float,
+) -> np.ndarray:
+    out = np.zeros(values.shape, dtype=np.float64)
+    out[values <= -tail_band] = -2.0
+    out[(values > -tail_band) & (values < -neutral_band)] = -1.0
+    out[(values >= neutral_band) & (values < tail_band)] = 1.0
+    out[values >= tail_band] = 2.0
+    return out
+
+
+def transform_training_label_series(
+    labels: pd.Series,
+    dates: np.ndarray | pd.Series,
+    cfg: dict | None = None,
+) -> pd.Series:
+    """Apply an optional training-only label transform while preserving NaNs."""
+    transform_cfg = resolve_train_label_transform_cfg(cfg)
+    mode = str(transform_cfg["mode"])
+    out = labels.astype(float).copy()
+    if out.empty or mode == "raw":
+        return out
+
+    date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    if len(date_series) != len(out):
+        raise ValueError("labels and dates must have the same length")
+
+    values = out.to_numpy(dtype=np.float64, copy=True)
+    neutral_band = float(transform_cfg["neutral_band"])
+    tail_band = float(transform_cfg["tail_band"])
+    scale_multiplier = float(transform_cfg["scale_multiplier"])
+    min_scale = float(transform_cfg["min_scale"])
+
+    for _, idx in date_series.groupby(date_series, sort=False).groups.items():
+        group_idx = np.asarray(idx, dtype=np.int64)
+        group_values = values[group_idx]
+        finite_mask = np.isfinite(group_values)
+        if not finite_mask.any():
+            continue
+        finite_values = group_values[finite_mask]
+
+        if mode == "cross_section_rank":
+            if finite_values.size == 1:
+                group_out = np.zeros(1, dtype=np.float64)
+            else:
+                ranks = (
+                    pd.Series(finite_values)
+                    .rank(method="average", ascending=True)
+                    .to_numpy(dtype=np.float64, copy=False)
+                )
+                group_out = ((ranks - 1.0) / (finite_values.size - 1.0)) - 0.5
+        elif mode == "profit_tanh":
+            scale = _compute_group_robust_scale(finite_values, min_scale=min_scale) * scale_multiplier
+            adjusted = np.sign(finite_values) * np.maximum(np.abs(finite_values) - neutral_band, 0.0)
+            group_out = np.tanh(adjusted / scale)
+        elif mode == "profit_bucket":
+            group_out = _bucketize_profit_labels(
+                finite_values,
+                neutral_band=neutral_band,
+                tail_band=tail_band,
+            )
+        else:
+            raise ValueError(f"Unsupported training label transform mode: {mode}")
+
+        group_values[finite_mask] = group_out
+        values[group_idx] = group_values
+
+    return pd.Series(values, index=out.index, name=out.name, dtype=float)
 
 
 def normalize_signal_horizon(value: int | str | None, *, default: int = DEFAULT_SIGNAL_HORIZON) -> int:

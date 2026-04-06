@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.config_loader import load_config
 from src.feature_profiles import get_native_factor_store_dir
+from src.label_utils import normalize_train_label_transform_mode
 
 try:
     from src.data_source import resolve_data_source_name
@@ -90,6 +91,13 @@ TOP_LEVEL_SCHEMA = {
         "signal_horizon": None,
         "horizons": None,
         "horizon": None,
+        "train_transform": {
+            "mode": None,
+            "neutral_band": None,
+            "tail_band": None,
+            "scale_multiplier": None,
+            "min_scale": None,
+        },
     },
     "rolling": {
         "retrain_step": None,
@@ -292,6 +300,29 @@ def validate_training_config(
         raise ValueError("label.horizons must include 1 for realized backtest returns")
     if signal_horizon not in horizon_values:
         raise ValueError("label.signal_horizon must be included in label.horizons")
+    train_transform_cfg = label_cfg.get("train_transform")
+    if train_transform_cfg is not None:
+        if not isinstance(train_transform_cfg, dict):
+            raise ValueError("label.train_transform must be a mapping")
+        mode = normalize_train_label_transform_mode(train_transform_cfg.get("mode"))
+        train_transform_cfg["mode"] = mode
+        neutral_band = float(train_transform_cfg.get("neutral_band", 0.0))
+        if neutral_band < 0:
+            raise ValueError("label.train_transform.neutral_band must be >= 0")
+        train_transform_cfg["neutral_band"] = neutral_band
+        default_tail_band = (neutral_band * 3.0) if neutral_band > 0 else 0.03
+        tail_band = float(train_transform_cfg.get("tail_band", default_tail_band))
+        if tail_band < neutral_band:
+            raise ValueError("label.train_transform.tail_band must be >= label.train_transform.neutral_band")
+        train_transform_cfg["tail_band"] = tail_band
+        scale_multiplier = float(train_transform_cfg.get("scale_multiplier", 1.0))
+        if scale_multiplier <= 0:
+            raise ValueError("label.train_transform.scale_multiplier must be > 0")
+        train_transform_cfg["scale_multiplier"] = scale_multiplier
+        min_scale = float(train_transform_cfg.get("min_scale", 1e-4))
+        if min_scale <= 0:
+            raise ValueError("label.train_transform.min_scale must be > 0")
+        train_transform_cfg["min_scale"] = min_scale
 
     rolling_cfg = cfg.get("rolling", {})
     retrain_step = _expect_positive_int(rolling_cfg.get("retrain_step"), "rolling.retrain_step")

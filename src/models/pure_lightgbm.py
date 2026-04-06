@@ -137,6 +137,39 @@ def _build_ranking_relevance_labels(
     return relevance
 
 
+def _build_direct_ranking_relevance_labels(labels: np.ndarray | pd.Series) -> np.ndarray:
+    values = np.asarray(labels, dtype=np.float32)
+    relevance = np.zeros(len(values), dtype=np.int32)
+    finite_mask = np.isfinite(values)
+    if not finite_mask.any():
+        return relevance
+
+    finite_values = values[finite_mask]
+    rounded = np.rint(finite_values)
+    if not np.allclose(finite_values, rounded, atol=1e-6):
+        raise ValueError("direct ranking relevance labels must be integer-like")
+    min_value = int(rounded.min())
+    shifted = rounded.astype(np.int32, copy=False) - min_value
+    relevance[finite_mask] = shifted
+    return relevance
+
+
+def _should_use_direct_ranking_relevance_labels(
+    labels: np.ndarray | pd.Series,
+    *,
+    max_unique_values: int,
+) -> bool:
+    values = np.asarray(labels, dtype=np.float32)
+    finite_values = values[np.isfinite(values)]
+    if finite_values.size == 0:
+        return False
+    rounded = np.rint(finite_values)
+    if not np.allclose(finite_values, rounded, atol=1e-6):
+        return False
+    unique_values = np.unique(rounded.astype(np.int32, copy=False))
+    return 2 <= unique_values.size <= int(max_unique_values)
+
+
 class NativeLGBM:
     """Native LightGBM wrapper mimicking the interface expected by our pipeline."""
 
@@ -248,11 +281,18 @@ class NativeLGBM:
             if train_dates is None:
                 raise ValueError("train_dates is required when using a ranking objective")
             X_train_use, y_train_use, train_dates_use = _sort_frame_by_dates(X_train, y_train, train_dates)
-            train_label_values = _build_ranking_relevance_labels(
-                y_train_use.to_numpy(dtype=np.float32, copy=False),
-                train_dates_use,
-                num_bins=self.ranking_num_bins,
-            )
+            train_label_array = y_train_use.to_numpy(dtype=np.float32, copy=False)
+            if _should_use_direct_ranking_relevance_labels(
+                train_label_array,
+                max_unique_values=self.ranking_num_bins,
+            ):
+                train_label_values = _build_direct_ranking_relevance_labels(train_label_array)
+            else:
+                train_label_values = _build_ranking_relevance_labels(
+                    train_label_array,
+                    train_dates_use,
+                    num_bins=self.ranking_num_bins,
+                )
             train_group = _compute_ranking_groups(train_dates_use)
 
         if self.train_weight_half_life is not None:
@@ -285,11 +325,18 @@ class NativeLGBM:
                 if valid_dates is None:
                     raise ValueError("valid_dates is required when using a ranking objective with validation")
                 X_valid_use, y_valid_use, valid_dates_use = _sort_frame_by_dates(X_valid, y_valid, valid_dates)
-                valid_label_values = _build_ranking_relevance_labels(
-                    y_valid_use.to_numpy(dtype=np.float32, copy=False),
-                    valid_dates_use,
-                    num_bins=self.ranking_num_bins,
-                )
+                valid_label_array = y_valid_use.to_numpy(dtype=np.float32, copy=False)
+                if _should_use_direct_ranking_relevance_labels(
+                    valid_label_array,
+                    max_unique_values=self.ranking_num_bins,
+                ):
+                    valid_label_values = _build_direct_ranking_relevance_labels(valid_label_array)
+                else:
+                    valid_label_values = _build_ranking_relevance_labels(
+                        valid_label_array,
+                        valid_dates_use,
+                        num_bins=self.ranking_num_bins,
+                    )
                 valid_group = _compute_ranking_groups(valid_dates_use)
             dvalid = lgb.Dataset(
                 X_valid_use.values,

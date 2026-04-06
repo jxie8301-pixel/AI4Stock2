@@ -6,6 +6,7 @@ model:
 lgbm:
   loss: rank_xendcg
   ranking_num_bins: 5
+  early_stopping_metric: daily_rank_ic
   learning_rate: 0.05
   num_boost_round: 1000
   early_stop: 10

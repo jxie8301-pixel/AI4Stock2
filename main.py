@@ -16,7 +16,12 @@ from src.feature_selection import (
 from src.backtest_trace import parse_trace_dates_arg, save_trace_artifacts, select_trace_dates
 from src.data_source import resolve_data_source_name
 from src.feature_profiles import get_native_factor_store_dir
-from src.label_utils import get_label_column_name, resolve_signal_horizon, sanitize_label_series
+from src.label_utils import (
+    get_label_column_name,
+    resolve_signal_horizon,
+    sanitize_label_series,
+    transform_training_label_series,
+)
 from src.model_config import get_lgbm_config
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 
@@ -168,6 +173,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         y_valid_series = pd.Series(y[valid_valid_mask])
         train_dates = pd.to_datetime(dt_index[valid_train_mask]).reset_index(drop=True)
         valid_dates = pd.to_datetime(dt_index[valid_valid_mask]).reset_index(drop=True)
+        y_train_series = transform_training_label_series(y_train_series, train_dates, cfg)
+        y_valid_series = transform_training_label_series(y_valid_series, valid_dates, cfg)
         X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
         X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
         
@@ -216,11 +223,13 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         seq_symbol_ids, unique_symbols = pd.factorize(seq_symbols_str, sort=True)
         id_to_symbol = {idx: symbol for idx, symbol in enumerate(unique_symbols)}
         X = seq_frame[selected_feature_names].to_numpy(dtype=np.float32, copy=True)
-        y = seq_frame["label"].to_numpy(dtype=np.float32, copy=True)
+        raw_signal_y = seq_frame["label"].to_numpy(dtype=np.float32, copy=True)
+        seq_train_labels = transform_training_label_series(seq_frame["label"], seq_frame["date"], cfg)
+        y = seq_train_labels.to_numpy(dtype=np.float32, copy=True)
         if backtest_label_column in seq_frame.columns:
             seq_backtest_y = sanitize_label_series(seq_frame[backtest_label_column]).to_numpy(dtype=np.float32, copy=True)
         else:
-            seq_backtest_y = y.copy()
+            seq_backtest_y = raw_signal_y.copy()
         dt_index = pd.to_datetime(seq_frame["date"])
         train_mask = (dt_index >= pd.Timestamp(cfg["time"]["train"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["train"][1]))
         valid_mask = (dt_index >= pd.Timestamp(cfg["time"]["valid"][0])) & (dt_index <= pd.Timestamp(cfg["time"]["valid"][1]))
@@ -305,7 +314,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         preds_arr = np.concatenate(all_preds)
         pred_dates = pd.to_datetime(seq_dates[test_dataset.valid_end_indices])
         pred_symbols = pd.Series([id_to_symbol[sym] for sym in seq_symbol_ids[test_dataset.valid_end_indices]])
-        pred_labels = y[test_dataset.valid_end_indices]
+        pred_labels = raw_signal_y[test_dataset.valid_end_indices]
         pred_backtest_labels = seq_backtest_y[test_dataset.valid_end_indices]
 
     pred_series = pd.Series(

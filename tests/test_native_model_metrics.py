@@ -122,8 +122,36 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertLess(float(weights[0]), float(weights[1]))
         self.assertLess(float(weights[1]), float(weights[2]))
 
+    def test_compute_time_decay_weights_floor_preserves_far_history_weight(self):
+        dates = pd.to_datetime(["2024-01-01", "2024-01-11", "2024-01-31"])
+
+        pure_exp = _compute_time_decay_weights(dates, half_life=10, floor=0.0)
+        floored = _compute_time_decay_weights(dates, half_life=10, floor=0.2)
+
+        self.assertAlmostEqual(float(floored.mean()), 1.0, places=6)
+        self.assertLess(float(floored[0]), float(floored[1]))
+        self.assertLess(float(floored[1]), float(floored[2]))
+        self.assertGreater(float(floored[0]), float(pure_exp[0]))
+        self.assertLess(float(floored[2]), float(pure_exp[2]))
+
     def test_native_lgbm_accepts_time_decay_training_weights(self):
         model = NativeLGBM(loss="mse", early_stop=0, num_threads=1, train_weight_half_life=10)
+        X_train = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [1.0, 1.0, 0.0, 0.0]})
+        y_train = pd.Series([0.0, 0.1, 0.2, 0.3])
+        train_dates = pd.to_datetime(["2024-01-01", "2024-01-05", "2024-01-10", "2024-01-20"])
+
+        model.fit(X_train, y_train, train_dates=train_dates)
+
+        self.assertIsNotNone(model.model)
+
+    def test_native_lgbm_accepts_time_decay_floor_training_weights(self):
+        model = NativeLGBM(
+            loss="mse",
+            early_stop=0,
+            num_threads=1,
+            train_weight_half_life=10,
+            train_weight_floor=0.2,
+        )
         X_train = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [1.0, 1.0, 0.0, 0.0]})
         y_train = pd.Series([0.0, 0.1, 0.2, 0.3])
         train_dates = pd.to_datetime(["2024-01-01", "2024-01-05", "2024-01-10", "2024-01-20"])

@@ -87,6 +87,33 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lgbm.train_weight_half_life must be > 0"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_accepts_train_weight_floor(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["train_weight_half_life"] = 60
+        cfg["lgbm"]["train_weight_floor"] = 0.2
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["lgbm"]["train_weight_floor"], 0.2)
+
+    def test_validate_training_config_rejects_train_weight_floor_without_half_life(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["train_weight_floor"] = 0.2
+
+        with self.assertRaisesRegex(ValueError, "requires lgbm.train_weight_half_life"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_invalid_train_weight_floor(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["train_weight_half_life"] = 60
+        cfg["lgbm"]["train_weight_floor"] = 1.0
+
+        with self.assertRaisesRegex(ValueError, "lgbm.train_weight_floor must be in \\[0, 1\\)"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_accepts_lgbm_early_stopping_metric(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg.setdefault("lgbm", {})

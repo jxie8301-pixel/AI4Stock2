@@ -18,6 +18,7 @@ results/
 *.log
 *.parquet
 *.csv
+*.sh
 dump_bin.py
 get_data.py
 

@@ -70,6 +70,7 @@ TOP_LEVEL_SCHEMA = {
         "early_stopping_metric": None,
         "early_stopping_min_delta": None,
         "train_weight_half_life": None,
+        "train_weight_floor": None,
         "ranking_num_bins": None,
         "log_evaluation_period": None,
         "colsample_bytree": None,
@@ -537,6 +538,14 @@ def validate_training_config(
         train_weight_half_life = lgbm_cfg.get("train_weight_half_life")
         if train_weight_half_life is not None:
             _expect_positive_float(train_weight_half_life, "lgbm.train_weight_half_life")
+        train_weight_floor = lgbm_cfg.get("train_weight_floor")
+        if train_weight_floor is not None:
+            train_weight_floor = float(train_weight_floor)
+            if train_weight_half_life is None:
+                raise ValueError("lgbm.train_weight_floor requires lgbm.train_weight_half_life")
+            if train_weight_floor < 0.0 or train_weight_floor >= 1.0:
+                raise ValueError("lgbm.train_weight_floor must be in [0, 1)")
+            lgbm_cfg["train_weight_floor"] = train_weight_floor
         ranking_num_bins = lgbm_cfg.get("ranking_num_bins")
         if ranking_num_bins is not None:
             ranking_num_bins = _expect_positive_int(ranking_num_bins, "lgbm.ranking_num_bins")

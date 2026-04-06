@@ -67,11 +67,17 @@ The project now needs three baseline concepts instead of one:
    - `core_v4_techlite`
    - Use this as the default reference feature set for ablation and diagnostics.
 2. Offensive production baseline
-   - `core_v4_techlite` + the current primary strategy branch (`score_zscore_top20`)
-   - Use this as the main benchmark for new feature profiles and model objectives.
-3. Defensive production baseline
-   - `core_v4_techlite` + the current defensive strategy branch (`exp_zscore_top20`)
-   - Use this to evaluate whether a new feature set improves smoothness and downside control.
+   - `core_v4_techlite_tushare_plus` + `core_v4_lgbm_ranker_default_10x20x10`
+   - Current candidate stack: `top8_drop2 + score_softmax + rank_pct + intraperiod_exit(rank_pct<=0.45)`
+   - Use this as the high-return benchmark for model, weighting, and industry-aware feature research.
+3. Stable production baseline
+   - `core_v4_techlite_tushare_plus` + `core_v4_lgbm_ranker_default_10x20x10`
+   - Current candidate stack: `top10_drop2 + score_softmax + rank_pct + intraperiod_exit(rank_pct<=0.45)`
+   - Use this as the primary benchmark for new objectives, training-time weighting, and regime-adaptation experiments.
+4. Research-only defensive branch
+   - `selective-price-confirm` variants remain research branches only
+   - Best observed shape so far: `top10_drop2 + rank_pct exit 0.45 + pcma5_mr5`
+   - This branch improved local exit quality but did not beat the stable baseline at the portfolio level, so it should not be promoted.
 
 The old `top30 + equal weight + no score transform + no intraperiod exit` rolling setup
 should remain available as a simple historical reference, but it is no longer the main

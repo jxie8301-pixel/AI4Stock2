@@ -53,11 +53,18 @@ def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray)
 def _compute_time_decay_weights(
     dates: np.ndarray | pd.Series,
     half_life: float,
+    floor: float = 0.0,
 ) -> np.ndarray:
-    """Return exponential time-decay weights normalized to mean 1."""
+    """Return exp-with-floor time-decay weights normalized to mean 1.
+
+    ``floor=0`` reduces to the legacy pure exponential schedule.
+    """
     half_life = float(half_life)
     if half_life <= 0:
         raise ValueError("half_life must be > 0")
+    floor = float(floor)
+    if floor < 0.0 or floor >= 1.0:
+        raise ValueError("floor must be in [0, 1)")
 
     dt = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
     if dt.empty:
@@ -65,7 +72,8 @@ def _compute_time_decay_weights(
 
     latest = dt.max()
     age_days = (latest - dt).dt.days.clip(lower=0).to_numpy(dtype=np.float64, copy=False)
-    weights = np.power(0.5, age_days / half_life)
+    exp_weights = np.power(0.5, age_days / half_life)
+    weights = floor + (1.0 - floor) * exp_weights
     mean_weight = float(weights.mean()) if weights.size > 0 else 1.0
     if not np.isfinite(mean_weight) or np.isclose(mean_weight, 0.0):
         return np.ones(len(dt), dtype=np.float32)
@@ -152,6 +160,7 @@ class NativeLGBM:
         alpha: float = 0.9,
         seed: int = 42,
         train_weight_half_life: float | None = None,
+        train_weight_floor: float = 0.0,
         ranking_num_bins: int = 5,
         early_stopping_metric: str = "default",
         **kwargs
@@ -206,6 +215,7 @@ class NativeLGBM:
         self.train_weight_half_life = (
             None if train_weight_half_life is None else float(train_weight_half_life)
         )
+        self.train_weight_floor = float(train_weight_floor)
         self.model = None
         self.evals_result_: dict[str, dict[str, list[float]]] = {}
         self.best_iteration_: int | None = None
@@ -246,7 +256,11 @@ class NativeLGBM:
             train_group = _compute_ranking_groups(train_dates_use)
 
         if self.train_weight_half_life is not None:
-            train_weight = _compute_time_decay_weights(train_dates_use, self.train_weight_half_life)
+            train_weight = _compute_time_decay_weights(
+                train_dates_use,
+                self.train_weight_half_life,
+                floor=self.train_weight_floor,
+            )
 
         dtrain = lgb.Dataset(
             X_train_use.values,

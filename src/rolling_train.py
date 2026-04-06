@@ -166,6 +166,7 @@ def _run_lgbm_window(
             y_valid_series,
             train_dates=train_dates,
             valid_dates=valid_dates,
+            valid_eval_labels=raw_y_valid_series,
         )
         if save_models:
             with open(model_path, "wb") as f:

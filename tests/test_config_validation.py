@@ -117,11 +117,11 @@ class ConfigValidationTest(unittest.TestCase):
     def test_validate_training_config_accepts_lgbm_early_stopping_metric(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg.setdefault("lgbm", {})
-        cfg["lgbm"]["early_stopping_metric"] = "daily_rank_ic"
+        cfg["lgbm"]["early_stopping_metric"] = "valid_topk_label_mean"
 
         validated = validate_training_config(cfg, check_paths=False)
 
-        self.assertEqual(validated["lgbm"]["early_stopping_metric"], "daily_rank_ic")
+        self.assertEqual(validated["lgbm"]["early_stopping_metric"], "valid_topk_label_mean")
 
     def test_validate_training_config_rejects_invalid_lgbm_early_stopping_metric(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
@@ -130,6 +130,15 @@ class ConfigValidationTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "lgbm.early_stopping_metric must be one of"):
             validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_accepts_lgbm_validation_topk(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["validation_topk"] = 12
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["lgbm"]["validation_topk"], 12)
 
     def test_validate_training_config_accepts_label_train_transform(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")

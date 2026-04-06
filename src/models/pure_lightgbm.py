@@ -19,6 +19,74 @@ def _daily_rank_ic_metric_from_labels(preds: np.ndarray, labels: np.ndarray, dat
     return _daily_corr_metric_from_labels(preds, labels, dates, method="spearman", metric_name="daily_rank_ic")
 
 
+def _topk_label_metric_from_labels(
+    preds: np.ndarray,
+    labels: np.ndarray,
+    dates: np.ndarray,
+    *,
+    topk: int,
+    metric_name: str,
+    excess: bool,
+):
+    topk = max(1, int(topk))
+    frame = pd.DataFrame(
+        {
+            "pred": np.asarray(preds, dtype=np.float32),
+            "label": np.asarray(labels, dtype=np.float32),
+            "date": pd.to_datetime(np.asarray(dates)),
+        }
+    ).dropna()
+    if frame.empty:
+        return metric_name, 0.0, True
+
+    values: list[float] = []
+    for _, group in frame.groupby("date", sort=True):
+        ranked = group.sort_values("pred", ascending=False, kind="stable").head(topk)
+        if ranked.empty:
+            continue
+        selected_mean = float(ranked["label"].mean())
+        if excess:
+            selected_mean -= float(group["label"].mean())
+        values.append(selected_mean)
+    if not values:
+        return metric_name, 0.0, True
+    return metric_name, float(np.mean(values)), True
+
+
+def _valid_topk_label_mean_metric_from_labels(
+    preds: np.ndarray,
+    labels: np.ndarray,
+    dates: np.ndarray,
+    *,
+    topk: int,
+):
+    return _topk_label_metric_from_labels(
+        preds,
+        labels,
+        dates,
+        topk=topk,
+        metric_name="valid_topk_label_mean",
+        excess=False,
+    )
+
+
+def _valid_topk_excess_mean_metric_from_labels(
+    preds: np.ndarray,
+    labels: np.ndarray,
+    dates: np.ndarray,
+    *,
+    topk: int,
+):
+    return _topk_label_metric_from_labels(
+        preds,
+        labels,
+        dates,
+        topk=topk,
+        metric_name="valid_topk_excess_mean",
+        excess=True,
+    )
+
+
 def _daily_corr_metric_from_labels(
     preds: np.ndarray,
     labels: np.ndarray,
@@ -195,6 +263,7 @@ class NativeLGBM:
         train_weight_half_life: float | None = None,
         train_weight_floor: float = 0.0,
         ranking_num_bins: int = 5,
+        validation_topk: int = 10,
         early_stopping_metric: str = "default",
         **kwargs
     ):
@@ -219,9 +288,19 @@ class NativeLGBM:
         self.eval_metric = eval_metric or default_metric
         self.is_ranking_objective = objective in {"lambdarank", "rank_xendcg"}
         self.ranking_num_bins = max(2, int(ranking_num_bins))
+        self.validation_topk = max(1, int(validation_topk))
         self.early_stopping_metric = str(early_stopping_metric or "default").strip().lower()
-        if self.early_stopping_metric not in {"default", "daily_ic", "daily_rank_ic"}:
-            raise ValueError("early_stopping_metric must be one of: default, daily_ic, daily_rank_ic")
+        if self.early_stopping_metric not in {
+            "default",
+            "daily_ic",
+            "daily_rank_ic",
+            "valid_topk_label_mean",
+            "valid_topk_excess_mean",
+        }:
+            raise ValueError(
+                "early_stopping_metric must be one of: "
+                "default, daily_ic, daily_rank_ic, valid_topk_label_mean, valid_topk_excess_mean"
+            )
         metric_name = self.eval_metric if self.early_stopping_metric == "default" else "None"
         self.params = {
             "objective": objective,
@@ -262,6 +341,7 @@ class NativeLGBM:
         y_valid: pd.Series = None,
         train_dates: np.ndarray | pd.Series | None = None,
         valid_dates: np.ndarray | None = None,
+        valid_eval_labels: pd.Series | None = None,
     ):
         """Fit the LightGBM model."""
         feature_names = X_train.columns.tolist()
@@ -348,9 +428,28 @@ class NativeLGBM:
             valid_sets = [dvalid]
             valid_names = ["valid"]
             if valid_dates is not None:
-                raw_valid_labels = y_valid_use.to_numpy(dtype=np.float32, copy=False) if self.is_ranking_objective else y_valid.to_numpy(dtype=np.float32, copy=False)
-                raw_valid_dates = valid_dates_use if self.is_ranking_objective else valid_dates
-                def _feval(preds, data, *, labels=raw_valid_labels, dates=raw_valid_dates, primary=self.early_stopping_metric):
+                if valid_eval_labels is not None:
+                    raw_valid_eval_series = pd.Series(valid_eval_labels).reset_index(drop=True)
+                    if len(raw_valid_eval_series) != len(X_valid):
+                        raise ValueError("valid_eval_labels length must match X_valid rows")
+                else:
+                    raw_valid_eval_series = y_valid.reset_index(drop=True)
+                if self.is_ranking_objective:
+                    order = np.argsort(pd.to_datetime(pd.Series(valid_dates)).to_numpy(dtype="datetime64[ns]"), kind="stable")
+                    raw_valid_labels = raw_valid_eval_series.iloc[order].to_numpy(dtype=np.float32, copy=False)
+                    raw_valid_dates = valid_dates_use
+                else:
+                    raw_valid_labels = raw_valid_eval_series.to_numpy(dtype=np.float32, copy=False)
+                    raw_valid_dates = valid_dates
+                def _feval(
+                    preds,
+                    data,
+                    *,
+                    labels=raw_valid_labels,
+                    dates=raw_valid_dates,
+                    primary=self.early_stopping_metric,
+                    topk=self.validation_topk,
+                ):
                     if primary == "daily_ic":
                         return [
                             _daily_ic_metric_from_labels(preds, labels, dates),
@@ -358,6 +457,18 @@ class NativeLGBM:
                         ]
                     if primary == "daily_rank_ic":
                         return [
+                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
+                            _daily_ic_metric_from_labels(preds, labels, dates),
+                        ]
+                    if primary == "valid_topk_label_mean":
+                        return [
+                            _valid_topk_label_mean_metric_from_labels(preds, labels, dates, topk=topk),
+                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
+                            _daily_ic_metric_from_labels(preds, labels, dates),
+                        ]
+                    if primary == "valid_topk_excess_mean":
+                        return [
+                            _valid_topk_excess_mean_metric_from_labels(preds, labels, dates, topk=topk),
                             _daily_rank_ic_metric_from_labels(preds, labels, dates),
                             _daily_ic_metric_from_labels(preds, labels, dates),
                         ]

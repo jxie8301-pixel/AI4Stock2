@@ -27,6 +27,8 @@ from src.models.pure_lightgbm import (
     _compute_ranking_groups,
     _daily_ic_metric,
     _daily_rank_ic_metric_from_labels,
+    _valid_topk_excess_mean_metric_from_labels,
+    _valid_topk_label_mean_metric_from_labels,
     _should_use_direct_ranking_relevance_labels,
 )
 from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
@@ -89,6 +91,44 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertTrue(higher_is_better)
         self.assertAlmostEqual(metric_value, 0.0, places=8)
 
+    def test_valid_topk_label_mean_metric_uses_selected_labels(self):
+        predictions = np.array([0.9, 0.8, 0.1, 0.7, 0.6, 0.2], dtype=np.float32)
+        labels = np.array([0.10, -0.05, -0.10, 0.03, 0.02, -0.04], dtype=np.float32)
+        dates = np.array(
+            ["2024-01-02", "2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03", "2024-01-03"],
+            dtype="datetime64[ns]",
+        )
+
+        metric_name, metric_value, higher_is_better = _valid_topk_label_mean_metric_from_labels(
+            predictions,
+            labels,
+            dates,
+            topk=2,
+        )
+
+        self.assertEqual(metric_name, "valid_topk_label_mean")
+        self.assertTrue(higher_is_better)
+        self.assertAlmostEqual(metric_value, 0.025, places=8)
+
+    def test_valid_topk_excess_mean_metric_uses_cross_section_excess(self):
+        predictions = np.array([0.9, 0.8, 0.1, 0.7, 0.6, 0.2], dtype=np.float32)
+        labels = np.array([0.10, -0.05, -0.10, 0.03, 0.02, -0.04], dtype=np.float32)
+        dates = np.array(
+            ["2024-01-02", "2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03", "2024-01-03"],
+            dtype="datetime64[ns]",
+        )
+
+        metric_name, metric_value, higher_is_better = _valid_topk_excess_mean_metric_from_labels(
+            predictions,
+            labels,
+            dates,
+            topk=2,
+        )
+
+        self.assertEqual(metric_name, "valid_topk_excess_mean")
+        self.assertTrue(higher_is_better)
+        self.assertAlmostEqual(metric_value, 0.031666667, places=8)
+
     def test_native_lgbm_custom_early_stopping_metric_disables_builtin_metric(self):
         model = NativeLGBM(loss="huber", early_stopping_metric="daily_rank_ic")
 
@@ -98,6 +138,13 @@ class NativeModelMetricsTest(unittest.TestCase):
     def test_native_lgbm_rejects_unknown_early_stopping_metric(self):
         with self.assertRaisesRegex(ValueError, "early_stopping_metric must be one of"):
             NativeLGBM(loss="huber", early_stopping_metric="demo")
+
+    def test_native_lgbm_accepts_topk_based_early_stopping_metrics(self):
+        label_model = NativeLGBM(loss="rank_xendcg", early_stopping_metric="valid_topk_label_mean")
+        excess_model = NativeLGBM(loss="rank_xendcg", early_stopping_metric="valid_topk_excess_mean")
+
+        self.assertEqual(label_model.early_stopping_metric, "valid_topk_label_mean")
+        self.assertEqual(excess_model.early_stopping_metric, "valid_topk_excess_mean")
 
     def test_native_lgbm_can_export_feature_importance_csv(self):
         model = NativeLGBM(loss="mse", early_stop=0, num_threads=1)
@@ -343,6 +390,7 @@ class NativeModelMetricsTest(unittest.TestCase):
     def test_get_lgbm_config_uses_dedicated_block(self):
         cfg = {
             "model": {"early_stop": 12, "n_jobs": 4, "loss": "pearson"},
+            "strategy": {"topk": 7},
             "lgbm": {"loss": "huber", "num_threads": 6},
         }
 
@@ -350,6 +398,7 @@ class NativeModelMetricsTest(unittest.TestCase):
 
         self.assertEqual(lgbm_cfg["loss"], "huber")
         self.assertEqual(lgbm_cfg["num_threads"], 6)
+        self.assertEqual(lgbm_cfg["validation_topk"], 7)
         self.assertEqual(lgbm_cfg["early_stop"], 12)
 
     def test_align_prediction_label_pairs_drops_nan_rows(self):

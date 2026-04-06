@@ -73,6 +73,7 @@ TOP_LEVEL_SCHEMA = {
         "train_weight_half_life": None,
         "train_weight_floor": None,
         "ranking_num_bins": None,
+        "validation_topk": None,
         "log_evaluation_period": None,
         "colsample_bytree": None,
         "subsample": None,
@@ -560,8 +561,17 @@ def validate_training_config(
         if not isinstance(lgbm_cfg, dict):
             raise ValueError("lgbm config block is required when model.name == 'lgbm'")
         early_stopping_metric = str(lgbm_cfg.get("early_stopping_metric", "default") or "default").strip().lower()
-        if early_stopping_metric not in {"default", "daily_ic", "daily_rank_ic"}:
-            raise ValueError("lgbm.early_stopping_metric must be one of: default, daily_ic, daily_rank_ic")
+        if early_stopping_metric not in {
+            "default",
+            "daily_ic",
+            "daily_rank_ic",
+            "valid_topk_label_mean",
+            "valid_topk_excess_mean",
+        }:
+            raise ValueError(
+                "lgbm.early_stopping_metric must be one of: "
+                "default, daily_ic, daily_rank_ic, valid_topk_label_mean, valid_topk_excess_mean"
+            )
         lgbm_cfg["early_stopping_metric"] = early_stopping_metric
         _expect_positive_int(lgbm_cfg.get("num_boost_round"), "lgbm.num_boost_round")
         _expect_nonnegative_int(lgbm_cfg.get("early_stop"), "lgbm.early_stop")
@@ -582,6 +592,9 @@ def validate_training_config(
             ranking_num_bins = _expect_positive_int(ranking_num_bins, "lgbm.ranking_num_bins")
             if ranking_num_bins > 31:
                 raise ValueError("lgbm.ranking_num_bins must be <= 31")
+        validation_topk = lgbm_cfg.get("validation_topk")
+        if validation_topk is not None:
+            lgbm_cfg["validation_topk"] = _expect_positive_int(validation_topk, "lgbm.validation_topk")
         _expect_positive_int(lgbm_cfg.get("log_evaluation_period"), "lgbm.log_evaluation_period")
         _expect_positive_int(lgbm_cfg.get("num_threads"), "lgbm.num_threads")
         _expect_positive_int(lgbm_cfg.get("num_leaves"), "lgbm.num_leaves")

@@ -170,7 +170,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         X_train_df = factor_frame.loc[valid_train_mask, selected_feature_names].reset_index(drop=True)
         y_train_series = pd.Series(y[valid_train_mask])
         X_valid_df = factor_frame.loc[valid_valid_mask, selected_feature_names].reset_index(drop=True)
-        y_valid_series = pd.Series(y[valid_valid_mask])
+        raw_y_valid_series = pd.Series(y[valid_valid_mask])
+        y_valid_series = raw_y_valid_series.copy()
         train_dates = pd.to_datetime(dt_index[valid_train_mask]).reset_index(drop=True)
         valid_dates = pd.to_datetime(dt_index[valid_valid_mask]).reset_index(drop=True)
         y_train_series = transform_training_label_series(y_train_series, train_dates, cfg)
@@ -189,6 +190,8 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
                 fit_kwargs["train_dates"] = train_dates
             if "valid_dates" in fit_signature.parameters:
                 fit_kwargs["valid_dates"] = valid_dates
+            if "valid_eval_labels" in fit_signature.parameters:
+                fit_kwargs["valid_eval_labels"] = raw_y_valid_series
             model.fit(
                 X_train_df,
                 y_train_series,

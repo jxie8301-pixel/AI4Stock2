@@ -80,8 +80,10 @@ def run_native_backtest(
     score_transform: str = DEFAULT_SCORE_TRANSFORM,
     score_zscore_clip: float = 3.0,
     max_weight: float | None = None,
+    max_industry_weight: float | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
+    instrument_groups: pd.Series | dict[str, str] | None = None,
     benchmark_returns: pd.Series | None = None,
     market_data: pd.DataFrame | None = None,
     risk_control: dict[str, object] | None = None,
@@ -100,6 +102,8 @@ def run_native_backtest(
     min_score = normalize_min_score(min_score)
     risk_degree = validate_risk_degree(float(risk_degree), "risk_degree")
     score_zscore_clip = max(float(score_zscore_clip), 0.0)
+    if max_industry_weight is not None:
+        max_industry_weight = validate_risk_degree(float(max_industry_weight), "max_industry_weight")
     intraperiod_exit_cfg = normalize_intraperiod_exit_config(intraperiod_exit)
     if risk_control is not None and dynamic_risk is not None:
         raise ValueError("Provide only one of risk_control or dynamic_risk")
@@ -175,6 +179,21 @@ def run_native_backtest(
     trace_dates_norm = {pd.Timestamp(date) for date in trace_dates} if trace_dates is not None else None
     instruments = pred_matrix.columns
     instrument_to_col = {str(symbol): idx for idx, symbol in enumerate(instruments)}
+    instrument_group_series: pd.Series | None = None
+    if instrument_groups is not None:
+        if isinstance(instrument_groups, pd.Series):
+            instrument_group_series = instrument_groups.copy()
+        else:
+            instrument_group_series = pd.Series(instrument_groups, dtype=object)
+        instrument_group_series.index = instrument_group_series.index.map(str)
+        instrument_group_series = instrument_group_series.reindex(instruments.map(str))
+        instrument_group_series.index = instruments
+        fallback_groups = pd.Series(
+            [f"__ungrouped__{symbol}" for symbol in instrument_group_series.index.astype(str)],
+            index=instrument_group_series.index,
+            dtype=object,
+        )
+        instrument_group_series = instrument_group_series.fillna(fallback_groups).astype(str)
     label_values = label_matrix.to_numpy(dtype=float, copy=False)
     bench_values = label_matrix.mean(axis=1, skipna=True).fillna(0.0).to_numpy(dtype=float, copy=False)
     strategy_score_values = strategy_score_matrix.to_numpy(dtype=float, copy=False)
@@ -285,6 +304,8 @@ def run_native_backtest(
                 target_holdings,
                 weighting=weighting,
                 max_weight=max_weight,
+                group_labels=instrument_group_series,
+                max_group_weight=max_industry_weight,
             )
             locked_value = float(sum(holdings.get(stock, 0.0) for stock in locked_holdings))
             tradable_budget = max(start_value * current_risk_degree - locked_value, 0.0)

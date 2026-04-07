@@ -150,12 +150,69 @@ def cap_target_weights(weights: pd.Series, max_weight: float | None) -> pd.Serie
     return final
 
 
+def cap_group_weights(
+    weights: pd.Series,
+    *,
+    group_labels: pd.Series | None,
+    max_group_weight: float | None,
+) -> pd.Series:
+    if weights.empty:
+        return weights.astype(float)
+    if max_group_weight is None or group_labels is None:
+        return weights.astype(float)
+
+    normalized = weights.astype(float).copy()
+    total = float(normalized.sum())
+    if total <= 0:
+        return pd.Series(0.0, index=normalized.index, dtype=float)
+    normalized /= total
+
+    cap = float(max_group_weight)
+    final = pd.Series(0.0, index=normalized.index, dtype=float)
+    remaining_idx = normalized.index
+    remaining_budget = 1.0
+
+    while len(remaining_idx) > 0 and remaining_budget > 1e-12:
+        active = normalized.loc[remaining_idx]
+        active_total = float(active.sum())
+        if active_total <= 0:
+            break
+        active = active / active_total * remaining_budget
+        active_groups = group_labels.reindex(active.index)
+        group_totals = active.groupby(active_groups, sort=False).sum()
+        over_groups = group_totals[group_totals > cap + 1e-12]
+        if over_groups.empty:
+            final.loc[active.index] = active
+            break
+
+        consumed_budget = 0.0
+        locked_members: list[str] = []
+        for group_name in over_groups.index.tolist():
+            member_idx = active_groups[active_groups == group_name].index
+            member_weights = active.loc[member_idx]
+            member_total = float(member_weights.sum())
+            if member_total <= 0:
+                locked_members.extend(member_idx.tolist())
+                continue
+            scaled = member_weights / member_total * cap
+            final.loc[member_idx] = scaled
+            consumed_budget += float(scaled.sum())
+            locked_members.extend(member_idx.tolist())
+
+        remaining_budget = max(remaining_budget - consumed_budget, 0.0)
+        remaining_idx = remaining_idx.difference(pd.Index(locked_members, dtype=object), sort=False)
+
+    return final
+
+
 def compute_target_weights(
     transformed_scores: pd.Series,
     target_holdings: list[str],
     *,
     weighting: str,
     max_weight: float | None,
+    group_labels: pd.Series | None = None,
+    max_group_weight: float | None = None,
 ) -> pd.Series:
     target_index = pd.Index(ordered_unique_symbols(target_holdings), dtype=object)
     if target_index.empty:
@@ -187,7 +244,12 @@ def compute_target_weights(
             f"Unsupported weighting mode: {weighting}. Supported: {', '.join(SUPPORTED_WEIGHTING_MODES)}"
         )
 
-    return cap_target_weights(raw, max_weight)
+    capped = cap_target_weights(raw, max_weight)
+    return cap_group_weights(
+        capped,
+        group_labels=group_labels.reindex(target_index) if group_labels is not None else None,
+        max_group_weight=max_group_weight,
+    )
 
 
 def select_topk_dropout_trades(

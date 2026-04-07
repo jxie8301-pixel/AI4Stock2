@@ -22,6 +22,7 @@ SUPPORTED_VALIDATION_SIGNAL_METRICS = (
     "valid_topk_positive_rate",
     "valid_topk_excess_mean",
 )
+SUPPORTED_RISK_CURVES = ("linear", "convex", "concave", "sigmoid")
 SUPPORTED_INTRAPERIOD_EXIT_MODES = ("none", "score_threshold", "expected_return_threshold")
 SUPPORTED_EXIT_SCORE_SOURCES = ("raw", "transformed", "rank_pct", "zscore")
 SUPPORTED_INTRAPERIOD_EXIT_CALIBRATIONS = ("quantile_bins",)
@@ -284,6 +285,18 @@ def normalize_risk_control_config(
         max_risk = validate_risk_degree(float(risk_control.get("max_risk", fallback_risk_degree)), "risk_control.max_risk")
         if max_risk < min_risk:
             raise ValueError("risk_control.max_risk must be >= risk_control.min_risk")
+        risk_curve = str(risk_control.get("risk_curve", "linear") or "linear").strip().lower()
+        if risk_curve not in SUPPORTED_RISK_CURVES:
+            raise ValueError("risk_control.risk_curve must be one of: " + ", ".join(SUPPORTED_RISK_CURVES))
+        risk_curve_power = float(risk_control.get("risk_curve_power", 2.0))
+        if risk_curve_power <= 0:
+            raise ValueError("risk_control.risk_curve_power must be > 0")
+        risk_curve_center = float(risk_control.get("risk_curve_center", 0.5))
+        if risk_curve_center < 0.0 or risk_curve_center > 1.0:
+            raise ValueError("risk_control.risk_curve_center must be in [0, 1]")
+        risk_curve_steepness = float(risk_control.get("risk_curve_steepness", 8.0))
+        if risk_curve_steepness <= 0:
+            raise ValueError("risk_control.risk_curve_steepness must be > 0")
         out: dict[str, float | int | str] = {
             "mode": mode,
             "risk_degree": validate_risk_degree(float(fallback_risk_degree), "risk_control.risk_degree"),
@@ -293,6 +306,10 @@ def normalize_risk_control_config(
             "max_signal": max_signal,
             "min_risk": min_risk,
             "max_risk": max_risk,
+            "risk_curve": risk_curve,
+            "risk_curve_power": risk_curve_power,
+            "risk_curve_center": risk_curve_center,
+            "risk_curve_steepness": risk_curve_steepness,
         }
         if signal_source == "validation_metric":
             validation_metric = str(risk_control.get("validation_metric", "valid_topk_label_mean") or "valid_topk_label_mean").strip().lower()
@@ -302,6 +319,60 @@ def normalize_risk_control_config(
                     + ", ".join(SUPPORTED_VALIDATION_SIGNAL_METRICS)
                 )
             out["validation_metric"] = validation_metric
+            secondary_validation_metric = risk_control.get("secondary_validation_metric")
+            if secondary_validation_metric is not None:
+                secondary_validation_metric = str(secondary_validation_metric).strip().lower()
+                if secondary_validation_metric not in SUPPORTED_VALIDATION_SIGNAL_METRICS:
+                    raise ValueError(
+                        "risk_control.secondary_validation_metric must be one of: "
+                        + ", ".join(SUPPORTED_VALIDATION_SIGNAL_METRICS)
+                    )
+                secondary_min_signal = float(risk_control.get("secondary_min_signal", min_signal))
+                secondary_max_signal = float(risk_control.get("secondary_max_signal", max_signal))
+                if secondary_max_signal <= secondary_min_signal:
+                    raise ValueError(
+                        "risk_control.secondary_max_signal must be greater than risk_control.secondary_min_signal"
+                    )
+                secondary_min_signal_quantile = risk_control.get("secondary_min_signal_quantile")
+                secondary_max_signal_quantile = risk_control.get("secondary_max_signal_quantile")
+                if secondary_min_signal_quantile is not None:
+                    secondary_min_signal_quantile = float(secondary_min_signal_quantile)
+                    if secondary_min_signal_quantile < 0.0 or secondary_min_signal_quantile > 1.0:
+                        raise ValueError("risk_control.secondary_min_signal_quantile must be in [0, 1]")
+                if secondary_max_signal_quantile is not None:
+                    secondary_max_signal_quantile = float(secondary_max_signal_quantile)
+                    if secondary_max_signal_quantile < 0.0 or secondary_max_signal_quantile > 1.0:
+                        raise ValueError("risk_control.secondary_max_signal_quantile must be in [0, 1]")
+                if (
+                    secondary_min_signal_quantile is not None
+                    and secondary_max_signal_quantile is not None
+                    and secondary_max_signal_quantile <= secondary_min_signal_quantile
+                ):
+                    raise ValueError(
+                        "risk_control.secondary_max_signal_quantile must be greater than "
+                        "risk_control.secondary_min_signal_quantile"
+                    )
+                secondary_min_risk = validate_risk_degree(
+                    float(risk_control.get("secondary_min_risk", min_risk)),
+                    "risk_control.secondary_min_risk",
+                )
+                secondary_max_risk = validate_risk_degree(
+                    float(risk_control.get("secondary_max_risk", max_risk)),
+                    "risk_control.secondary_max_risk",
+                )
+                if secondary_max_risk < secondary_min_risk:
+                    raise ValueError(
+                        "risk_control.secondary_max_risk must be >= risk_control.secondary_min_risk"
+                    )
+                out["secondary_validation_metric"] = secondary_validation_metric
+                out["secondary_min_signal"] = secondary_min_signal
+                out["secondary_max_signal"] = secondary_max_signal
+                out["secondary_min_risk"] = secondary_min_risk
+                out["secondary_max_risk"] = secondary_max_risk
+                if secondary_min_signal_quantile is not None:
+                    out["secondary_min_signal_quantile"] = secondary_min_signal_quantile
+                if secondary_max_signal_quantile is not None:
+                    out["secondary_max_signal_quantile"] = secondary_max_signal_quantile
         if min_signal_quantile is not None:
             out["min_signal_quantile"] = min_signal_quantile
         if max_signal_quantile is not None:
@@ -407,10 +478,80 @@ def build_signal_schedule_from_series(
         max_threshold.loc[invalid_thresholds] = float(risk_control["max_signal"])
     width = (max_threshold - min_threshold).where(lambda s: s > 0, np.nan)
     scale = ((signal_values - min_threshold) / width).clip(lower=0.0, upper=1.0).fillna(0.0)
+    scale = _apply_risk_curve(scale, risk_control=risk_control)
     min_risk = float(risk_control["min_risk"])
     max_risk = float(risk_control["max_risk"])
     schedule = (min_risk + scale * (max_risk - min_risk)).astype(float)
     return schedule, signal_values
+
+
+def build_combined_validation_metric_schedule(
+    signal_values_by_metric: dict[str, pd.Series],
+    *,
+    risk_control: dict[str, float | int | str],
+) -> tuple[pd.Series, pd.Series]:
+    primary_metric = str(risk_control["validation_metric"])
+    if primary_metric not in signal_values_by_metric:
+        raise ValueError(f"Missing primary validation metric series: {primary_metric}")
+    primary_schedule, primary_signal_values = build_signal_schedule_from_series(
+        signal_values_by_metric[primary_metric],
+        risk_control=risk_control,
+    )
+    secondary_metric = risk_control.get("secondary_validation_metric")
+    if secondary_metric is None:
+        return primary_schedule, primary_signal_values
+    secondary_metric = str(secondary_metric)
+    if secondary_metric not in signal_values_by_metric:
+        raise ValueError(f"Missing secondary validation metric series: {secondary_metric}")
+    secondary_cfg: dict[str, float | int | str] = {
+        "min_signal": float(risk_control["secondary_min_signal"]),
+        "max_signal": float(risk_control["secondary_max_signal"]),
+        "min_risk": float(risk_control["secondary_min_risk"]),
+        "max_risk": float(risk_control["secondary_max_risk"]),
+        "risk_curve": str(risk_control.get("risk_curve", "linear")),
+        "risk_curve_power": float(risk_control.get("risk_curve_power", 2.0)),
+        "risk_curve_center": float(risk_control.get("risk_curve_center", 0.5)),
+        "risk_curve_steepness": float(risk_control.get("risk_curve_steepness", 8.0)),
+    }
+    if "secondary_min_signal_quantile" in risk_control:
+        secondary_cfg["min_signal_quantile"] = float(risk_control["secondary_min_signal_quantile"])
+    if "secondary_max_signal_quantile" in risk_control:
+        secondary_cfg["max_signal_quantile"] = float(risk_control["secondary_max_signal_quantile"])
+    secondary_schedule, _ = build_signal_schedule_from_series(
+        signal_values_by_metric[secondary_metric],
+        risk_control=secondary_cfg,
+    )
+    combined = pd.concat(
+        [primary_schedule.rename("primary"), secondary_schedule.rename("secondary")],
+        axis=1,
+    )
+    return combined.min(axis=1).astype(float), primary_signal_values
+
+
+def _apply_risk_curve(
+    scale: pd.Series,
+    *,
+    risk_control: dict[str, float | int | str],
+) -> pd.Series:
+    curve = str(risk_control.get("risk_curve", "linear") or "linear").strip().lower()
+    scale = pd.Series(scale, copy=False).astype(float).clip(lower=0.0, upper=1.0)
+    if curve == "linear":
+        return scale
+
+    power = float(risk_control.get("risk_curve_power", 2.0))
+    if curve == "convex":
+        return scale.pow(power).clip(lower=0.0, upper=1.0)
+    if curve == "concave":
+        return (1.0 - (1.0 - scale).pow(power)).clip(lower=0.0, upper=1.0)
+    if curve == "sigmoid":
+        center = float(risk_control.get("risk_curve_center", 0.5))
+        steepness = float(risk_control.get("risk_curve_steepness", 8.0))
+        centered = 1.0 / (1.0 + np.exp(-steepness * (scale - center)))
+        lower = 1.0 / (1.0 + np.exp(-steepness * (0.0 - center)))
+        upper = 1.0 / (1.0 + np.exp(-steepness * (1.0 - center)))
+        denom = max(upper - lower, 1e-12)
+        return pd.Series((centered - lower) / denom, index=scale.index, dtype=float).clip(lower=0.0, upper=1.0)
+    raise ValueError(f"Unsupported risk curve: {curve}")
 
 
 def _compute_signal_strength_series(
@@ -472,7 +613,7 @@ def build_risk_control_schedule(
     fallback_risk_degree: float,
     topk: int,
     min_score: float | None,
-    external_signal_values: pd.Series | None = None,
+    external_signal_values: pd.Series | dict[str, pd.Series] | None = None,
 ) -> tuple[pd.Series | None, pd.Series | None]:
     mode = str(risk_control.get("mode") or "fixed")
     signal_source = str(risk_control.get("signal_source") or "score_strength")
@@ -482,6 +623,8 @@ def build_risk_control_schedule(
         if signal_source == "validation_metric":
             if external_signal_values is None:
                 raise ValueError("external_signal_values is required when risk_control.signal_source == 'validation_metric'")
+            if isinstance(external_signal_values, dict):
+                return build_combined_validation_metric_schedule(external_signal_values, risk_control=risk_control)
             return build_signal_schedule_from_series(external_signal_values, risk_control=risk_control)
         return build_signal_strength_schedule(
             transformed_score_matrix,
@@ -504,7 +647,16 @@ def build_risk_control_schedule(
         if signal_source == "validation_metric":
             if external_signal_values is None:
                 raise ValueError("external_signal_values is required when risk_control.signal_source == 'validation_metric'")
-            signal_schedule, signal_values = build_signal_schedule_from_series(external_signal_values, risk_control=risk_control)
+            if isinstance(external_signal_values, dict):
+                signal_schedule, signal_values = build_combined_validation_metric_schedule(
+                    external_signal_values,
+                    risk_control=risk_control,
+                )
+            else:
+                signal_schedule, signal_values = build_signal_schedule_from_series(
+                    external_signal_values,
+                    risk_control=risk_control,
+                )
         else:
             signal_schedule, signal_values = build_signal_strength_schedule(
                 transformed_score_matrix,

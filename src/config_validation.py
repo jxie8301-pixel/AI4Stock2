@@ -112,6 +112,7 @@ TOP_LEVEL_SCHEMA = {
         "score_transform": None,
         "score_zscore_clip": None,
         "max_weight": None,
+        "max_industry_weight": None,
         "keep_top_n": None,
         "min_score": None,
     },
@@ -144,12 +145,23 @@ TOP_LEVEL_SCHEMA = {
             "signal_metric": None,
             "signal_source": None,
             "validation_metric": None,
+            "secondary_validation_metric": None,
             "min_signal": None,
             "max_signal": None,
             "min_signal_quantile": None,
             "max_signal_quantile": None,
             "min_risk": None,
             "max_risk": None,
+            "secondary_min_signal": None,
+            "secondary_max_signal": None,
+            "secondary_min_signal_quantile": None,
+            "secondary_max_signal_quantile": None,
+            "secondary_min_risk": None,
+            "secondary_max_risk": None,
+            "risk_curve": None,
+            "risk_curve_power": None,
+            "risk_curve_center": None,
+            "risk_curve_steepness": None,
         },
         "intraperiod_exit": {
             "mode": None,
@@ -175,12 +187,23 @@ TOP_LEVEL_SCHEMA = {
             "signal_metric": None,
             "signal_source": None,
             "validation_metric": None,
+            "secondary_validation_metric": None,
             "min_signal": None,
             "max_signal": None,
             "min_signal_quantile": None,
             "max_signal_quantile": None,
             "min_risk": None,
             "max_risk": None,
+            "secondary_min_signal": None,
+            "secondary_max_signal": None,
+            "secondary_min_signal_quantile": None,
+            "secondary_max_signal_quantile": None,
+            "secondary_min_risk": None,
+            "secondary_max_risk": None,
+            "risk_curve": None,
+            "risk_curve_power": None,
+            "risk_curve_center": None,
+            "risk_curve_steepness": None,
         },
     },
     "time": {
@@ -358,6 +381,12 @@ def validate_training_config(
         if max_weight <= 0 or max_weight > 1:
             raise ValueError("strategy.max_weight must be in (0, 1] when provided")
         strategy_cfg["max_weight"] = max_weight
+    max_industry_weight = strategy_cfg.get("max_industry_weight")
+    if max_industry_weight is not None:
+        max_industry_weight = float(max_industry_weight)
+        if max_industry_weight <= 0 or max_industry_weight > 1:
+            raise ValueError("strategy.max_industry_weight must be in (0, 1] when provided")
+        strategy_cfg["max_industry_weight"] = max_industry_weight
     keep_top_n = strategy_cfg.get("keep_top_n")
     if keep_top_n is not None:
         keep_top_n = _expect_positive_int(keep_top_n, "strategy.keep_top_n")
@@ -457,6 +486,30 @@ def validate_training_config(
                         "valid_top1_positive_rate, valid_topk_label_mean, valid_topk_label_median, "
                         "valid_topk_min_label_mean, valid_topk_positive_rate, valid_topk_excess_mean"
                     )
+            secondary_validation_metric = raw_risk_cfg.get("secondary_validation_metric")
+            if secondary_validation_metric is not None:
+                if signal_source != "validation_metric":
+                    raise ValueError(
+                        "backtest.risk_control.secondary_validation_metric requires signal_source=validation_metric"
+                    )
+                secondary_validation_metric = str(secondary_validation_metric).strip().lower()
+                if secondary_validation_metric not in {
+                    "best_valid_daily_rank_ic",
+                    "best_valid_daily_ic",
+                    "valid_top1_label_mean",
+                    "valid_top1_positive_rate",
+                    "valid_topk_label_mean",
+                    "valid_topk_label_median",
+                    "valid_topk_min_label_mean",
+                    "valid_topk_positive_rate",
+                    "valid_topk_excess_mean",
+                }:
+                    raise ValueError(
+                        "backtest.risk_control.secondary_validation_metric must be one of: "
+                        "best_valid_daily_rank_ic, best_valid_daily_ic, valid_top1_label_mean, "
+                        "valid_top1_positive_rate, valid_topk_label_mean, valid_topk_label_median, "
+                        "valid_topk_min_label_mean, valid_topk_positive_rate, valid_topk_excess_mean"
+                    )
             min_signal = float(raw_risk_cfg.get("min_signal", 0.0))
             max_signal = float(raw_risk_cfg.get("max_signal", 2.0))
             if max_signal <= min_signal:
@@ -489,6 +542,70 @@ def validate_training_config(
                     raise ValueError(f"{field_name} must be in [0, 1]")
             if max_risk < min_risk:
                 raise ValueError("backtest.risk_control.max_risk must be >= backtest.risk_control.min_risk")
+            secondary_min_signal = raw_risk_cfg.get("secondary_min_signal")
+            secondary_max_signal = raw_risk_cfg.get("secondary_max_signal")
+            secondary_min_signal_quantile = raw_risk_cfg.get("secondary_min_signal_quantile")
+            secondary_max_signal_quantile = raw_risk_cfg.get("secondary_max_signal_quantile")
+            secondary_min_risk = raw_risk_cfg.get("secondary_min_risk")
+            secondary_max_risk = raw_risk_cfg.get("secondary_max_risk")
+            if secondary_validation_metric is not None:
+                secondary_min_signal = float(
+                    min_signal if secondary_min_signal is None else secondary_min_signal
+                )
+                secondary_max_signal = float(
+                    max_signal if secondary_max_signal is None else secondary_max_signal
+                )
+                if secondary_max_signal <= secondary_min_signal:
+                    raise ValueError(
+                        "backtest.risk_control.secondary_max_signal must be greater than backtest.risk_control.secondary_min_signal"
+                    )
+                if secondary_min_signal_quantile is not None:
+                    secondary_min_signal_quantile = float(secondary_min_signal_quantile)
+                    if secondary_min_signal_quantile < 0 or secondary_min_signal_quantile > 1:
+                        raise ValueError(
+                            "backtest.risk_control.secondary_min_signal_quantile must be in [0, 1]"
+                        )
+                if secondary_max_signal_quantile is not None:
+                    secondary_max_signal_quantile = float(secondary_max_signal_quantile)
+                    if secondary_max_signal_quantile < 0 or secondary_max_signal_quantile > 1:
+                        raise ValueError(
+                            "backtest.risk_control.secondary_max_signal_quantile must be in [0, 1]"
+                        )
+                if (
+                    secondary_min_signal_quantile is not None
+                    and secondary_max_signal_quantile is not None
+                    and secondary_max_signal_quantile <= secondary_min_signal_quantile
+                ):
+                    raise ValueError(
+                        "backtest.risk_control.secondary_max_signal_quantile must be greater than "
+                        "backtest.risk_control.secondary_min_signal_quantile"
+                    )
+                secondary_min_risk = float(min_risk if secondary_min_risk is None else secondary_min_risk)
+                secondary_max_risk = float(max_risk if secondary_max_risk is None else secondary_max_risk)
+                for field_name, value in (
+                    ("backtest.risk_control.secondary_min_risk", secondary_min_risk),
+                    ("backtest.risk_control.secondary_max_risk", secondary_max_risk),
+                ):
+                    if value < 0 or value > 1:
+                        raise ValueError(f"{field_name} must be in [0, 1]")
+                if secondary_max_risk < secondary_min_risk:
+                    raise ValueError(
+                        "backtest.risk_control.secondary_max_risk must be >= backtest.risk_control.secondary_min_risk"
+                    )
+            risk_curve = str(raw_risk_cfg.get("risk_curve", "linear") or "linear").strip().lower()
+            if risk_curve not in {"linear", "convex", "concave", "sigmoid"}:
+                raise ValueError(
+                    "backtest.risk_control.risk_curve must be one of: linear, convex, concave, sigmoid"
+                )
+            risk_curve_power = float(raw_risk_cfg.get("risk_curve_power", 2.0))
+            if risk_curve_power <= 0:
+                raise ValueError("backtest.risk_control.risk_curve_power must be > 0")
+            risk_curve_center = float(raw_risk_cfg.get("risk_curve_center", 0.5))
+            if risk_curve_center < 0 or risk_curve_center > 1:
+                raise ValueError("backtest.risk_control.risk_curve_center must be in [0, 1]")
+            risk_curve_steepness = float(raw_risk_cfg.get("risk_curve_steepness", 8.0))
+            if risk_curve_steepness <= 0:
+                raise ValueError("backtest.risk_control.risk_curve_steepness must be > 0")
             validated_risk_cfg.update(
                 {
                     "signal_metric": signal_metric,
@@ -497,10 +614,24 @@ def validate_training_config(
                     "max_signal": max_signal,
                     "min_risk": min_risk,
                     "max_risk": max_risk,
+                    "risk_curve": risk_curve,
+                    "risk_curve_power": risk_curve_power,
+                    "risk_curve_center": risk_curve_center,
+                    "risk_curve_steepness": risk_curve_steepness,
                 }
             )
             if signal_source == "validation_metric":
                 validated_risk_cfg["validation_metric"] = validation_metric
+            if secondary_validation_metric is not None:
+                validated_risk_cfg["secondary_validation_metric"] = secondary_validation_metric
+                validated_risk_cfg["secondary_min_signal"] = secondary_min_signal
+                validated_risk_cfg["secondary_max_signal"] = secondary_max_signal
+                validated_risk_cfg["secondary_min_risk"] = secondary_min_risk
+                validated_risk_cfg["secondary_max_risk"] = secondary_max_risk
+                if secondary_min_signal_quantile is not None:
+                    validated_risk_cfg["secondary_min_signal_quantile"] = secondary_min_signal_quantile
+                if secondary_max_signal_quantile is not None:
+                    validated_risk_cfg["secondary_max_signal_quantile"] = secondary_max_signal_quantile
             if min_signal_quantile is not None:
                 validated_risk_cfg["min_signal_quantile"] = min_signal_quantile
             if max_signal_quantile is not None:

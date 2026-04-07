@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.data_source import resolve_data_source_name
 from src.experiment_store import finalize_run_store, resolve_rebalance_freq, resolve_retrain_step
 from src.backtest_trace import save_trace_artifacts, select_trace_dates
 from src.label_utils import get_label_column_name, resolve_signal_horizon
@@ -59,6 +60,30 @@ def _build_validation_metric_signal_series(
             signal.loc[mask] = value
     signal = signal.dropna()
     return signal if not signal.empty else None
+
+
+def _load_instrument_industry_groups(
+    cfg: dict[str, Any],
+    *,
+    instruments: pd.Index,
+) -> pd.Series | None:
+    data_source = resolve_data_source_name(cfg)
+    raw_meta_dir = Path("data") / data_source / "raw" / "meta"
+    symbol_cache_path = raw_meta_dir / "symbol_cache.parquet"
+    if not symbol_cache_path.exists():
+        return None
+    try:
+        frame = pd.read_parquet(symbol_cache_path, columns=["local_symbol", "industry"])
+    except Exception:
+        return None
+    if frame.empty or "local_symbol" not in frame.columns or "industry" not in frame.columns:
+        return None
+    frame["local_symbol"] = frame["local_symbol"].astype(str).str.zfill(6)
+    frame["industry"] = frame["industry"].fillna("").replace("", pd.NA)
+    frame = frame.drop_duplicates("local_symbol", keep="last").set_index("local_symbol")
+    instrument_index = pd.Index(instruments.astype(str), dtype=object)
+    groups = frame["industry"].reindex(instrument_index)
+    return groups if groups.notna().any() else None
 
 
 def evaluate_prediction_bundle(
@@ -151,6 +176,7 @@ def evaluate_prediction_bundle(
         f"score_transform={cfg['strategy'].get('score_transform', 'none')}, "
         f"score_zscore_clip={cfg['strategy'].get('score_zscore_clip', 3.0)}, "
         f"max_weight={cfg['strategy'].get('max_weight', 'none')}, "
+        f"max_industry_weight={cfg['strategy'].get('max_industry_weight', 'none')}, "
         f"keep_top_n={cfg['strategy'].get('keep_top_n', 'none')}, "
         f"min_score={cfg['strategy'].get('min_score', 'none')}, "
         f"rebalance={rebalance_freq}d, "
@@ -167,9 +193,25 @@ def evaluate_prediction_bundle(
         signal_source = str(risk_control_cfg.get("signal_source", "score_strength") or "score_strength").strip().lower()
         if signal_source == "validation_metric":
             metric_name = str(risk_control_cfg.get("validation_metric", "valid_topk_label_mean") or "valid_topk_label_mean").strip().lower()
-            risk_control_signal_values = _build_validation_metric_signal_series(bundle, metric_name=metric_name)
-            if risk_control_signal_values is None:
+            primary_signal_values = _build_validation_metric_signal_series(bundle, metric_name=metric_name)
+            if primary_signal_values is None:
                 print(f"[!] No rolling validation metric series available for risk control metric={metric_name}; backtest may fail.")
+            secondary_metric_name = risk_control_cfg.get("secondary_validation_metric")
+            if secondary_metric_name is not None:
+                secondary_metric_name = str(secondary_metric_name).strip().lower()
+                secondary_signal_values = _build_validation_metric_signal_series(bundle, metric_name=secondary_metric_name)
+                if secondary_signal_values is None:
+                    print(
+                        f"[!] No rolling validation metric series available for secondary risk control metric={secondary_metric_name}; "
+                        "backtest may fail."
+                    )
+                risk_control_signal_values = {}
+                if primary_signal_values is not None:
+                    risk_control_signal_values[metric_name] = primary_signal_values
+                if secondary_signal_values is not None:
+                    risk_control_signal_values[secondary_metric_name] = secondary_signal_values
+            else:
+                risk_control_signal_values = primary_signal_values
     backtest_kwargs = {
         "labels": bundle.backtest_label_series,
         "topk": cfg["strategy"]["topk"],
@@ -185,6 +227,7 @@ def evaluate_prediction_bundle(
         "score_transform": cfg["strategy"].get("score_transform", "none"),
         "score_zscore_clip": cfg["strategy"].get("score_zscore_clip", 3.0),
         "max_weight": cfg["strategy"].get("max_weight"),
+        "max_industry_weight": cfg["strategy"].get("max_industry_weight"),
         "keep_top_n": cfg["strategy"].get("keep_top_n"),
         "min_score": cfg["strategy"].get("min_score"),
         "benchmark_returns": bench_series,
@@ -193,6 +236,15 @@ def evaluate_prediction_bundle(
         "risk_control_signal_values": risk_control_signal_values,
         "intraperiod_exit": cfg["backtest"].get("intraperiod_exit"),
     }
+    if cfg["strategy"].get("max_industry_weight") is not None:
+        instrument_groups = _load_instrument_industry_groups(
+            cfg,
+            instruments=bundle.final_predictions.index.get_level_values("instrument").unique(),
+        )
+        if instrument_groups is None:
+            print("[!] strategy.max_industry_weight is set but no industry mapping was loaded; industry cap will be ignored.")
+        else:
+            backtest_kwargs["instrument_groups"] = instrument_groups
     backtest_report = run_native_backtest(
         preds=bundle.final_predictions,
         **backtest_kwargs,

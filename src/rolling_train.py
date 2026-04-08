@@ -12,7 +12,12 @@ import torch
 
 from src.experiment_store import resolve_rebalance_freq
 from src.feature_selection import apply_feature_transforms
-from src.label_utils import resolve_train_label_transform_cfg, transform_training_label_series
+from src.label_utils import (
+    build_opportunity_target_series,
+    resolve_opportunity_label_cfg,
+    resolve_train_label_transform_cfg,
+    transform_training_label_series,
+)
 from src.model_config import get_lgbm_config
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
@@ -41,6 +46,7 @@ def _compute_validation_topk_summary(
     dates: np.ndarray | pd.Series,
     *,
     topk: int,
+    opportunity_labels: pd.Series | None = None,
 ) -> dict[str, float | int]:
     topk = max(1, int(topk))
     frame = pd.DataFrame(
@@ -50,6 +56,8 @@ def _compute_validation_topk_summary(
             "date": pd.to_datetime(pd.Series(dates)).to_numpy(),
         }
     ).dropna()
+    if opportunity_labels is not None:
+        frame["opportunity_label"] = pd.to_numeric(opportunity_labels, errors="coerce").to_numpy(dtype=np.float32, copy=False)
     if frame.empty:
         return {
             "valid_topk_days": 0,
@@ -60,6 +68,8 @@ def _compute_validation_topk_summary(
             "valid_topk_min_label_mean": float("nan"),
             "valid_topk_positive_rate": float("nan"),
             "valid_topk_excess_mean": float("nan"),
+            "valid_top1_opportunity_rate": float("nan"),
+            "valid_topk_opportunity_rate": float("nan"),
         }
 
     daily_rows: list[dict[str, float]] = []
@@ -78,6 +88,8 @@ def _compute_validation_topk_summary(
                 "topk_min_label": float(selected_labels.min()),
                 "topk_positive_rate": float((selected_labels > 0.0).mean()),
                 "topk_excess_mean": float(selected_labels.mean() - group["label"].mean()),
+                "top1_opportunity": float(selected["opportunity_label"].iloc[0]) if "opportunity_label" in selected.columns else np.nan,
+                "topk_opportunity_rate": float(selected["opportunity_label"].mean()) if "opportunity_label" in selected.columns else np.nan,
             }
         )
 
@@ -91,6 +103,8 @@ def _compute_validation_topk_summary(
             "valid_topk_min_label_mean": float("nan"),
             "valid_topk_positive_rate": float("nan"),
             "valid_topk_excess_mean": float("nan"),
+            "valid_top1_opportunity_rate": float("nan"),
+            "valid_topk_opportunity_rate": float("nan"),
         }
 
     daily = pd.DataFrame(daily_rows)
@@ -103,6 +117,8 @@ def _compute_validation_topk_summary(
         "valid_topk_min_label_mean": float(daily["topk_min_label"].mean()),
         "valid_topk_positive_rate": float(daily["topk_positive_rate"].mean()),
         "valid_topk_excess_mean": float(daily["topk_excess_mean"].mean()),
+        "valid_top1_opportunity_rate": float(daily["top1_opportunity"].mean()) if "top1_opportunity" in daily.columns else float("nan"),
+        "valid_topk_opportunity_rate": float(daily["topk_opportunity_rate"].mean()) if "topk_opportunity_rate" in daily.columns else float("nan"),
     }
 
 
@@ -149,8 +165,11 @@ def _run_lgbm_window(
     X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
     train_label_transform = resolve_train_label_transform_cfg(cfg)
 
+    lgbm_config = get_lgbm_config(cfg)
+    model_loss = str(lgbm_config.get("loss", "regression") or "regression").strip().lower()
+    use_transformed_valid_eval_labels = model_loss in {"binary", "binary_logloss", "cross_entropy", "logloss"}
     model_path = paths.models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
-    model = NativeLGBM(**get_lgbm_config(cfg))
+    model = NativeLGBM(**lgbm_config)
     loaded_model = False
     if load_models and model_path.exists():
         print(f"    Loading pre-trained model from {model_path}...")
@@ -166,7 +185,7 @@ def _run_lgbm_window(
             y_valid_series,
             train_dates=train_dates,
             valid_dates=valid_dates,
-            valid_eval_labels=raw_y_valid_series,
+            valid_eval_labels=y_valid_series if use_transformed_valid_eval_labels else raw_y_valid_series,
         )
         if save_models:
             with open(model_path, "wb") as f:
@@ -179,11 +198,19 @@ def _run_lgbm_window(
 
     history_path = paths.training_history_dir / f"training_history_{current_test_start.strftime('%Y-%m-%d')}.csv"
     saved_history_path = model.save_training_history(history_path)
+    valid_opportunity_labels: pd.Series | None = None
+    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
+    if str(opportunity_cfg["mode"]) in {"positive", "threshold"}:
+        valid_opportunity_labels = build_opportunity_target_series(
+            raw_y_valid_series,
+            opportunity_cfg=opportunity_cfg,
+        )
     valid_topk_summary = _compute_validation_topk_summary(
         model.predict(X_valid_df),
         raw_y_valid_series,
         valid_dates,
         topk=int(cfg["strategy"]["topk"]),
+        opportunity_labels=valid_opportunity_labels,
     )
     training_summary = {
         "window_start": current_test_start.strftime("%Y-%m-%d"),
@@ -194,6 +221,8 @@ def _run_lgbm_window(
         "valid_end": valid_end.strftime("%Y-%m-%d"),
         "signal_horizon": int(signal_horizon),
         "train_label_transform_mode": str(train_label_transform["mode"]),
+        "opportunity_label_mode": str(opportunity_cfg["mode"]),
+        "opportunity_label_threshold": float(opportunity_cfg["threshold"]),
         "train_label_transform_neutral_band": float(train_label_transform["neutral_band"]),
         "train_label_transform_tail_band": float(train_label_transform["tail_band"]),
         "train_label_transform_scale_multiplier": float(train_label_transform["scale_multiplier"]),

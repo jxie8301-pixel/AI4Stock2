@@ -7,12 +7,19 @@ import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from src.data_source import resolve_data_source_name
 from src.experiment_store import finalize_run_store, resolve_rebalance_freq, resolve_retrain_step
 from src.backtest_trace import save_trace_artifacts, select_trace_dates
-from src.label_utils import get_label_column_name, resolve_signal_horizon
+from src.label_utils import (
+    build_opportunity_target_series,
+    get_label_column_name,
+    resolve_opportunity_label_cfg,
+    resolve_signal_horizon,
+)
+from src.opportunity_diagnostics import save_opportunity_diagnostics
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
@@ -60,6 +67,28 @@ def _build_validation_metric_signal_series(
             signal.loc[mask] = value
     signal = signal.dropna()
     return signal if not signal.empty else None
+
+
+def _build_forward_compound_return_series(
+    daily_returns: pd.Series,
+    *,
+    horizon: int,
+) -> pd.Series:
+    clean = pd.Series(daily_returns, copy=True).sort_index().astype(float)
+    horizon = max(int(horizon), 1)
+    if clean.empty:
+        return pd.Series(dtype=float)
+    values = clean.to_numpy(dtype=np.float64, copy=False)
+    out = np.full(len(clean), np.nan, dtype=np.float64)
+    for i in range(len(clean)):
+        end = i + horizon
+        if end >= len(clean):
+            break
+        window = values[i + 1 : end + 1]
+        if len(window) != horizon or not np.isfinite(window).all():
+            continue
+        out[i] = float(np.prod(1.0 + window) - 1.0)
+    return pd.Series(out, index=clean.index, dtype=float)
 
 
 def _load_instrument_industry_groups(
@@ -189,6 +218,38 @@ def evaluate_prediction_bundle(
         bundle.backtest_label_series,
         cfg.get("backtest", {}).get("benchmark"),
     )
+    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
+    opportunity_labels: pd.Series | None = None
+    opportunity_instrument_groups: pd.Series | None = None
+    benchmark_forward_returns: pd.Series | None = None
+    if str(opportunity_cfg["mode"]) == "industry_excess":
+        opportunity_instrument_groups = _load_instrument_industry_groups(
+            cfg,
+            instruments=aligned_preds.index.get_level_values("instrument").unique(),
+        )
+    elif str(opportunity_cfg["mode"]) == "benchmark_excess":
+        benchmark_forward_returns = _build_forward_compound_return_series(bench_series, horizon=signal_horizon)
+    try:
+        opportunity_labels = build_opportunity_target_series(
+            aligned_labels,
+            opportunity_cfg=opportunity_cfg,
+            instrument_groups=opportunity_instrument_groups,
+            benchmark_forward_returns=benchmark_forward_returns,
+        )
+    except Exception as exc:
+        print(f"[!] Skipping opportunity label derivation: {exc}")
+        opportunity_labels = None
+    opportunity_paths = save_opportunity_diagnostics(
+        paths.results_dir,
+        predictions=aligned_preds,
+        labels=aligned_labels,
+        topk=int(cfg["strategy"]["topk"]),
+        opportunity_labels=opportunity_labels,
+        opportunity_mode=str(opportunity_cfg["mode"]),
+        opportunity_threshold=float(opportunity_cfg["threshold"]),
+        n_buckets=10,
+    )
+    print(f"Buyability diagnostics saved: {opportunity_paths['buyability_summary_path']}")
     risk_control_cfg = cfg["backtest"].get("risk_control")
     risk_control_signal_values = None
     if isinstance(risk_control_cfg, dict):
@@ -383,6 +444,14 @@ def evaluate_prediction_bundle(
             "feature_importance_path": str(aggregated_importance_path) if aggregated_importance_path else "",
             "training_summary_path": str(training_summary_path) if training_summary_path else "",
             "prediction_artifact_dir": str(paths.prediction_artifact_dir) if paths.prediction_artifact_dir.exists() else "",
+            "fusion_enabled": bundle.metadata.get("fusion_enabled", False),
+            "fusion_mode": bundle.metadata.get("fusion_mode", ""),
+            "fusion_primary_transform": bundle.metadata.get("fusion_primary_transform", ""),
+            "fusion_secondary_transform": bundle.metadata.get("fusion_secondary_transform", ""),
+            "fusion_secondary_prediction_dir": bundle.metadata.get("fusion_secondary_prediction_dir", ""),
+            "fusion_overlap_rows": bundle.metadata.get("fusion_overlap_rows", ""),
+            "fusion_overlap_dates": bundle.metadata.get("fusion_overlap_dates", ""),
+            **opportunity_paths,
         },
     )
     if manifest_path:

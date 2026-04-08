@@ -10,11 +10,19 @@ DEFAULT_LABEL_ABS_CAP = 0.35
 DEFAULT_SIGNAL_HORIZON = 10
 DEFAULT_LABEL_HORIZONS = (1, 5, 10, 20)
 DEFAULT_TRAIN_LABEL_TRANSFORM_MODE = "raw"
+DEFAULT_OPPORTUNITY_MODE = "positive"
 SUPPORTED_TRAIN_LABEL_TRANSFORM_MODES = (
     "raw",
     "profit_tanh",
     "profit_bucket",
     "cross_section_rank",
+    "buyability_binary",
+)
+SUPPORTED_OPPORTUNITY_MODES = (
+    "positive",
+    "threshold",
+    "industry_excess",
+    "benchmark_excess",
 )
 
 
@@ -50,6 +58,31 @@ def normalize_train_label_transform_mode(value: str | None) -> str:
         supported = ", ".join(SUPPORTED_TRAIN_LABEL_TRANSFORM_MODES)
         raise ValueError(f"unsupported training label transform mode: {mode}. Supported: {supported}")
     return mode
+
+
+def normalize_opportunity_mode(value: str | None) -> str:
+    mode = str(value or DEFAULT_OPPORTUNITY_MODE).strip().lower()
+    if mode not in SUPPORTED_OPPORTUNITY_MODES:
+        supported = ", ".join(SUPPORTED_OPPORTUNITY_MODES)
+        raise ValueError(f"unsupported opportunity mode: {mode}. Supported: {supported}")
+    return mode
+
+
+def resolve_opportunity_label_cfg(cfg: dict | None = None) -> dict[str, float | str]:
+    cfg = cfg or {}
+    label_cfg = cfg.get("label", {}) if isinstance(cfg, dict) else {}
+    opportunity_cfg = label_cfg.get("opportunity", {}) if isinstance(label_cfg, dict) else {}
+    if opportunity_cfg is None:
+        opportunity_cfg = {}
+    if not isinstance(opportunity_cfg, dict):
+        raise ValueError("label.opportunity must be a mapping when provided")
+
+    mode = normalize_opportunity_mode(opportunity_cfg.get("mode"))
+    threshold = float(opportunity_cfg.get("threshold", 0.0))
+    return {
+        "mode": mode,
+        "threshold": threshold,
+    }
 
 
 def resolve_train_label_transform_cfg(cfg: dict | None = None) -> dict[str, float | str]:
@@ -141,6 +174,23 @@ def transform_training_label_series(
     scale_multiplier = float(transform_cfg["scale_multiplier"])
     min_scale = float(transform_cfg["min_scale"])
 
+    if mode == "buyability_binary":
+        opportunity_cfg = resolve_opportunity_label_cfg(cfg)
+        opportunity_mode = str(opportunity_cfg["mode"])
+        threshold = float(opportunity_cfg["threshold"])
+        if opportunity_mode == "positive":
+            finite_mask = np.isfinite(values)
+            values[finite_mask] = (values[finite_mask] > 0.0).astype(np.float64)
+            return pd.Series(values, index=out.index, name=out.name, dtype=float)
+        if opportunity_mode == "threshold":
+            finite_mask = np.isfinite(values)
+            values[finite_mask] = (values[finite_mask] > threshold).astype(np.float64)
+            return pd.Series(values, index=out.index, name=out.name, dtype=float)
+        raise ValueError(
+            "label.train_transform.mode=buyability_binary currently supports only "
+            "label.opportunity.mode in {positive, threshold}"
+        )
+
     for _, idx in date_series.groupby(date_series, sort=False).groups.items():
         group_idx = np.asarray(idx, dtype=np.int64)
         group_values = values[group_idx]
@@ -176,6 +226,72 @@ def transform_training_label_series(
         values[group_idx] = group_values
 
     return pd.Series(values, index=out.index, name=out.name, dtype=float)
+
+
+def build_opportunity_target_series(
+    labels: pd.Series,
+    *,
+    cfg: dict | None = None,
+    opportunity_cfg: dict[str, float | str] | None = None,
+    instrument_groups: pd.Series | None = None,
+    benchmark_forward_returns: pd.Series | None = None,
+) -> pd.Series:
+    """Return a 0/1 opportunity target series aligned to realized labels."""
+    out = pd.Series(np.nan, index=labels.index, name="opportunity_label", dtype=float)
+    if labels.empty:
+        return out
+
+    opportunity_cfg = opportunity_cfg or resolve_opportunity_label_cfg(cfg)
+    mode = str(opportunity_cfg["mode"])
+    threshold = float(opportunity_cfg["threshold"])
+    clean = pd.to_numeric(labels, errors="coerce").astype(float)
+
+    if mode == "positive":
+        finite_mask = np.isfinite(clean.to_numpy(dtype=np.float64, copy=False))
+        out.loc[finite_mask] = (clean.loc[finite_mask] > 0.0).astype(float)
+        return out
+
+    if mode == "threshold":
+        finite_mask = np.isfinite(clean.to_numpy(dtype=np.float64, copy=False))
+        out.loc[finite_mask] = (clean.loc[finite_mask] > threshold).astype(float)
+        return out
+
+    if mode == "industry_excess":
+        if not isinstance(clean.index, pd.MultiIndex) or clean.index.nlevels < 2:
+            raise ValueError("industry_excess opportunity mode requires a MultiIndex (datetime, instrument) label series")
+        if instrument_groups is None:
+            raise ValueError("industry_excess opportunity mode requires instrument_groups")
+        frame = clean.rename("label").reset_index()
+        frame.columns = ["datetime", "instrument", "label"]
+        frame["instrument"] = frame["instrument"].astype(str)
+        frame["industry"] = instrument_groups.reindex(frame["instrument"]).to_numpy()
+        frame = frame.dropna(subset=["label", "industry"])
+        if frame.empty:
+            return out
+        frame["industry_mean_label"] = frame.groupby(["datetime", "industry"], sort=False)["label"].transform("mean")
+        frame["opportunity_label"] = (frame["label"] > (frame["industry_mean_label"] + threshold)).astype(float)
+        rebuilt_index = pd.MultiIndex.from_arrays(
+            [pd.to_datetime(frame["datetime"]), frame["instrument"].astype(str)],
+            names=labels.index.names,
+        )
+        out.loc[rebuilt_index] = frame["opportunity_label"].to_numpy(dtype=float, copy=False)
+        return out
+
+    if mode == "benchmark_excess":
+        if benchmark_forward_returns is None:
+            raise ValueError("benchmark_excess opportunity mode requires benchmark_forward_returns")
+        if isinstance(clean.index, pd.MultiIndex):
+            dates = pd.to_datetime(clean.index.get_level_values(0))
+        else:
+            dates = pd.to_datetime(clean.index)
+        benchmark_aligned = benchmark_forward_returns.reindex(pd.Index(dates)).to_numpy(dtype=np.float64, copy=False)
+        values = clean.to_numpy(dtype=np.float64, copy=False)
+        finite_mask = np.isfinite(values) & np.isfinite(benchmark_aligned)
+        result = np.full(len(clean), np.nan, dtype=np.float64)
+        result[finite_mask] = (values[finite_mask] > (benchmark_aligned[finite_mask] + threshold)).astype(float)
+        return pd.Series(result, index=clean.index, name="opportunity_label", dtype=float)
+
+    raise ValueError(f"Unsupported opportunity mode: {mode}")
 
 
 def normalize_signal_horizon(value: int | str | None, *, default: int = DEFAULT_SIGNAL_HORIZON) -> int:

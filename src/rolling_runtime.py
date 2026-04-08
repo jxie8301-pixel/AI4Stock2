@@ -12,11 +12,12 @@ from src.data_source import resolve_data_source_name, resolve_source_parquet_dir
 from src.factor_store import load_available_dates, load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import (
+    _resolve_cross_sectional_rank_exclude_columns,
     compute_finite_feature_mask_frame,
     materialize_selected_feature_frame,
     resolve_selected_feature_columns,
 )
-from src.label_utils import sanitize_label_series
+from src.label_utils import resolve_opportunity_label_cfg, sanitize_label_series
 from src.rolling_types import RollingRuntimeData
 
 
@@ -139,6 +140,8 @@ def build_prediction_metadata(
     runtime_data: RollingRuntimeData,
     model_name: str,
 ) -> dict[str, Any]:
+    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
+    rank_exclude_columns = sorted(_resolve_cross_sectional_rank_exclude_columns(cfg))
     return {
         "model_name": model_name,
         "data_source": resolve_data_source_name(cfg),
@@ -150,6 +153,10 @@ def build_prediction_metadata(
         "test_start": str(runtime_data.test_start.date()),
         "test_end": str(runtime_data.test_end.date()),
         "selected_feature_count": int(len(runtime_data.selected_feature_names)),
+        "cross_sectional_rank_enabled": bool(cfg.get("features", {}).get("transforms", {}).get("cross_sectional_rank", False)),
+        "cross_sectional_rank_exclude_columns": rank_exclude_columns,
+        "opportunity_mode": str(opportunity_cfg["mode"]),
+        "opportunity_threshold": float(opportunity_cfg["threshold"]),
     }
 
 

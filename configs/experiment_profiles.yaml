@@ -30,6 +30,11 @@ profiles:
     model:
       profile: lgbm_ranker_default
 
+  core_v4_lgbm_binary_default_10x20x10:
+    extends: core_v4_lgbm_default_10x20x10
+    model:
+      profile: lgbm_binary_default
+
   core_v4_lgbm_ranker_rankic_10x20x10:
     extends: core_v4_lgbm_default_10x20x10
     model:

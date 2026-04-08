@@ -23,6 +23,7 @@ from src.rolling_baselines import (
     build_sign_aligned_factor_baseline_predictions as _build_sign_aligned_factor_baseline_predictions,
 )
 from src.rolling_evaluate import evaluate_prediction_bundle
+from src.prediction_fusion import fuse_prediction_bundle, resolve_score_fusion_cfg
 from src.rolling_runtime import load_rolling_runtime_data
 from src.rolling_train import generate_prediction_bundle
 from src.rolling_types import (
@@ -126,6 +127,26 @@ def run_rolling_pipeline() -> None:
     if args.load_predictions_dir and args.save_predictions:
         _write_prediction_bundle(bundle, paths.prediction_artifact_dir)
         print(f"Prediction bundle copied to current run: {paths.prediction_artifact_dir}")
+
+    fusion_cfg = resolve_score_fusion_cfg(cfg)
+    if fusion_cfg["enabled"]:
+        secondary_dir = fusion_cfg["secondary_predictions_dir"]
+        secondary_bundle = load_prediction_bundle(secondary_dir)
+        bundle = fuse_prediction_bundle(
+            bundle,
+            secondary_bundle,
+            fusion_cfg=fusion_cfg,
+        )
+        print(
+            "[*] Applied score fusion: "
+            f"mode={fusion_cfg['mode']} "
+            f"primary_transform={fusion_cfg['primary_transform']} "
+            f"secondary_transform={fusion_cfg['secondary_transform']} "
+            f"secondary={secondary_dir}"
+        )
+        if args.save_predictions:
+            _write_prediction_bundle(bundle, paths.prediction_artifact_dir)
+            print(f"Fused prediction bundle saved: {paths.prediction_artifact_dir}")
 
     evaluate_prediction_bundle(
         cfg,

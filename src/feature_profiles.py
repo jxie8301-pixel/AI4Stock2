@@ -242,6 +242,7 @@ def resolve_feature_profile(
         "selected_columns": deepcopy(profile_selected_columns),
         "source_columns": deepcopy(profile_source_columns),
         "load_columns": deepcopy(profile_load_columns),
+        "cross_sectional_rank_exclude_columns": deepcopy(profile.get("cross_sectional_rank_exclude_columns")),
         "raw": profile,
         "profile_config_path": profile_config_path,
         "profile_path": profile.get("path"),

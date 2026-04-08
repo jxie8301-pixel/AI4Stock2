@@ -5,6 +5,24 @@ from __future__ import annotations
 from typing import Any
 
 
+def _resolve_cross_sectional_rank_exclude_columns(cfg: dict[str, Any]) -> set[str]:
+    transforms_cfg = cfg.get("features", {}).get("transforms", {}) or {}
+    excluded = transforms_cfg.get("cross_sectional_rank_exclude_columns")
+    if excluded is None:
+        try:
+            from src.feature_profiles import resolve_feature_profile
+        except ModuleNotFoundError:
+            from feature_profiles import resolve_feature_profile  # type: ignore
+
+        profile = resolve_feature_profile(cfg)
+        excluded = profile.get("cross_sectional_rank_exclude_columns")
+    if excluded is None:
+        return set()
+    if not isinstance(excluded, list):
+        raise ValueError("cross_sectional_rank_exclude_columns must resolve to a list of strings")
+    return {str(item) for item in excluded if str(item).strip()}
+
+
 def resolve_selected_feature_columns(meta: dict[str, Any], cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return (display_columns, source_columns) after applying profile expansion."""
     try:
@@ -106,16 +124,19 @@ def compute_finite_feature_mask_frame(frame, selected_columns: list[str]):
     return ~np.isinf(values).any(axis=1)
 
 
-def apply_cross_sectional_rank(frame, dates):
+def apply_cross_sectional_rank(frame, dates, *, exclude_columns: set[str] | None = None):
     """Apply per-date percentile rank to each feature column."""
     import pandas as pd
 
     if frame.empty:
         return frame.copy()
 
+    exclude_columns = set(exclude_columns or set())
     ranked = frame.copy()
     date_index = pd.to_datetime(pd.Series(dates, index=ranked.index))
     for col in ranked.columns:
+        if col in exclude_columns:
+            continue
         ranked[col] = ranked[col].groupby(date_index, sort=False).rank(pct=True, method="average")
     return ranked
 
@@ -128,5 +149,10 @@ def apply_feature_transforms(frame, dates, cfg: dict[str, Any]):
 
     transformed = frame
     if transforms_cfg.get("cross_sectional_rank", False):
-        transformed = apply_cross_sectional_rank(transformed, dates)
+        exclude_columns = _resolve_cross_sectional_rank_exclude_columns(cfg)
+        transformed = apply_cross_sectional_rank(
+            transformed,
+            dates,
+            exclude_columns=exclude_columns,
+        )
     return transformed

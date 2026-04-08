@@ -279,6 +279,9 @@ class NativeLGBM:
         elif loss == "huber":
             objective = "huber"
             default_metric = "rmse"
+        elif loss in {"binary", "binary_logloss", "cross_entropy", "logloss"}:
+            objective = "binary"
+            default_metric = "binary_logloss"
         elif loss in {"lambdarank", "rank_xendcg"}:
             objective = loss
             default_metric = "ndcg"

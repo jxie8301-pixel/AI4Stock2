@@ -10,7 +10,7 @@ import pandas as pd
 
 from src.config_loader import load_config
 from src.feature_profiles import get_native_factor_store_dir
-from src.label_utils import normalize_train_label_transform_mode
+from src.label_utils import normalize_opportunity_mode, normalize_train_label_transform_mode
 
 try:
     from src.data_source import resolve_data_source_name
@@ -42,6 +42,7 @@ TOP_LEVEL_SCHEMA = {
         "selected_columns": None,
         "transforms": {
             "cross_sectional_rank": None,
+            "cross_sectional_rank_exclude_columns": None,
         },
         "handler": None,
         "lookback": None,
@@ -92,6 +93,10 @@ TOP_LEVEL_SCHEMA = {
         "signal_horizon": None,
         "horizons": None,
         "horizon": None,
+        "opportunity": {
+            "mode": None,
+            "threshold": None,
+        },
         "train_transform": {
             "mode": None,
             "neutral_band": None,
@@ -117,6 +122,18 @@ TOP_LEVEL_SCHEMA = {
         "desticky_n_drop": None,
         "keep_top_n": None,
         "min_score": None,
+        "score_fusion": {
+            "enabled": None,
+            "secondary_predictions_dir": None,
+            "mode": None,
+            "primary_transform": None,
+            "secondary_transform": None,
+            "primary_power": None,
+            "secondary_power": None,
+            "blend_weight": None,
+            "filter_threshold": None,
+            "filter_value": None,
+        },
     },
     "backtest": {
         "rebalance_freq": None,
@@ -309,6 +326,14 @@ def validate_training_config(
     if selected_columns is not None:
         if not isinstance(selected_columns, list) or not all(isinstance(item, str) and item for item in selected_columns):
             raise ValueError("features.selected_columns must be a list of non-empty strings")
+    transforms_cfg = features_cfg.get("transforms", {})
+    if transforms_cfg is not None and not isinstance(transforms_cfg, dict):
+        raise ValueError("features.transforms must be a mapping when provided")
+    if isinstance(transforms_cfg, dict):
+        exclude_columns = transforms_cfg.get("cross_sectional_rank_exclude_columns")
+        if exclude_columns is not None:
+            if not isinstance(exclude_columns, list) or not all(isinstance(item, str) and item for item in exclude_columns):
+                raise ValueError("features.transforms.cross_sectional_rank_exclude_columns must be a list of non-empty strings")
 
     model_cfg = cfg.get("model", {})
     model_name = str(model_cfg.get("name") or "").strip()
@@ -330,12 +355,27 @@ def validate_training_config(
         raise ValueError("label.horizons must include 1 for realized backtest returns")
     if signal_horizon not in horizon_values:
         raise ValueError("label.signal_horizon must be included in label.horizons")
+    opportunity_cfg = label_cfg.get("opportunity")
+    if opportunity_cfg is not None:
+        if not isinstance(opportunity_cfg, dict):
+            raise ValueError("label.opportunity must be a mapping")
+        mode = normalize_opportunity_mode(opportunity_cfg.get("mode"))
+        opportunity_cfg["mode"] = mode
+        threshold = float(opportunity_cfg.get("threshold", 0.0))
+        opportunity_cfg["threshold"] = threshold
     train_transform_cfg = label_cfg.get("train_transform")
     if train_transform_cfg is not None:
         if not isinstance(train_transform_cfg, dict):
             raise ValueError("label.train_transform must be a mapping")
         mode = normalize_train_label_transform_mode(train_transform_cfg.get("mode"))
         train_transform_cfg["mode"] = mode
+        if mode == "buyability_binary":
+            opportunity_mode = str((opportunity_cfg or {}).get("mode", "positive"))
+            if opportunity_mode not in {"positive", "threshold"}:
+                raise ValueError(
+                    "label.train_transform.mode=buyability_binary currently requires "
+                    "label.opportunity.mode to be one of: positive, threshold"
+                )
         neutral_band = float(train_transform_cfg.get("neutral_band", 0.0))
         if neutral_band < 0:
             raise ValueError("label.train_transform.neutral_band must be >= 0")
@@ -413,6 +453,40 @@ def validate_training_config(
     min_score = strategy_cfg.get("min_score")
     if min_score is not None:
         strategy_cfg["min_score"] = float(min_score)
+    score_fusion_cfg = strategy_cfg.get("score_fusion")
+    if score_fusion_cfg is not None:
+        if not isinstance(score_fusion_cfg, dict):
+            raise ValueError("strategy.score_fusion must be a mapping")
+        enabled = bool(score_fusion_cfg.get("enabled", False))
+        score_fusion_cfg["enabled"] = enabled
+        mode = str(score_fusion_cfg.get("mode", "multiply") or "multiply").strip().lower()
+        if mode not in {"multiply", "blend", "filter"}:
+            raise ValueError("strategy.score_fusion.mode must be one of: multiply, blend, filter")
+        score_fusion_cfg["mode"] = mode
+        for field in ("primary_transform", "secondary_transform"):
+            transform = str(score_fusion_cfg.get(field, "raw") or "raw").strip().lower()
+            if transform not in {"raw", "rank_pct"}:
+                raise ValueError(f"strategy.score_fusion.{field} must be one of: raw, rank_pct")
+            score_fusion_cfg[field] = transform
+        score_fusion_cfg["primary_power"] = _expect_positive_float(
+            score_fusion_cfg.get("primary_power", 1.0),
+            "strategy.score_fusion.primary_power",
+        )
+        score_fusion_cfg["secondary_power"] = _expect_positive_float(
+            score_fusion_cfg.get("secondary_power", 1.0),
+            "strategy.score_fusion.secondary_power",
+        )
+        blend_weight = float(score_fusion_cfg.get("blend_weight", 0.5))
+        if blend_weight < 0.0 or blend_weight > 1.0:
+            raise ValueError("strategy.score_fusion.blend_weight must be in [0, 1]")
+        score_fusion_cfg["blend_weight"] = blend_weight
+        score_fusion_cfg["filter_threshold"] = float(score_fusion_cfg.get("filter_threshold", 0.5))
+        score_fusion_cfg["filter_value"] = float(score_fusion_cfg.get("filter_value", -1.0))
+        secondary_predictions_dir = score_fusion_cfg.get("secondary_predictions_dir")
+        if enabled:
+            if not secondary_predictions_dir or not str(secondary_predictions_dir).strip():
+                raise ValueError("strategy.score_fusion.secondary_predictions_dir is required when score_fusion.enabled=true")
+            score_fusion_cfg["secondary_predictions_dir"] = str(secondary_predictions_dir).strip()
 
     backtest_cfg = cfg.get("backtest", {})
     _expect_positive_int(backtest_cfg.get("rebalance_freq"), "backtest.rebalance_freq")
@@ -740,6 +814,13 @@ def validate_training_config(
         lgbm_cfg = cfg.get("lgbm")
         if not isinstance(lgbm_cfg, dict):
             raise ValueError("lgbm config block is required when model.name == 'lgbm'")
+        loss = str(lgbm_cfg.get("loss", "regression") or "regression").strip().lower()
+        if train_transform_cfg is not None and str(train_transform_cfg.get("mode")) == "buyability_binary":
+            if loss not in {"binary", "binary_logloss", "cross_entropy", "logloss"}:
+                raise ValueError(
+                    "label.train_transform.mode=buyability_binary requires lgbm.loss to be "
+                    "one of: binary, binary_logloss, cross_entropy, logloss"
+                )
         early_stopping_metric = str(lgbm_cfg.get("early_stopping_metric", "default") or "default").strip().lower()
         if early_stopping_metric not in {
             "default",

@@ -131,6 +131,26 @@ profiles:
       - TS_industry_rel_ret_20
       - TS_industry_rel_ret_60
 
+  core_v4_techlite_tushare_plus_industry_nostruct_mixed_v1:
+    extends: core_v4_techlite_tushare_plus_industry_nostruct_v1
+    cross_sectional_rank_exclude_columns:
+      - TS_industry_ret_20
+      - TS_industry_ret_60
+      - TS_industry_excess_ret_20
+      - TS_industry_excess_ret_60
+      - TS_industry_rel_ret_20
+      - TS_industry_rel_ret_60
+
+  core_v4_techlite_tushare_plus_industry_nostruct_midlong_mixed_v1:
+    extends: core_v4_techlite_tushare_plus_industry_nostruct_midlong_v1
+    cross_sectional_rank_exclude_columns:
+      - TS_industry_ret_20
+      - TS_industry_ret_60
+      - TS_industry_excess_ret_20
+      - TS_industry_excess_ret_60
+      - TS_industry_rel_ret_20
+      - TS_industry_rel_ret_60
+
   core_v4_techlite_no_aroon:
     extends: core_v4_techlite
     drop_columns: [TECH_aroon_osc_25]

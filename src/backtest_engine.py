@@ -81,6 +81,8 @@ def run_native_backtest(
     score_zscore_clip: float = 3.0,
     max_weight: float | None = None,
     max_industry_weight: float | None = None,
+    desticky_signal_threshold: float | None = None,
+    desticky_n_drop: int | None = None,
     keep_top_n: int | None = None,
     min_score: float | None = None,
     instrument_groups: pd.Series | dict[str, str] | None = None,
@@ -104,6 +106,12 @@ def run_native_backtest(
     score_zscore_clip = max(float(score_zscore_clip), 0.0)
     if max_industry_weight is not None:
         max_industry_weight = validate_risk_degree(float(max_industry_weight), "max_industry_weight")
+    if desticky_n_drop is not None:
+        desticky_n_drop = max(int(desticky_n_drop), int(n_drop))
+        if desticky_n_drop >= topk:
+            raise ValueError("desticky_n_drop must be smaller than topk")
+    if desticky_signal_threshold is not None:
+        desticky_signal_threshold = float(desticky_signal_threshold)
     intraperiod_exit_cfg = normalize_intraperiod_exit_config(intraperiod_exit)
     if risk_control is not None and dynamic_risk is not None:
         raise ValueError("Provide only one of risk_control or dynamic_risk")
@@ -265,6 +273,17 @@ def run_native_backtest(
             if (col_idx := instrument_to_col.get(str(stock))) is None or pd.isna(date_return_values[col_idx])
         }
         is_rebalance = (pos % rebalance_freq) == 0
+        effective_n_drop = int(n_drop)
+        desticky_active = False
+        if (
+            is_rebalance
+            and desticky_n_drop is not None
+            and desticky_signal_threshold is not None
+            and pd.notna(current_risk_signal)
+            and float(current_risk_signal) <= float(desticky_signal_threshold)
+        ):
+            effective_n_drop = int(desticky_n_drop)
+            desticky_active = effective_n_drop > int(n_drop)
 
         if is_rebalance:
             strategy_scores_row = pd.Series(strategy_score_values[pos], index=instruments, dtype=float, copy=False)
@@ -272,7 +291,7 @@ def run_native_backtest(
                 transformed_scores=strategy_scores_row,
                 current_holdings=list(holdings.keys()),
                 topk=topk,
-                n_drop=n_drop,
+                n_drop=effective_n_drop,
                 locked_holdings=locked_holdings,
                 keep_top_n=keep_top_n,
                 min_score=min_score,
@@ -514,6 +533,8 @@ def run_native_backtest(
                 "account_value": end_value,
                 "risk_degree": current_risk_degree,
                 "risk_control_signal": current_risk_signal,
+                "effective_n_drop": int(effective_n_drop),
+                "desticky_active": bool(desticky_active),
             }
         )
         if return_trace and (trace_dates_norm is None or pd.Timestamp(date) in trace_dates_norm):
@@ -535,6 +556,8 @@ def run_native_backtest(
                     "risk_degree": current_risk_degree,
                     "risk_control_mode": risk_control_cfg["mode"],
                     "risk_control_signal": current_risk_signal,
+                    "effective_n_drop": int(effective_n_drop),
+                    "desticky_active": bool(desticky_active),
                     "intraperiod_exit_mode": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["mode"],
                     "intraperiod_exit_score_source": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg["score_source"],
                     "intraperiod_exit_threshold": None if intraperiod_exit_cfg is None else float(intraperiod_exit_cfg["threshold"]),

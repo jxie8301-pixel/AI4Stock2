@@ -113,6 +113,8 @@ TOP_LEVEL_SCHEMA = {
         "score_zscore_clip": None,
         "max_weight": None,
         "max_industry_weight": None,
+        "desticky_signal_threshold": None,
+        "desticky_n_drop": None,
         "keep_top_n": None,
         "min_score": None,
     },
@@ -387,6 +389,21 @@ def validate_training_config(
         if max_industry_weight <= 0 or max_industry_weight > 1:
             raise ValueError("strategy.max_industry_weight must be in (0, 1] when provided")
         strategy_cfg["max_industry_weight"] = max_industry_weight
+    desticky_signal_threshold = strategy_cfg.get("desticky_signal_threshold")
+    desticky_n_drop = strategy_cfg.get("desticky_n_drop")
+    if desticky_signal_threshold is not None or desticky_n_drop is not None:
+        if desticky_signal_threshold is None or desticky_n_drop is None:
+            raise ValueError(
+                "strategy.desticky_signal_threshold and strategy.desticky_n_drop must be provided together"
+            )
+        desticky_signal_threshold = float(desticky_signal_threshold)
+        desticky_n_drop = _expect_nonnegative_int(desticky_n_drop, "strategy.desticky_n_drop")
+        if desticky_n_drop < n_drop:
+            raise ValueError("strategy.desticky_n_drop must be >= strategy.n_drop")
+        if desticky_n_drop >= topk:
+            raise ValueError("strategy.desticky_n_drop must be smaller than strategy.topk")
+        strategy_cfg["desticky_signal_threshold"] = desticky_signal_threshold
+        strategy_cfg["desticky_n_drop"] = desticky_n_drop
     keep_top_n = strategy_cfg.get("keep_top_n")
     if keep_top_n is not None:
         keep_top_n = _expect_positive_int(keep_top_n, "strategy.keep_top_n")

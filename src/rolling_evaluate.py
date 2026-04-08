@@ -177,6 +177,8 @@ def evaluate_prediction_bundle(
         f"score_zscore_clip={cfg['strategy'].get('score_zscore_clip', 3.0)}, "
         f"max_weight={cfg['strategy'].get('max_weight', 'none')}, "
         f"max_industry_weight={cfg['strategy'].get('max_industry_weight', 'none')}, "
+        f"desticky_signal_threshold={cfg['strategy'].get('desticky_signal_threshold', 'none')}, "
+        f"desticky_n_drop={cfg['strategy'].get('desticky_n_drop', 'none')}, "
         f"keep_top_n={cfg['strategy'].get('keep_top_n', 'none')}, "
         f"min_score={cfg['strategy'].get('min_score', 'none')}, "
         f"rebalance={rebalance_freq}d, "
@@ -228,6 +230,8 @@ def evaluate_prediction_bundle(
         "score_zscore_clip": cfg["strategy"].get("score_zscore_clip", 3.0),
         "max_weight": cfg["strategy"].get("max_weight"),
         "max_industry_weight": cfg["strategy"].get("max_industry_weight"),
+        "desticky_signal_threshold": cfg["strategy"].get("desticky_signal_threshold"),
+        "desticky_n_drop": cfg["strategy"].get("desticky_n_drop"),
         "keep_top_n": cfg["strategy"].get("keep_top_n"),
         "min_score": cfg["strategy"].get("min_score"),
         "benchmark_returns": bench_series,

@@ -6,10 +6,15 @@ model:
 lgbm:
   loss: binary
   early_stopping_metric: valid_topk_label_mean
-  learning_rate: 0.05
-  num_boost_round: 1000
-  early_stop: 10
+  learning_rate: 0.03
+  num_boost_round: 1500
+  early_stop: 20
+  min_boost_round: 50
   early_stopping_min_delta: 0.0
+  sample_weight_mode: opportunity_distance
+  sample_weight_power: 1.0
+  sample_weight_min: 0.25
+  sample_weight_date_normalize: true
   log_evaluation_period: 50
   colsample_bytree: 0.8879
   subsample: 0.8789

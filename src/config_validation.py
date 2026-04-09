@@ -69,10 +69,16 @@ TOP_LEVEL_SCHEMA = {
         "learning_rate": None,
         "num_boost_round": None,
         "early_stop": None,
+        "min_boost_round": None,
         "early_stopping_metric": None,
         "early_stopping_min_delta": None,
         "train_weight_half_life": None,
         "train_weight_floor": None,
+        "sample_weight_mode": None,
+        "sample_weight_power": None,
+        "sample_weight_scale": None,
+        "sample_weight_min": None,
+        "sample_weight_date_normalize": None,
         "ranking_num_bins": None,
         "validation_topk": None,
         "log_evaluation_period": None,
@@ -96,6 +102,7 @@ TOP_LEVEL_SCHEMA = {
         "opportunity": {
             "mode": None,
             "threshold": None,
+            "neutral_band": None,
         },
         "train_transform": {
             "mode": None,
@@ -363,19 +370,25 @@ def validate_training_config(
         opportunity_cfg["mode"] = mode
         threshold = float(opportunity_cfg.get("threshold", 0.0))
         opportunity_cfg["threshold"] = threshold
+        neutral_band = float(opportunity_cfg.get("neutral_band", 0.0))
+        if neutral_band < 0:
+            raise ValueError("label.opportunity.neutral_band must be >= 0")
+        opportunity_cfg["neutral_band"] = neutral_band
     train_transform_cfg = label_cfg.get("train_transform")
     if train_transform_cfg is not None:
         if not isinstance(train_transform_cfg, dict):
             raise ValueError("label.train_transform must be a mapping")
         mode = normalize_train_label_transform_mode(train_transform_cfg.get("mode"))
         train_transform_cfg["mode"] = mode
-        if mode == "buyability_binary":
+        if mode in {"buyability_binary", "buyability_margin_binary"}:
             opportunity_mode = str((opportunity_cfg or {}).get("mode", "positive"))
-            if opportunity_mode not in {"positive", "threshold"}:
+            if opportunity_mode not in {"positive", "threshold", "industry_excess", "benchmark_excess"}:
                 raise ValueError(
-                    "label.train_transform.mode=buyability_binary currently requires "
-                    "label.opportunity.mode to be one of: positive, threshold"
+                    "buyability binary train transforms currently require "
+                    "label.opportunity.mode to be one of: positive, threshold, industry_excess, benchmark_excess"
                 )
+        if mode == "buyability_margin_binary" and float((opportunity_cfg or {}).get("neutral_band", 0.0)) <= 0:
+            raise ValueError("label.train_transform.mode=buyability_margin_binary requires label.opportunity.neutral_band > 0")
         neutral_band = float(train_transform_cfg.get("neutral_band", 0.0))
         if neutral_band < 0:
             raise ValueError("label.train_transform.neutral_band must be >= 0")
@@ -815,10 +828,10 @@ def validate_training_config(
         if not isinstance(lgbm_cfg, dict):
             raise ValueError("lgbm config block is required when model.name == 'lgbm'")
         loss = str(lgbm_cfg.get("loss", "regression") or "regression").strip().lower()
-        if train_transform_cfg is not None and str(train_transform_cfg.get("mode")) == "buyability_binary":
+        if train_transform_cfg is not None and str(train_transform_cfg.get("mode")) in {"buyability_binary", "buyability_margin_binary"}:
             if loss not in {"binary", "binary_logloss", "cross_entropy", "logloss"}:
                 raise ValueError(
-                    "label.train_transform.mode=buyability_binary requires lgbm.loss to be "
+                    "buyability binary train transforms require lgbm.loss to be "
                     "one of: binary, binary_logloss, cross_entropy, logloss"
                 )
         early_stopping_metric = str(lgbm_cfg.get("early_stopping_metric", "default") or "default").strip().lower()
@@ -836,6 +849,10 @@ def validate_training_config(
         lgbm_cfg["early_stopping_metric"] = early_stopping_metric
         _expect_positive_int(lgbm_cfg.get("num_boost_round"), "lgbm.num_boost_round")
         _expect_nonnegative_int(lgbm_cfg.get("early_stop"), "lgbm.early_stop")
+        min_boost_round = _expect_nonnegative_int(lgbm_cfg.get("min_boost_round", 0), "lgbm.min_boost_round")
+        if min_boost_round >= int(lgbm_cfg.get("num_boost_round")):
+            raise ValueError("lgbm.min_boost_round must be smaller than lgbm.num_boost_round")
+        lgbm_cfg["min_boost_round"] = min_boost_round
         _expect_nonnegative_float(lgbm_cfg.get("early_stopping_min_delta", 0.0), "lgbm.early_stopping_min_delta")
         train_weight_half_life = lgbm_cfg.get("train_weight_half_life")
         if train_weight_half_life is not None:
@@ -848,6 +865,28 @@ def validate_training_config(
             if train_weight_floor < 0.0 or train_weight_floor >= 1.0:
                 raise ValueError("lgbm.train_weight_floor must be in [0, 1)")
             lgbm_cfg["train_weight_floor"] = train_weight_floor
+        sample_weight_mode = str(lgbm_cfg.get("sample_weight_mode", "none") or "none").strip().lower()
+        if sample_weight_mode not in {"none", "opportunity_distance"}:
+            raise ValueError("lgbm.sample_weight_mode must be one of: none, opportunity_distance")
+        if sample_weight_mode != "none":
+            if train_transform_cfg is None or str(train_transform_cfg.get("mode")) not in {"buyability_binary", "buyability_margin_binary"}:
+                raise ValueError(
+                    "lgbm.sample_weight_mode requires a buyability binary train transform "
+                    "(buyability_binary or buyability_margin_binary)"
+                )
+        lgbm_cfg["sample_weight_mode"] = sample_weight_mode
+        lgbm_cfg["sample_weight_power"] = _expect_positive_float(
+            lgbm_cfg.get("sample_weight_power", 1.0),
+            "lgbm.sample_weight_power",
+        )
+        sample_weight_scale = lgbm_cfg.get("sample_weight_scale")
+        if sample_weight_scale is not None:
+            lgbm_cfg["sample_weight_scale"] = _expect_positive_float(sample_weight_scale, "lgbm.sample_weight_scale")
+        lgbm_cfg["sample_weight_min"] = _expect_nonnegative_float(
+            lgbm_cfg.get("sample_weight_min", 0.0),
+            "lgbm.sample_weight_min",
+        )
+        lgbm_cfg["sample_weight_date_normalize"] = bool(lgbm_cfg.get("sample_weight_date_normalize", False))
         ranking_num_bins = lgbm_cfg.get("ranking_num_bins")
         if ranking_num_bins is not None:
             ranking_num_bins = _expect_positive_int(ranking_num_bins, "lgbm.ranking_num_bins")

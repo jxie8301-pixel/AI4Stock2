@@ -4,21 +4,25 @@ from __future__ import annotations
 
 import argparse
 import pickle
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
 
+from src.data_source import resolve_data_source_name
 from src.experiment_store import resolve_rebalance_freq
 from src.feature_selection import apply_feature_transforms
 from src.label_utils import (
     build_opportunity_target_series,
+    compute_opportunity_sample_weights,
     resolve_opportunity_label_cfg,
     resolve_train_label_transform_cfg,
     transform_training_label_series,
 )
 from src.model_config import get_lgbm_config
+from src.evaluate import build_benchmark_series
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
@@ -122,6 +126,124 @@ def _compute_validation_topk_summary(
     }
 
 
+def _build_buyability_sample_weight_series(
+    labels: pd.Series,
+    dates: np.ndarray | pd.Series,
+    *,
+    lgbm_config: dict[str, Any],
+    opportunity_cfg: dict[str, Any],
+    opportunity_instrument_groups: pd.Series | None = None,
+    benchmark_forward_returns: pd.Series | None = None,
+) -> pd.Series | None:
+    sample_weight_mode = str(lgbm_config.get("sample_weight_mode", "none") or "none").strip().lower()
+    if sample_weight_mode == "none":
+        return None
+    return compute_opportunity_sample_weights(
+        labels,
+        dates,
+        opportunity_cfg=opportunity_cfg,
+        instrument_groups=opportunity_instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+        sample_weight_mode=sample_weight_mode,
+        sample_weight_power=float(lgbm_config.get("sample_weight_power", 1.0)),
+        sample_weight_scale=lgbm_config.get("sample_weight_scale"),
+        sample_weight_min=float(lgbm_config.get("sample_weight_min", 0.0)),
+        sample_weight_date_normalize=bool(lgbm_config.get("sample_weight_date_normalize", False)),
+    )
+
+
+def _build_forward_compound_return_series(
+    daily_returns: pd.Series,
+    *,
+    horizon: int,
+) -> pd.Series:
+    clean = pd.Series(daily_returns, copy=True).sort_index().astype(float)
+    horizon = max(int(horizon), 1)
+    if clean.empty:
+        return pd.Series(dtype=float)
+    values = clean.to_numpy(dtype=np.float64, copy=False)
+    out = np.full(len(clean), np.nan, dtype=np.float64)
+    for i in range(len(clean)):
+        end = i + horizon
+        if end >= len(clean):
+            break
+        window = values[i + 1 : end + 1]
+        if len(window) != horizon or not np.isfinite(window).all():
+            continue
+        out[i] = float(np.prod(1.0 + window) - 1.0)
+    return pd.Series(out, index=clean.index, dtype=float)
+
+
+def _load_instrument_industry_groups(
+    cfg: dict[str, Any],
+    *,
+    instruments: pd.Index,
+) -> pd.Series | None:
+    data_source = resolve_data_source_name(cfg)
+    raw_meta_dir = Path("data") / data_source / "raw" / "meta"
+    symbol_cache_path = raw_meta_dir / "symbol_cache.parquet"
+    if not symbol_cache_path.exists():
+        return None
+    try:
+        frame = pd.read_parquet(symbol_cache_path, columns=["local_symbol", "industry"])
+    except Exception:
+        return None
+    if frame.empty or "local_symbol" not in frame.columns or "industry" not in frame.columns:
+        return None
+    frame["local_symbol"] = frame["local_symbol"].astype(str).str.zfill(6)
+    frame["industry"] = frame["industry"].fillna("").replace("", pd.NA)
+    frame = frame.drop_duplicates("local_symbol", keep="last").set_index("local_symbol")
+    instrument_index = pd.Index(instruments.astype(str), dtype=object)
+    groups = frame["industry"].reindex(instrument_index)
+    return groups if groups.notna().any() else None
+
+
+def _build_full_runtime_label_series(runtime_data: RollingRuntimeData) -> pd.Series:
+    dates = pd.to_datetime(runtime_data.dt_index).reset_index(drop=True)
+    symbols = runtime_data.factor_frame["symbol"].astype(str).reset_index(drop=True)
+    index = pd.MultiIndex.from_arrays([dates, symbols], names=["datetime", "instrument"])
+    return pd.Series(runtime_data.y, index=index, name="label", dtype=float).sort_index()
+
+
+def _build_window_label_series(
+    values: np.ndarray,
+    dates: pd.Series,
+    symbols: pd.Series,
+) -> pd.Series:
+    index = pd.MultiIndex.from_arrays(
+        [pd.to_datetime(dates).reset_index(drop=True), symbols.astype(str).reset_index(drop=True)],
+        names=["datetime", "instrument"],
+    )
+    return pd.Series(values, index=index, name="label", dtype=float)
+
+
+def _prepare_opportunity_training_context(
+    cfg: dict[str, Any],
+    runtime_data: RollingRuntimeData,
+    *,
+    signal_horizon: int,
+) -> dict[str, Any]:
+    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
+    context: dict[str, Any] = {
+        "instrument_groups": None,
+        "benchmark_forward_returns": None,
+    }
+    mode = str(opportunity_cfg["mode"])
+    if mode == "industry_excess":
+        context["instrument_groups"] = _load_instrument_industry_groups(
+            cfg,
+            instruments=runtime_data.factor_frame["symbol"].astype(str).drop_duplicates(),
+        )
+    elif mode == "benchmark_excess":
+        runtime_labels = _build_full_runtime_label_series(runtime_data)
+        benchmark_series, _ = build_benchmark_series(runtime_labels, cfg.get("backtest", {}).get("benchmark"))
+        context["benchmark_forward_returns"] = _build_forward_compound_return_series(
+            benchmark_series,
+            horizon=signal_horizon,
+        )
+    return context
+
+
 def _run_lgbm_window(
     cfg: dict[str, Any],
     runtime_data: RollingRuntimeData,
@@ -139,6 +261,8 @@ def _run_lgbm_window(
     paths: RollingPaths,
     load_models: bool,
     save_models: bool,
+    opportunity_instrument_groups: pd.Series | None = None,
+    benchmark_forward_returns: pd.Series | None = None,
 ) -> tuple[pd.Series | None, pd.DataFrame | None, dict[str, Any] | None]:
     from src.models.pure_lightgbm import NativeLGBM
 
@@ -153,21 +277,74 @@ def _run_lgbm_window(
 
     feature_names = runtime_data.selected_feature_names
     X_train_df = runtime_data.factor_frame.loc[valid_train_mask, feature_names].reset_index(drop=True)
-    y_train_series = pd.Series(runtime_data.y[valid_train_mask])
-    X_valid_df = runtime_data.factor_frame.loc[valid_valid_mask, feature_names].reset_index(drop=True)
-    raw_y_valid_series = pd.Series(runtime_data.y[valid_valid_mask])
-    y_valid_series = raw_y_valid_series.copy()
     train_dates = pd.to_datetime(runtime_data.dt_index[valid_train_mask]).reset_index(drop=True)
+    train_symbols = runtime_data.factor_frame.loc[valid_train_mask, "symbol"].astype(str).reset_index(drop=True)
+    raw_y_train_series = _build_window_label_series(runtime_data.y[valid_train_mask], train_dates, train_symbols)
+    y_train_series = raw_y_train_series.copy()
+    X_valid_df = runtime_data.factor_frame.loc[valid_valid_mask, feature_names].reset_index(drop=True)
     valid_dates = pd.to_datetime(runtime_data.dt_index[valid_valid_mask]).reset_index(drop=True)
-    y_train_series = transform_training_label_series(y_train_series, train_dates, cfg)
-    y_valid_series = transform_training_label_series(y_valid_series, valid_dates, cfg)
+    valid_symbols = runtime_data.factor_frame.loc[valid_valid_mask, "symbol"].astype(str).reset_index(drop=True)
+    raw_y_valid_series = _build_window_label_series(runtime_data.y[valid_valid_mask], valid_dates, valid_symbols)
+    y_valid_series = raw_y_valid_series.copy()
+    y_train_series = transform_training_label_series(
+        y_train_series,
+        train_dates,
+        cfg,
+        instrument_groups=opportunity_instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
+    y_valid_series = transform_training_label_series(
+        y_valid_series,
+        valid_dates,
+        cfg,
+        instrument_groups=opportunity_instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
+    train_label_transform = resolve_train_label_transform_cfg(cfg)
+    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
+    raw_train_rows = int(len(X_train_df))
+    raw_valid_rows = int(len(X_valid_df))
+
+    train_keep_mask = np.isfinite(y_train_series.to_numpy(dtype=np.float64, copy=False))
+    valid_keep_mask = np.isfinite(y_valid_series.to_numpy(dtype=np.float64, copy=False))
+    if not train_keep_mask.any():
+        print("    Skipping window: no effective LightGBM training rows after label transform.")
+        return None, None, None
+    if not valid_keep_mask.any():
+        print("    Skipping window: no effective LightGBM validation rows after label transform.")
+        return None, None, None
+
+    if not train_keep_mask.all():
+        X_train_df = X_train_df.loc[train_keep_mask].reset_index(drop=True)
+        raw_y_train_series = raw_y_train_series.iloc[train_keep_mask]
+        y_train_series = y_train_series.iloc[train_keep_mask]
+        train_dates = train_dates.loc[train_keep_mask].reset_index(drop=True)
+    if not valid_keep_mask.all():
+        X_valid_df = X_valid_df.loc[valid_keep_mask].reset_index(drop=True)
+        raw_y_valid_series = raw_y_valid_series.iloc[valid_keep_mask]
+        y_valid_series = y_valid_series.iloc[valid_keep_mask]
+        valid_dates = valid_dates.loc[valid_keep_mask].reset_index(drop=True)
+
     X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
     X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
-    train_label_transform = resolve_train_label_transform_cfg(cfg)
 
     lgbm_config = get_lgbm_config(cfg)
-    model_loss = str(lgbm_config.get("loss", "regression") or "regression").strip().lower()
-    use_transformed_valid_eval_labels = model_loss in {"binary", "binary_logloss", "cross_entropy", "logloss"}
+    train_sample_weight = _build_buyability_sample_weight_series(
+        raw_y_train_series,
+        train_dates,
+        lgbm_config=lgbm_config,
+        opportunity_cfg=opportunity_cfg,
+        opportunity_instrument_groups=opportunity_instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
+    valid_sample_weight = _build_buyability_sample_weight_series(
+        raw_y_valid_series,
+        valid_dates,
+        lgbm_config=lgbm_config,
+        opportunity_cfg=opportunity_cfg,
+        opportunity_instrument_groups=opportunity_instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
     model_path = paths.models_dir / f"model_{current_test_start.strftime('%Y-%m-%d')}.pkl"
     model = NativeLGBM(**lgbm_config)
     loaded_model = False
@@ -185,7 +362,9 @@ def _run_lgbm_window(
             y_valid_series,
             train_dates=train_dates,
             valid_dates=valid_dates,
-            valid_eval_labels=y_valid_series if use_transformed_valid_eval_labels else raw_y_valid_series,
+            valid_eval_labels=raw_y_valid_series,
+            train_sample_weight=train_sample_weight,
+            valid_sample_weight=valid_sample_weight,
         )
         if save_models:
             with open(model_path, "wb") as f:
@@ -199,12 +378,15 @@ def _run_lgbm_window(
     history_path = paths.training_history_dir / f"training_history_{current_test_start.strftime('%Y-%m-%d')}.csv"
     saved_history_path = model.save_training_history(history_path)
     valid_opportunity_labels: pd.Series | None = None
-    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
-    if str(opportunity_cfg["mode"]) in {"positive", "threshold"}:
+    try:
         valid_opportunity_labels = build_opportunity_target_series(
             raw_y_valid_series,
             opportunity_cfg=opportunity_cfg,
+            instrument_groups=opportunity_instrument_groups,
+            benchmark_forward_returns=benchmark_forward_returns,
         )
+    except Exception:
+        valid_opportunity_labels = None
     valid_topk_summary = _compute_validation_topk_summary(
         model.predict(X_valid_df),
         raw_y_valid_series,
@@ -221,16 +403,24 @@ def _run_lgbm_window(
         "valid_end": valid_end.strftime("%Y-%m-%d"),
         "signal_horizon": int(signal_horizon),
         "train_label_transform_mode": str(train_label_transform["mode"]),
+        "train_label_space": "binary_target" if str(train_label_transform["mode"]).startswith("buyability") else "return_target",
+        "valid_custom_metric_label_space": "raw_return",
         "opportunity_label_mode": str(opportunity_cfg["mode"]),
         "opportunity_label_threshold": float(opportunity_cfg["threshold"]),
+        "opportunity_label_neutral_band": float(opportunity_cfg["neutral_band"]),
         "train_label_transform_neutral_band": float(train_label_transform["neutral_band"]),
         "train_label_transform_tail_band": float(train_label_transform["tail_band"]),
         "train_label_transform_scale_multiplier": float(train_label_transform["scale_multiplier"]),
+        "raw_train_rows": raw_train_rows,
+        "raw_valid_rows": raw_valid_rows,
+        "train_rows_dropped_after_label_transform": int(raw_train_rows - len(X_train_df)),
+        "valid_rows_dropped_after_label_transform": int(raw_valid_rows - len(X_valid_df)),
         "train_rows": int(len(X_train_df)),
         "valid_rows": int(len(X_valid_df)),
         "feature_count": int(len(feature_names)),
         "loaded_model": bool(loaded_model),
         "training_history_path": str(saved_history_path) if saved_history_path else "",
+        "train_sample_weight_mode": str(lgbm_config.get("sample_weight_mode", "none") or "none"),
         **valid_topk_summary,
         **model.get_training_summary(),
     }
@@ -375,6 +565,11 @@ def generate_prediction_bundle(
     all_predictions: list[pd.Series] = []
     feature_importance_frames: list[pd.DataFrame] = []
     training_summary_records: list[dict[str, Any]] = []
+    opportunity_context = _prepare_opportunity_training_context(
+        cfg,
+        runtime_data,
+        signal_horizon=signal_horizon,
+    )
 
     print(
         f"\n[Rolling Setup] Testing from {runtime_data.test_start.date()} to {runtime_data.test_end.date()} "
@@ -425,6 +620,8 @@ def generate_prediction_bundle(
                 paths=paths,
                 load_models=args.load_models,
                 save_models=args.save_models,
+                opportunity_instrument_groups=opportunity_context.get("instrument_groups"),
+                benchmark_forward_returns=opportunity_context.get("benchmark_forward_returns"),
             )
             if importance_df is not None:
                 feature_importance_frames.append(importance_df)

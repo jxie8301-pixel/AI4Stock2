@@ -11,12 +11,14 @@ DEFAULT_SIGNAL_HORIZON = 10
 DEFAULT_LABEL_HORIZONS = (1, 5, 10, 20)
 DEFAULT_TRAIN_LABEL_TRANSFORM_MODE = "raw"
 DEFAULT_OPPORTUNITY_MODE = "positive"
+DEFAULT_OPPORTUNITY_NEUTRAL_BAND = 0.0
 SUPPORTED_TRAIN_LABEL_TRANSFORM_MODES = (
     "raw",
     "profit_tanh",
     "profit_bucket",
     "cross_section_rank",
     "buyability_binary",
+    "buyability_margin_binary",
 )
 SUPPORTED_OPPORTUNITY_MODES = (
     "positive",
@@ -79,9 +81,13 @@ def resolve_opportunity_label_cfg(cfg: dict | None = None) -> dict[str, float | 
 
     mode = normalize_opportunity_mode(opportunity_cfg.get("mode"))
     threshold = float(opportunity_cfg.get("threshold", 0.0))
+    neutral_band = float(opportunity_cfg.get("neutral_band", DEFAULT_OPPORTUNITY_NEUTRAL_BAND))
+    if neutral_band < 0:
+        raise ValueError("label.opportunity.neutral_band must be >= 0")
     return {
         "mode": mode,
         "threshold": threshold,
+        "neutral_band": neutral_band,
     }
 
 
@@ -152,10 +158,76 @@ def _bucketize_profit_labels(
     return out
 
 
+def build_opportunity_edge_series(
+    labels: pd.Series,
+    *,
+    cfg: dict | None = None,
+    opportunity_cfg: dict[str, float | str] | None = None,
+    instrument_groups: pd.Series | None = None,
+    benchmark_forward_returns: pd.Series | None = None,
+) -> pd.Series:
+    """Return signed edge over the configured opportunity hurdle."""
+    out = pd.Series(np.nan, index=labels.index, name="opportunity_edge", dtype=float)
+    if labels.empty:
+        return out
+
+    opportunity_cfg = opportunity_cfg or resolve_opportunity_label_cfg(cfg)
+    mode = str(opportunity_cfg["mode"])
+    threshold = float(opportunity_cfg["threshold"])
+    clean = pd.to_numeric(labels, errors="coerce").astype(float)
+
+    if mode == "positive":
+        return pd.Series(clean.to_numpy(dtype=np.float64, copy=False), index=clean.index, name="opportunity_edge", dtype=float)
+
+    if mode == "threshold":
+        values = clean.to_numpy(dtype=np.float64, copy=False)
+        result = np.full(len(clean), np.nan, dtype=np.float64)
+        finite_mask = np.isfinite(values)
+        result[finite_mask] = values[finite_mask] - threshold
+        return pd.Series(result, index=clean.index, name="opportunity_edge", dtype=float)
+
+    if mode == "industry_excess":
+        if not isinstance(clean.index, pd.MultiIndex) or clean.index.nlevels < 2:
+            raise ValueError("industry_excess opportunity mode requires a MultiIndex (datetime, instrument) label series")
+        if instrument_groups is None:
+            raise ValueError("industry_excess opportunity mode requires instrument_groups")
+        frame = clean.rename("label").reset_index()
+        frame.columns = ["datetime", "instrument", "label"]
+        frame["instrument"] = frame["instrument"].astype(str)
+        frame["industry"] = instrument_groups.reindex(frame["instrument"]).to_numpy()
+        frame = frame.dropna(subset=["label", "industry"])
+        if frame.empty:
+            return out
+        frame["industry_mean_label"] = frame.groupby(["datetime", "industry"], sort=False)["label"].transform("mean")
+        frame["opportunity_edge"] = frame["label"] - frame["industry_mean_label"] - threshold
+        rebuilt_index = pd.MultiIndex.from_arrays(
+            [pd.to_datetime(frame["datetime"]), frame["instrument"].astype(str)],
+            names=labels.index.names,
+        )
+        out.loc[rebuilt_index] = frame["opportunity_edge"].to_numpy(dtype=float, copy=False)
+        return out
+
+    if mode == "benchmark_excess":
+        if benchmark_forward_returns is None:
+            raise ValueError("benchmark_excess opportunity mode requires benchmark_forward_returns")
+        dates = pd.to_datetime(clean.index.get_level_values(0) if isinstance(clean.index, pd.MultiIndex) else clean.index)
+        benchmark_aligned = benchmark_forward_returns.reindex(pd.Index(dates)).to_numpy(dtype=np.float64, copy=False)
+        values = clean.to_numpy(dtype=np.float64, copy=False)
+        result = np.full(len(clean), np.nan, dtype=np.float64)
+        finite_mask = np.isfinite(values) & np.isfinite(benchmark_aligned)
+        result[finite_mask] = values[finite_mask] - benchmark_aligned[finite_mask] - threshold
+        return pd.Series(result, index=clean.index, name="opportunity_edge", dtype=float)
+
+    raise ValueError(f"Unsupported opportunity mode: {mode}")
+
+
 def transform_training_label_series(
     labels: pd.Series,
     dates: np.ndarray | pd.Series,
     cfg: dict | None = None,
+    *,
+    instrument_groups: pd.Series | None = None,
+    benchmark_forward_returns: pd.Series | None = None,
 ) -> pd.Series:
     """Apply an optional training-only label transform while preserving NaNs."""
     transform_cfg = resolve_train_label_transform_cfg(cfg)
@@ -174,22 +246,27 @@ def transform_training_label_series(
     scale_multiplier = float(transform_cfg["scale_multiplier"])
     min_scale = float(transform_cfg["min_scale"])
 
-    if mode == "buyability_binary":
+    if mode in {"buyability_binary", "buyability_margin_binary"}:
         opportunity_cfg = resolve_opportunity_label_cfg(cfg)
-        opportunity_mode = str(opportunity_cfg["mode"])
-        threshold = float(opportunity_cfg["threshold"])
-        if opportunity_mode == "positive":
-            finite_mask = np.isfinite(values)
-            values[finite_mask] = (values[finite_mask] > 0.0).astype(np.float64)
-            return pd.Series(values, index=out.index, name=out.name, dtype=float)
-        if opportunity_mode == "threshold":
-            finite_mask = np.isfinite(values)
-            values[finite_mask] = (values[finite_mask] > threshold).astype(np.float64)
-            return pd.Series(values, index=out.index, name=out.name, dtype=float)
-        raise ValueError(
-            "label.train_transform.mode=buyability_binary currently supports only "
-            "label.opportunity.mode in {positive, threshold}"
+        edge = build_opportunity_edge_series(
+            out,
+            opportunity_cfg=opportunity_cfg,
+            instrument_groups=instrument_groups,
+            benchmark_forward_returns=benchmark_forward_returns,
         )
+        edge_values = edge.to_numpy(dtype=np.float64, copy=False)
+        finite_mask = np.isfinite(edge_values)
+        if mode == "buyability_binary":
+            values[finite_mask] = (edge_values[finite_mask] > 0.0).astype(np.float64)
+            return pd.Series(values, index=out.index, name=out.name, dtype=float)
+        margin_neutral_band = float(opportunity_cfg["neutral_band"])
+        positive_mask = finite_mask & (edge_values > margin_neutral_band)
+        negative_mask = finite_mask & (edge_values < -margin_neutral_band)
+        neutral_mask = finite_mask & ~(positive_mask | negative_mask)
+        values[positive_mask] = 1.0
+        values[negative_mask] = 0.0
+        values[neutral_mask] = np.nan
+        return pd.Series(values, index=out.index, name=out.name, dtype=float)
 
     for _, idx in date_series.groupby(date_series, sort=False).groups.items():
         group_idx = np.asarray(idx, dtype=np.int64)
@@ -237,61 +314,91 @@ def build_opportunity_target_series(
     benchmark_forward_returns: pd.Series | None = None,
 ) -> pd.Series:
     """Return a 0/1 opportunity target series aligned to realized labels."""
-    out = pd.Series(np.nan, index=labels.index, name="opportunity_label", dtype=float)
-    if labels.empty:
-        return out
+    edge = build_opportunity_edge_series(
+        labels,
+        cfg=cfg,
+        opportunity_cfg=opportunity_cfg,
+        instrument_groups=instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
+    values = edge.to_numpy(dtype=np.float64, copy=False)
+    out = pd.Series(np.nan, index=edge.index, name="opportunity_label", dtype=float)
+    finite_mask = np.isfinite(values)
+    out.loc[finite_mask] = (values[finite_mask] > 0.0).astype(float)
+    return out
 
-    opportunity_cfg = opportunity_cfg or resolve_opportunity_label_cfg(cfg)
-    mode = str(opportunity_cfg["mode"])
-    threshold = float(opportunity_cfg["threshold"])
+
+def compute_opportunity_sample_weights(
+    labels: pd.Series,
+    dates: np.ndarray | pd.Series,
+    *,
+    opportunity_cfg: dict[str, float | str] | None = None,
+    instrument_groups: pd.Series | None = None,
+    benchmark_forward_returns: pd.Series | None = None,
+    sample_weight_mode: str = "none",
+    sample_weight_power: float = 1.0,
+    sample_weight_scale: float | None = None,
+    sample_weight_min: float = 0.0,
+    sample_weight_date_normalize: bool = False,
+) -> pd.Series:
+    """Return optional per-row weights emphasizing distance from the buyability threshold."""
+    mode = str(sample_weight_mode or "none").strip().lower()
     clean = pd.to_numeric(labels, errors="coerce").astype(float)
-
-    if mode == "positive":
-        finite_mask = np.isfinite(clean.to_numpy(dtype=np.float64, copy=False))
-        out.loc[finite_mask] = (clean.loc[finite_mask] > 0.0).astype(float)
+    out = pd.Series(np.nan, index=clean.index, name="sample_weight", dtype=float)
+    finite_mask = np.isfinite(clean.to_numpy(dtype=np.float64, copy=False))
+    if not finite_mask.any():
         return out
-
-    if mode == "threshold":
-        finite_mask = np.isfinite(clean.to_numpy(dtype=np.float64, copy=False))
-        out.loc[finite_mask] = (clean.loc[finite_mask] > threshold).astype(float)
+    if mode == "none":
+        out.loc[finite_mask] = 1.0
         return out
+    if mode != "opportunity_distance":
+        raise ValueError(f"Unsupported sample weight mode: {mode}")
 
-    if mode == "industry_excess":
-        if not isinstance(clean.index, pd.MultiIndex) or clean.index.nlevels < 2:
-            raise ValueError("industry_excess opportunity mode requires a MultiIndex (datetime, instrument) label series")
-        if instrument_groups is None:
-            raise ValueError("industry_excess opportunity mode requires instrument_groups")
-        frame = clean.rename("label").reset_index()
-        frame.columns = ["datetime", "instrument", "label"]
-        frame["instrument"] = frame["instrument"].astype(str)
-        frame["industry"] = instrument_groups.reindex(frame["instrument"]).to_numpy()
-        frame = frame.dropna(subset=["label", "industry"])
-        if frame.empty:
-            return out
-        frame["industry_mean_label"] = frame.groupby(["datetime", "industry"], sort=False)["label"].transform("mean")
-        frame["opportunity_label"] = (frame["label"] > (frame["industry_mean_label"] + threshold)).astype(float)
-        rebuilt_index = pd.MultiIndex.from_arrays(
-            [pd.to_datetime(frame["datetime"]), frame["instrument"].astype(str)],
-            names=labels.index.names,
-        )
-        out.loc[rebuilt_index] = frame["opportunity_label"].to_numpy(dtype=float, copy=False)
-        return out
+    opportunity_cfg = opportunity_cfg or {"mode": "positive", "threshold": 0.0, "neutral_band": 0.0}
+    edge = build_opportunity_edge_series(
+        clean,
+        opportunity_cfg=opportunity_cfg,
+        instrument_groups=instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
+    edge_values = edge.to_numpy(dtype=np.float64, copy=False)
+    default_scale = float(opportunity_cfg.get("neutral_band", 0.0))
+    if sample_weight_scale is None:
+        sample_weight_scale = default_scale if default_scale > 0 else 0.01
+    sample_weight_scale = max(float(sample_weight_scale), 1e-6)
+    sample_weight_power = max(float(sample_weight_power), 1e-6)
+    sample_weight_min = max(float(sample_weight_min), 0.0)
 
-    if mode == "benchmark_excess":
-        if benchmark_forward_returns is None:
-            raise ValueError("benchmark_excess opportunity mode requires benchmark_forward_returns")
-        if isinstance(clean.index, pd.MultiIndex):
-            dates = pd.to_datetime(clean.index.get_level_values(0))
-        else:
-            dates = pd.to_datetime(clean.index)
-        benchmark_aligned = benchmark_forward_returns.reindex(pd.Index(dates)).to_numpy(dtype=np.float64, copy=False)
-        values = clean.to_numpy(dtype=np.float64, copy=False)
-        finite_mask = np.isfinite(values) & np.isfinite(benchmark_aligned)
-        result = np.full(len(clean), np.nan, dtype=np.float64)
-        result[finite_mask] = (values[finite_mask] > (benchmark_aligned[finite_mask] + threshold)).astype(float)
-        return pd.Series(result, index=clean.index, name="opportunity_label", dtype=float)
+    distance = np.abs(edge_values) / sample_weight_scale
+    weights = np.full(len(clean), np.nan, dtype=np.float64)
+    edge_finite_mask = finite_mask & np.isfinite(distance)
+    weights[edge_finite_mask] = 1.0 + np.power(distance[edge_finite_mask], sample_weight_power)
+    if sample_weight_min > 0:
+        weights[edge_finite_mask] = np.maximum(weights[edge_finite_mask], sample_weight_min)
 
-    raise ValueError(f"Unsupported opportunity mode: {mode}")
+    if sample_weight_date_normalize:
+        date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+        if len(date_series) != len(clean):
+            raise ValueError("labels and dates must have the same length")
+        weight_series = pd.Series(weights, index=clean.index, dtype=float)
+        for _, idx in date_series.groupby(date_series, sort=False).groups.items():
+            group_idx = np.asarray(idx, dtype=np.int64)
+            group_values = weight_series.iloc[group_idx].to_numpy(dtype=np.float64, copy=False)
+            group_finite = np.isfinite(group_values)
+            if not group_finite.any():
+                continue
+            group_mean = float(np.mean(group_values[group_finite]))
+            if np.isfinite(group_mean) and group_mean > 0:
+                group_values[group_finite] = group_values[group_finite] / group_mean
+                weight_series.iloc[group_idx] = group_values
+        weights = weight_series.to_numpy(dtype=np.float64, copy=False)
+
+    finite_weight_mask = np.isfinite(weights)
+    if finite_weight_mask.any():
+        mean_weight = float(np.mean(weights[finite_weight_mask]))
+        if np.isfinite(mean_weight) and mean_weight > 0:
+            weights[finite_weight_mask] = weights[finite_weight_mask] / mean_weight
+    return pd.Series(weights, index=clean.index, name="sample_weight", dtype=float)
 
 
 def normalize_signal_horizon(value: int | str | None, *, default: int = DEFAULT_SIGNAL_HORIZON) -> int:

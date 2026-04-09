@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import lightgbm as lgb
+import lightgbm.callback as lgb_callback
 import numpy as np
 import pandas as pd
 
@@ -148,6 +149,116 @@ def _compute_time_decay_weights(
     return (weights / mean_weight).astype(np.float32, copy=False)
 
 
+def _combine_sample_weights(
+    primary: np.ndarray | pd.Series | None,
+    secondary: np.ndarray | pd.Series | None,
+) -> np.ndarray | None:
+    if primary is None and secondary is None:
+        return None
+    if primary is None:
+        return np.asarray(secondary, dtype=np.float32)
+    if secondary is None:
+        return np.asarray(primary, dtype=np.float32)
+    primary_arr = np.asarray(primary, dtype=np.float32)
+    secondary_arr = np.asarray(secondary, dtype=np.float32)
+    if len(primary_arr) != len(secondary_arr):
+        raise ValueError("sample weight arrays must have the same length")
+    return (primary_arr * secondary_arr).astype(np.float32, copy=False)
+
+
+class _MinBoostEarlyStoppingCallback:
+    """Early stopping callback with a minimum-iteration guard."""
+
+    order = 30
+    before_iteration = False
+
+    def __init__(
+        self,
+        *,
+        stopping_rounds: int,
+        min_boost_round: int,
+        first_metric_only: bool,
+        verbose: bool,
+        min_delta: float,
+    ) -> None:
+        self.stopping_rounds = int(stopping_rounds)
+        self.min_boost_round = max(0, int(min_boost_round))
+        self.first_metric_only = bool(first_metric_only)
+        self.verbose = bool(verbose)
+        self.min_delta = float(min_delta)
+        self.enabled = self.stopping_rounds > 0
+        self._reset()
+
+    def _reset(self) -> None:
+        self.best_score: list[float] = []
+        self.best_iter: list[int] = []
+        self.best_score_list: list[list[tuple[Any, ...]]] = []
+        self.cmp_op: list[Any] = []
+        self.first_metric_name = ""
+
+    def _init(self, env: lgb_callback.CallbackEnv) -> None:
+        if not env.evaluation_result_list:
+            raise ValueError("For early stopping, at least one dataset and eval metric is required for evaluation")
+        self._reset()
+        if self.verbose:
+            print(
+                "Training until validation scores don't improve for "
+                f"{self.stopping_rounds} rounds after round {self.min_boost_round}"
+            )
+        self.first_metric_name = str(env.evaluation_result_list[0][1])
+        for eval_ret in env.evaluation_result_list:
+            is_higher_better = bool(eval_ret[3])
+            self.best_score.append(float("-inf") if is_higher_better else float("inf"))
+            self.best_iter.append(0)
+            self.best_score_list.append([])
+            if is_higher_better:
+                self.cmp_op.append(lambda curr, best, delta=self.min_delta: curr > (best + delta))
+            else:
+                self.cmp_op.append(lambda curr, best, delta=self.min_delta: curr < (best - delta))
+
+    def _is_train_set(self, dataset_name: str, env: lgb_callback.CallbackEnv) -> bool:
+        if isinstance(env.model, lgb.Booster) and dataset_name == getattr(env.model, "_train_data_name", "train"):
+            return True
+        return False
+
+    def __call__(self, env: lgb_callback.CallbackEnv) -> None:
+        if env.iteration == env.begin_iteration:
+            self._init(env)
+        if not self.enabled:
+            return
+        if env.evaluation_result_list is None:
+            raise RuntimeError("early stopping callback enabled but no evaluation results found")
+
+        first_time = not any(self.best_score_list)
+        for i, eval_ret in enumerate(env.evaluation_result_list):
+            dataset_name, metric_name, metric_value, *_ = eval_ret
+            metric_value = float(metric_value)
+            if first_time or self.cmp_op[i](metric_value, self.best_score[i]):
+                self.best_score[i] = metric_value
+                self.best_iter[i] = env.iteration
+                self.best_score_list[i] = list(env.evaluation_result_list)
+            if self.first_metric_only and metric_name != self.first_metric_name:
+                continue
+            if self._is_train_set(str(dataset_name), env):
+                continue
+            if (env.iteration + 1) <= self.min_boost_round:
+                continue
+            if env.iteration - self.best_iter[i] >= self.stopping_rounds:
+                if self.verbose:
+                    print(
+                        "Early stopping, best iteration is:\n"
+                        f"[{self.best_iter[i] + 1}]\t"
+                        + "\t".join(
+                            f"{item[0]}'s {item[1]}: {item[2]:g}" for item in self.best_score_list[i]
+                        )
+                    )
+                    if self.first_metric_only:
+                        print(f"Evaluated only: {metric_name}")
+                raise lgb_callback.EarlyStopException(self.best_iter[i], self.best_score_list[i])
+            if env.iteration == env.end_iteration - 1:
+                raise lgb_callback.EarlyStopException(self.best_iter[i], self.best_score_list[i])
+
+
 def _sort_frame_by_dates(
     X: pd.DataFrame,
     y: pd.Series,
@@ -255,6 +366,7 @@ class NativeLGBM:
         min_data_in_leaf: int = 100,
         num_threads: int = 20,
         early_stop: int = 50,
+        min_boost_round: int = 0,
         num_boost_round: int = 1000,
         early_stopping_min_delta: float = 0.0,
         log_evaluation_period: int = 50,
@@ -324,6 +436,7 @@ class NativeLGBM:
         if objective == "huber":
             self.params["alpha"] = alpha
         self.early_stop = early_stop
+        self.min_boost_round = max(0, int(min_boost_round))
         self.num_boost_round = int(num_boost_round)
         self.early_stopping_min_delta = float(early_stopping_min_delta)
         self.log_evaluation_period = int(log_evaluation_period)
@@ -345,6 +458,8 @@ class NativeLGBM:
         train_dates: np.ndarray | pd.Series | None = None,
         valid_dates: np.ndarray | None = None,
         valid_eval_labels: pd.Series | None = None,
+        train_sample_weight: np.ndarray | pd.Series | None = None,
+        valid_sample_weight: np.ndarray | pd.Series | None = None,
     ):
         """Fit the LightGBM model."""
         feature_names = X_train.columns.tolist()
@@ -353,17 +468,23 @@ class NativeLGBM:
         train_label_values = y_train.to_numpy(dtype=np.float32, copy=False)
         X_train_use = X_train
         y_train_use = y_train
+        train_sample_weight_use = None if train_sample_weight is None else pd.Series(train_sample_weight).reset_index(drop=True)
         train_dates_use = None if train_dates is None else pd.to_datetime(pd.Series(train_dates)).reset_index(drop=True)
         if self.train_weight_half_life is not None:
             if train_dates_use is None:
                 raise ValueError("train_dates is required when train_weight_half_life is configured")
             if len(train_dates_use) != len(X_train):
                 raise ValueError("train_dates length must match X_train rows")
+        if train_sample_weight_use is not None and len(train_sample_weight_use) != len(X_train):
+            raise ValueError("train_sample_weight length must match X_train rows")
 
         if self.is_ranking_objective:
             if train_dates is None:
                 raise ValueError("train_dates is required when using a ranking objective")
             X_train_use, y_train_use, train_dates_use = _sort_frame_by_dates(X_train, y_train, train_dates)
+            if train_sample_weight_use is not None:
+                order = np.argsort(pd.to_datetime(pd.Series(train_dates)).to_numpy(dtype="datetime64[ns]"), kind="stable")
+                train_sample_weight_use = train_sample_weight_use.iloc[order].reset_index(drop=True)
             train_label_array = y_train_use.to_numpy(dtype=np.float32, copy=False)
             if _should_use_direct_ranking_relevance_labels(
                 train_label_array,
@@ -384,6 +505,7 @@ class NativeLGBM:
                 self.train_weight_half_life,
                 floor=self.train_weight_floor,
             )
+        train_weight = _combine_sample_weights(train_weight, train_sample_weight_use)
 
         dtrain = lgb.Dataset(
             X_train_use.values,
@@ -401,13 +523,19 @@ class NativeLGBM:
         if X_valid is not None and y_valid is not None:
             X_valid_use = X_valid
             y_valid_use = y_valid
+            valid_sample_weight_use = None if valid_sample_weight is None else pd.Series(valid_sample_weight).reset_index(drop=True)
             valid_dates_use = None if valid_dates is None else pd.to_datetime(pd.Series(valid_dates)).reset_index(drop=True)
             valid_group = None
             valid_label_values = y_valid.to_numpy(dtype=np.float32, copy=False)
+            if valid_sample_weight_use is not None and len(valid_sample_weight_use) != len(X_valid):
+                raise ValueError("valid_sample_weight length must match X_valid rows")
             if self.is_ranking_objective:
                 if valid_dates is None:
                     raise ValueError("valid_dates is required when using a ranking objective with validation")
                 X_valid_use, y_valid_use, valid_dates_use = _sort_frame_by_dates(X_valid, y_valid, valid_dates)
+                if valid_sample_weight_use is not None:
+                    order = np.argsort(pd.to_datetime(pd.Series(valid_dates)).to_numpy(dtype="datetime64[ns]"), kind="stable")
+                    valid_sample_weight_use = valid_sample_weight_use.iloc[order].reset_index(drop=True)
                 valid_label_array = y_valid_use.to_numpy(dtype=np.float32, copy=False)
                 if _should_use_direct_ranking_relevance_labels(
                     valid_label_array,
@@ -424,6 +552,7 @@ class NativeLGBM:
             dvalid = lgb.Dataset(
                 X_valid_use.values,
                 label=valid_label_values,
+                weight=None if valid_sample_weight_use is None else valid_sample_weight_use.to_numpy(dtype=np.float32, copy=False),
                 group=valid_group,
                 reference=dtrain,
                 feature_name=feature_names,
@@ -488,16 +617,27 @@ class NativeLGBM:
         callbacks = []
         callbacks.append(lgb.record_evaluation(evals_result))
         if self.early_stop > 0 and X_valid is not None:
-            early_stopping_kwargs: dict[str, Any] = {
-                "stopping_rounds": self.early_stop,
-                "first_metric_only": True,
-                "verbose": True,
-            }
-            if "min_delta" in inspect.signature(lgb.early_stopping).parameters:
-                early_stopping_kwargs["min_delta"] = self.early_stopping_min_delta
-            callbacks.append(
-                lgb.early_stopping(**early_stopping_kwargs)
-            )
+            if self.min_boost_round > 0:
+                callbacks.append(
+                    _MinBoostEarlyStoppingCallback(
+                        stopping_rounds=self.early_stop,
+                        min_boost_round=self.min_boost_round,
+                        first_metric_only=True,
+                        verbose=True,
+                        min_delta=self.early_stopping_min_delta,
+                    )
+                )
+            else:
+                early_stopping_kwargs: dict[str, Any] = {
+                    "stopping_rounds": self.early_stop,
+                    "first_metric_only": True,
+                    "verbose": True,
+                }
+                if "min_delta" in inspect.signature(lgb.early_stopping).parameters:
+                    early_stopping_kwargs["min_delta"] = self.early_stopping_min_delta
+                callbacks.append(
+                    lgb.early_stopping(**early_stopping_kwargs)
+                )
 
         callbacks.append(lgb.log_evaluation(period=max(1, self.log_evaluation_period)))
 

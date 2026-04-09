@@ -157,6 +157,7 @@ def build_prediction_metadata(
         "cross_sectional_rank_exclude_columns": rank_exclude_columns,
         "opportunity_mode": str(opportunity_cfg["mode"]),
         "opportunity_threshold": float(opportunity_cfg["threshold"]),
+        "opportunity_neutral_band": float(opportunity_cfg["neutral_band"]),
     }
 
 

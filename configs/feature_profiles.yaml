@@ -151,6 +151,73 @@ profiles:
       - TS_industry_rel_ret_20
       - TS_industry_rel_ret_60
 
+  core_v4_techlite_tushare_plus_excess_flow_value_v1:
+    extends: core_v4_techlite_tushare_plus
+    add_columns:
+      - TS_free_turnover_spread
+      - TS_free_turnover_mean_5
+      - TS_free_turnover_mean_20
+      - TS_free_float_ratio_change_20
+      - TS_float_mv_ratio_change_20
+      - TS_sp_ttm_change_20
+      - TS_dividend_yield_ttm_change_20
+      - TS_amplitude_zscore_20
+      - TS_free_turnover_ratio_zscore_20
+      - TS_volume_ratio_raw_zscore_20
+      - TS_turnover_accel_5_20
+      - TS_free_turnover_accel_5_20
+      - TS_free_turnover_spread_zscore_20
+      - TS_amihud_term_5_20
+      - TS_downside_amihud_20
+      - TS_ep_ttm_change_20
+      - TS_bp_change_20
+      - TS_dividend_yield_ttm_surprise_20
+
+  core_v4_techlite_tushare_plus_industry_excess_flow_value_v1:
+    extends: core_v4_techlite_tushare_plus_industry_nostruct_midlong_mixed_v1
+    add_columns:
+      - TS_industry_member_count
+      - TS_industry_std_20
+      - TS_industry_std_60
+      - TS_industry_pos_rate_20
+      - TS_industry_pos_rate_60
+      - TS_industry_dispersion_20
+      - TS_industry_dispersion_60
+      - TS_stock_vs_industry_std_ratio_20
+      - TS_stock_vs_industry_std_ratio_60
+      - TS_free_turnover_spread
+      - TS_free_turnover_mean_5
+      - TS_free_turnover_mean_20
+      - TS_free_float_ratio_change_20
+      - TS_float_mv_ratio_change_20
+      - TS_sp_ttm_change_20
+      - TS_dividend_yield_ttm_change_20
+      - TS_amplitude_zscore_20
+      - TS_free_turnover_ratio_zscore_20
+      - TS_volume_ratio_raw_zscore_20
+      - TS_turnover_accel_5_20
+      - TS_free_turnover_accel_5_20
+      - TS_free_turnover_spread_zscore_20
+      - TS_amihud_term_5_20
+      - TS_downside_amihud_20
+      - TS_ep_ttm_change_20
+      - TS_bp_change_20
+      - TS_dividend_yield_ttm_surprise_20
+    cross_sectional_rank_exclude_columns:
+      - TS_industry_ret_20
+      - TS_industry_ret_60
+      - TS_industry_excess_ret_20
+      - TS_industry_excess_ret_60
+      - TS_industry_rel_ret_20
+      - TS_industry_rel_ret_60
+      - TS_industry_member_count
+      - TS_industry_std_20
+      - TS_industry_std_60
+      - TS_industry_pos_rate_20
+      - TS_industry_pos_rate_60
+      - TS_industry_dispersion_20
+      - TS_industry_dispersion_60
+
   core_v4_techlite_no_aroon:
     extends: core_v4_techlite
     drop_columns: [TECH_aroon_osc_25]

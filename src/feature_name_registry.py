@@ -5,10 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-try:
-    from src.data_source import normalize_data_source_name
-except ModuleNotFoundError:
-    from data_source import normalize_data_source_name  # type: ignore
+from src.data_source import normalize_data_source_name
 
 
 EPS = 1e-12
@@ -390,6 +387,12 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     cfg = deepcopy(DEFAULT_TUSHARE_FACTOR_CONFIG)
     if config is not None:
         cfg.update(config)
+    flow_windows = sorted({int(window) for window in cfg["free_turnover_windows"]})
+    short_flow_window = int(flow_windows[0])
+    long_flow_window = int(flow_windows[-1])
+    valuation_windows = sorted({int(window) for window in cfg["valuation_change_windows"]})
+    industry_windows = sorted({int(window) for window in cfg["industry_windows"]})
+    zscore_window = int(cfg["zscore_window"])
 
     names = [
         "gap_up_limit",
@@ -405,12 +408,18 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "free_turnover_spread",
         "volume_ratio_raw",
         "float_mv_ratio",
+        f"turnover_accel_{short_flow_window}_{long_flow_window}",
+        f"free_turnover_accel_{short_flow_window}_{long_flow_window}",
+        f"free_turnover_spread_zscore_{zscore_window}",
+        f"amihud_term_{short_flow_window}_{long_flow_window}",
+        f"downside_amihud_{long_flow_window}",
         "ep",
         "sp",
         "sp_ttm",
         "ep_ttm_gap",
         "dividend_yield",
         "dividend_yield_ttm",
+        f"dividend_yield_ttm_surprise_{zscore_window}",
         "has_dividend",
         "industry_member_count",
         "industry_daily_ret",
@@ -430,13 +439,18 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     names += [f"float_mv_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
     names += [f"sp_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
     names += [f"dividend_yield_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
-    for window in cfg["industry_windows"]:
+    names += [f"ep_ttm_change_{int(window)}" for window in valuation_windows]
+    names += [f"bp_change_{int(window)}" for window in valuation_windows]
+    for window in industry_windows:
         window = int(window)
         names += [
             f"industry_ret_{window}",
             f"industry_std_{window}",
             f"industry_excess_ret_{window}",
             f"industry_rel_ret_{window}",
+            f"industry_pos_rate_{window}",
+            f"industry_dispersion_{window}",
+            f"stock_vs_industry_std_ratio_{window}",
         ]
     names += [
         "latest_eps",
@@ -488,7 +502,6 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "latest_exp_growth_assets",
         "latest_exp_yoy_assets",
     ]
-    zscore_window = int(cfg["zscore_window"])
     names += [
         f"amplitude_zscore_{zscore_window}",
         f"pct_chg_zscore_{zscore_window}",

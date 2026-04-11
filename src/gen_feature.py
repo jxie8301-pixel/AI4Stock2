@@ -24,35 +24,18 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 import yaml
 
-try:
-    from src.data_source import (
-        SUPPORTED_DATA_SOURCES,
-        get_default_factor_store_dir,
-        resolve_data_source_name,
-        resolve_source_parquet_dir,
-    )
-except ModuleNotFoundError:
-    from data_source import (  # type: ignore
-        SUPPORTED_DATA_SOURCES,
-        get_default_factor_store_dir,
-        resolve_data_source_name,
-        resolve_source_parquet_dir,
-    )
-
-try:
-    from src.label_utils import (
-        get_label_column_name,
-        get_label_definition,
-        get_legacy_label_column_name,
-        resolve_label_horizons,
-    )
-except ModuleNotFoundError:
-    from label_utils import (  # type: ignore
-        get_label_column_name,
-        get_label_definition,
-        get_legacy_label_column_name,
-        resolve_label_horizons,
-    )
+from src.data_source import (
+    SUPPORTED_DATA_SOURCES,
+    get_default_factor_store_dir,
+    resolve_data_source_name,
+    resolve_source_parquet_dir,
+)
+from src.label_utils import (
+    get_label_column_name,
+    get_label_definition,
+    get_legacy_label_column_name,
+    resolve_label_horizons,
+)
 
 from src.feature_name_registry import (
     ALL_FACTORS_ALPHA360_PREFIX,
@@ -187,6 +170,8 @@ def _get_tushare_industry_context_feature_cols() -> list[str]:
             f"ind_ret_{window}",
             f"ind_std_{window}",
             f"ind_excess_ret_{window}",
+            f"ind_pos_rate_{window}",
+            f"ind_dispersion_{window}",
         ]
     return cols
 
@@ -266,7 +251,12 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
         combined["industry"] = combined["industry"].fillna("").replace("", "UNKNOWN")
         industry_daily = (
             combined.groupby(["date", "industry"], observed=True)
-            .agg(ind_member_count=("ret", "count"), ind_daily_ret=("ret", "mean"))
+            .agg(
+                ind_member_count=("ret", "count"),
+                ind_daily_ret=("ret", "mean"),
+                ind_daily_pos_rate=("ret", lambda values: (pd.to_numeric(values, errors="coerce") > 0).mean()),
+                ind_daily_dispersion=("ret", "std"),
+            )
             .reset_index()
         )
         market_daily = (
@@ -281,6 +271,8 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
         industry_daily = industry_daily.merge(market_daily, on="date", how="left").sort_values(["industry", "date"])
         industry_daily["ind_excess_daily_ret"] = industry_daily["ind_daily_ret"] - industry_daily["market_daily_ret"]
         grouped_daily_ret = industry_daily.groupby("industry", observed=True, sort=False)["ind_daily_ret"]
+        grouped_daily_pos_rate = industry_daily.groupby("industry", observed=True, sort=False)["ind_daily_pos_rate"]
+        grouped_daily_dispersion = industry_daily.groupby("industry", observed=True, sort=False)["ind_daily_dispersion"]
         for raw_window in DEFAULT_TUSHARE_FACTOR_CONFIG["industry_windows"]:
             window = int(raw_window)
             industry_daily[f"ind_ret_{window}"] = grouped_daily_ret.transform(
@@ -291,6 +283,12 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
             )
             industry_daily[f"ind_excess_ret_{window}"] = (
                 industry_daily[f"ind_ret_{window}"] - industry_daily[f"market_ret_{window}"]
+            )
+            industry_daily[f"ind_pos_rate_{window}"] = grouped_daily_pos_rate.transform(
+                lambda series, w=window: series.rolling(w, min_periods=1).mean()
+            )
+            industry_daily[f"ind_dispersion_{window}"] = grouped_daily_dispersion.transform(
+                lambda series, w=window: series.rolling(w, min_periods=1).mean()
             )
         output = industry_daily[["date", "industry", *_get_tushare_industry_context_feature_cols()]].copy()
     else:
@@ -305,7 +303,13 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
 
 def _ensure_tushare_industry_context_cache(parquet_dir: Path) -> Path:
     if TUSHARE_INDUSTRY_CONTEXT_PATH.exists():
-        return TUSHARE_INDUSTRY_CONTEXT_PATH
+        try:
+            schema_columns = set(pd.read_parquet(TUSHARE_INDUSTRY_CONTEXT_PATH, columns=None).columns)
+        except Exception:
+            schema_columns = set()
+        required_columns = {"date", "industry", *_get_tushare_industry_context_feature_cols()}
+        if required_columns.issubset(schema_columns):
+            return TUSHARE_INDUSTRY_CONTEXT_PATH
     return _build_tushare_industry_context_cache(parquet_dir)
 
 

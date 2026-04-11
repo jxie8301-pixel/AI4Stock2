@@ -9,11 +9,7 @@ def _resolve_cross_sectional_rank_exclude_columns(cfg: dict[str, Any]) -> set[st
     transforms_cfg = cfg.get("features", {}).get("transforms", {}) or {}
     excluded = transforms_cfg.get("cross_sectional_rank_exclude_columns")
     if excluded is None:
-        try:
-            from src.feature_profiles import resolve_feature_profile
-        except ModuleNotFoundError:
-            from feature_profiles import resolve_feature_profile  # type: ignore
-
+        from src.feature_profiles import resolve_feature_profile
         profile = resolve_feature_profile(cfg)
         excluded = profile.get("cross_sectional_rank_exclude_columns")
     if excluded is None:
@@ -25,12 +21,8 @@ def _resolve_cross_sectional_rank_exclude_columns(cfg: dict[str, Any]) -> set[st
 
 def resolve_selected_feature_columns(meta: dict[str, Any], cfg: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Return (display_columns, source_columns) after applying profile expansion."""
-    try:
-        from src.feature_profiles import resolve_feature_profile
-        from src.gen_feature import get_exact_duplicate_feature_source_map
-    except ModuleNotFoundError:
-        from feature_profiles import resolve_feature_profile  # type: ignore
-        from gen_feature import get_exact_duplicate_feature_source_map  # type: ignore
+    from src.feature_profiles import resolve_feature_profile
+    from src.gen_feature import get_exact_duplicate_feature_source_map
 
     feature_names = meta.get("feature_names")
     if not isinstance(feature_names, list) or not feature_names:

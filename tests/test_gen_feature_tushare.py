@@ -30,6 +30,8 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertEqual(len(tushare_names), len(default_names) + len(get_tushare_factor_feature_names()))
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_ret_20", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}turnover_accel_5_20", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_20", tushare_names)
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", default_names)
         self.assertNotIn("TEMP_ret_20", default_names)
         self.assertNotIn("TEMP_corr_cv_20", default_names)
@@ -55,6 +57,7 @@ class TushareFeatureTest(unittest.TestCase):
                 "total_share": [100.0, 100.0, 100.0],
                 "circ_share": [80.0, 80.0, 80.0],
                 "free_share": [60.0, 60.0, 60.0],
+                "pb": [1.0, 1.1, 1.2],
                 "pe": [10.0, 20.0, -5.0],
                 "pe_ttm": [8.0, 16.0, 32.0],
                 "ps": [2.0, 4.0, 5.0],
@@ -78,6 +81,12 @@ class TushareFeatureTest(unittest.TestCase):
                 "ind_excess_ret_5": [0.01, 0.015, 0.02],
                 "ind_excess_ret_20": [0.02, 0.025, 0.03],
                 "ind_excess_ret_60": [0.04, 0.045, 0.05],
+                "ind_pos_rate_5": [0.5, 0.55, 0.6],
+                "ind_pos_rate_20": [0.52, 0.57, 0.62],
+                "ind_pos_rate_60": [0.54, 0.59, 0.64],
+                "ind_dispersion_5": [0.01, 0.011, 0.012],
+                "ind_dispersion_20": [0.02, 0.021, 0.022],
+                "ind_dispersion_60": [0.03, 0.031, 0.032],
             }
         )
 
@@ -107,13 +116,25 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["industry_ret_20"]), 0.12, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["industry_excess_ret_60"]), 0.05, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["industry_std_20"]), 0.03, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["industry_pos_rate_20"]), 0.62, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["industry_dispersion_60"]), 0.032, places=6)
         self.assertTrue(pd.isna(feat.iloc[2]["industry_rel_ret_5"]))
+        self.assertAlmostEqual(float(feat.iloc[2]["turnover_accel_5_20"]), 0.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["free_turnover_accel_5_20"]), 0.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["amihud_term_5_20"]), 0.0, places=6)
+        self.assertTrue(pd.isna(feat.iloc[2]["downside_amihud_20"]))
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_std_ratio_20"]), 0.214275, places=6)
         self.assertTrue(pd.notna(feat.iloc[2]["amplitude_zscore_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["pct_chg_zscore_20"]))
         self.assertTrue(pd.isna(feat.iloc[0]["free_float_ratio_change_20"]))
         self.assertTrue(pd.isna(feat.iloc[0]["sp_ttm_change_20"]))
+        self.assertTrue(pd.isna(feat.iloc[0]["ep_ttm_change_20"]))
+        self.assertTrue(pd.isna(feat.iloc[0]["bp_change_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["free_turnover_ratio_zscore_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["free_turnover_spread_zscore_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["volume_ratio_raw_zscore_20"]))
+        self.assertAlmostEqual(float(feat.iloc[1]["dividend_yield_ttm_surprise_20"]), -0.8, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_ttm_surprise_20"]), 0.0, places=6)
 
     def test_compute_all_factor_features_adds_tushare_columns_only_for_tushare_source(self):
         df = pd.DataFrame(
@@ -444,12 +465,18 @@ class TushareFeatureTest(unittest.TestCase):
                     "ind_ret_5": [0.03, 0.04],
                     "ind_std_5": [0.02, 0.02],
                     "ind_excess_ret_5": [0.01, 0.015],
+                    "ind_pos_rate_5": [0.45, 0.50],
+                    "ind_dispersion_5": [0.01, 0.011],
                     "ind_ret_20": [0.10, 0.11],
                     "ind_std_20": [0.03, 0.03],
                     "ind_excess_ret_20": [0.02, 0.025],
+                    "ind_pos_rate_20": [0.55, 0.60],
+                    "ind_dispersion_20": [0.02, 0.021],
                     "ind_ret_60": [0.20, 0.21],
                     "ind_std_60": [0.04, 0.04],
                     "ind_excess_ret_60": [0.04, 0.045],
+                    "ind_pos_rate_60": [0.65, 0.70],
+                    "ind_dispersion_60": [0.03, 0.031],
                 }
             )
             symbol_cache_path = meta_dir / "symbol_cache.parquet"
@@ -475,6 +502,8 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(out.loc[1, "ind_daily_ret"]), 0.02, places=6)
         self.assertAlmostEqual(float(out.loc[2, "ind_ret_20"]), 0.11, places=6)
         self.assertAlmostEqual(float(out.loc[2, "ind_excess_ret_60"]), 0.045, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "ind_pos_rate_20"]), 0.60, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "ind_dispersion_60"]), 0.031, places=6)
 
     def test_compute_all_factor_features_uses_side_loaded_forecast_and_express_columns(self):
         df = pd.DataFrame(

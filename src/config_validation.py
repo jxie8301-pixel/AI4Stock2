@@ -11,11 +11,7 @@ import pandas as pd
 from src.config_loader import load_config
 from src.feature_profiles import get_native_factor_store_dir
 from src.label_utils import normalize_opportunity_mode, normalize_train_label_transform_mode
-
-try:
-    from src.data_source import resolve_data_source_name
-except ModuleNotFoundError:
-    from data_source import resolve_data_source_name  # type: ignore
+from src.data_source import resolve_data_source_name
 
 
 TOP_LEVEL_SCHEMA = {

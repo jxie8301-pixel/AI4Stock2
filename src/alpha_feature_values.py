@@ -1,15 +1,9 @@
 """Backward-compatible wrapper around unified feature module."""
 
-try:
-    from src.gen_feature import (  # noqa: F401
-        compute_alpha158,
-        compute_alpha360,
-    )
-except ModuleNotFoundError:
-    from gen_feature import (  # type: ignore # noqa: F401
-        compute_alpha158,
-        compute_alpha360,
-    )
+from src.gen_feature import (  # noqa: F401
+    compute_alpha158,
+    compute_alpha360,
+)
 
 
 if __name__ == "__main__":

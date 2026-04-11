@@ -8,22 +8,13 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-try:
-    from src.data_source import normalize_data_source_name
-    from src.label_utils import (
-        DEFAULT_LABEL_ABS_CAP,
-        DEFAULT_LABEL_HORIZON,
-        get_label_column_name,
-        get_legacy_label_column_name,
-    )
-except ModuleNotFoundError:
-    from data_source import normalize_data_source_name  # type: ignore
-    from label_utils import (  # type: ignore
-        DEFAULT_LABEL_ABS_CAP,
-        DEFAULT_LABEL_HORIZON,
-        get_label_column_name,
-        get_legacy_label_column_name,
-    )
+from src.data_source import normalize_data_source_name
+from src.label_utils import (
+    DEFAULT_LABEL_ABS_CAP,
+    DEFAULT_LABEL_HORIZON,
+    get_label_column_name,
+    get_legacy_label_column_name,
+)
 
 from src.feature_name_registry import (
     ALL_FACTORS_LGBM_PREFIX,
@@ -680,6 +671,7 @@ def compute_tushare_factor_features(
 
     base = _base if _base is not None else _prepare_ohlcv(df)
     close = base["close"].replace(0, np.nan)
+    amount = base["amount"] if "amount" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     up_limit = base["up_limit"] if "up_limit" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     down_limit = base["down_limit"] if "down_limit" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     limit_pre_close = base["limit_pre_close"] if "limit_pre_close" in base.columns else base.get("pre_close", pd.Series(np.nan, index=base.index, dtype=float))
@@ -692,6 +684,7 @@ def compute_tushare_factor_features(
     volume_ratio = base["volume_ratio"] if "volume_ratio" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     total_mv = base["total_mv"] if "total_mv" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     circ_mv = base["circ_mv"] if "circ_mv" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
+    pb = base["pb"] if "pb" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     pe = base["pe"] if "pe" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     pe_ttm = base["pe_ttm"] if "pe_ttm" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
     ps = base["ps"] if "ps" in base.columns else pd.Series(np.nan, index=base.index, dtype=float)
@@ -751,6 +744,11 @@ def compute_tushare_factor_features(
     ind_member_count = _series("ind_member_count")
     ind_daily_ret = _series("ind_daily_ret")
     ind_excess_daily_ret = _series("ind_excess_daily_ret")
+    flow_windows = sorted({int(window) for window in cfg["free_turnover_windows"]})
+    short_flow_window = int(flow_windows[0])
+    long_flow_window = int(flow_windows[-1])
+    valuation_windows = sorted({int(window) for window in cfg["valuation_change_windows"]})
+    industry_windows = sorted({int(window) for window in cfg["industry_windows"]})
 
     out: dict[str, pd.Series | np.ndarray] = {}
     out["gap_up_limit"] = up_limit / close - 1.0
@@ -772,10 +770,21 @@ def compute_tushare_factor_features(
     for window in cfg["free_turnover_windows"]:
         window = int(window)
         out[f"free_turnover_mean_{window}"] = turnover_free.rolling(window, min_periods=1).mean()
+    turnover_short_mean = turnover.rolling(short_flow_window, min_periods=1).mean()
+    turnover_long_mean = turnover.rolling(long_flow_window, min_periods=1).mean()
+    free_turnover_short_mean = turnover_free.rolling(short_flow_window, min_periods=1).mean()
+    free_turnover_long_mean = turnover_free.rolling(long_flow_window, min_periods=1).mean()
+    out[f"turnover_accel_{short_flow_window}_{long_flow_window}"] = (
+        turnover_short_mean / (turnover_long_mean + EPS) - 1.0
+    )
+    out[f"free_turnover_accel_{short_flow_window}_{long_flow_window}"] = (
+        free_turnover_short_mean / (free_turnover_long_mean + EPS) - 1.0
+    )
     out["volume_ratio_raw"] = volume_ratio
     total_mv_safe = total_mv.replace(0, np.nan)
     out["float_mv_ratio"] = circ_mv / total_mv_safe
     out["ep"] = np.where(pe > 0, 1.0 / pe, -1.0)
+    bp = np.where(pb > 0, 1.0 / pb, -1.0)
     out["sp"] = np.where(ps > 0, 1.0 / ps, -1.0)
     out["sp_ttm"] = np.where(ps_ttm > 0, 1.0 / ps_ttm, -1.0)
     ep_ttm = np.where(pe_ttm > 0, 1.0 / pe_ttm, -1.0)
@@ -807,30 +816,62 @@ def compute_tushare_factor_features(
         window = int(window)
         out[f"sp_ttm_change_{window}"] = pd.Series(out["sp_ttm"], index=base.index).pct_change(window, fill_method=None)
         out[f"dividend_yield_ttm_change_{window}"] = pd.Series(out["dividend_yield_ttm"], index=base.index).pct_change(window, fill_method=None)
-    for window in cfg["industry_windows"]:
+    ep_ttm_series = pd.Series(ep_ttm, index=base.index, dtype=float)
+    bp_series = pd.Series(bp, index=base.index, dtype=float)
+    for window in valuation_windows:
+        out[f"ep_ttm_change_{window}"] = ep_ttm_series.diff(int(window))
+        out[f"bp_change_{window}"] = bp_series.diff(int(window))
+    for window in industry_windows:
         window = int(window)
         industry_ret = _series(f"ind_ret_{window}")
         industry_std = _series(f"ind_std_{window}")
         industry_excess_ret = _series(f"ind_excess_ret_{window}")
+        industry_pos_rate = _series(f"ind_pos_rate_{window}")
+        industry_dispersion = _series(f"ind_dispersion_{window}")
         own_ret = close.pct_change(window, fill_method=None)
+        own_daily_ret = close.pct_change(fill_method=None)
+        own_std = own_daily_ret.rolling(window, min_periods=1).std()
         out[f"industry_ret_{window}"] = industry_ret
         out[f"industry_std_{window}"] = industry_std
         out[f"industry_excess_ret_{window}"] = industry_excess_ret
         out[f"industry_rel_ret_{window}"] = own_ret - industry_ret
+        out[f"industry_pos_rate_{window}"] = industry_pos_rate
+        out[f"industry_dispersion_{window}"] = industry_dispersion
+        out[f"stock_vs_industry_std_ratio_{window}"] = own_std / (industry_std + EPS)
     zscore_window = int(cfg["zscore_window"])
     amplitude_mean = amplitude.rolling(zscore_window, min_periods=1).mean()
     amplitude_std = amplitude.rolling(zscore_window, min_periods=1).std()
     pct_chg_mean = pct_chg.rolling(zscore_window, min_periods=1).mean()
     pct_chg_std = pct_chg.rolling(zscore_window, min_periods=1).std()
     free_turnover_ratio_series = pd.Series(out["free_turnover_ratio"], index=base.index)
+    free_turnover_spread_series = pd.Series(out["free_turnover_spread"], index=base.index)
     free_turnover_mean = free_turnover_ratio_series.rolling(zscore_window, min_periods=1).mean()
     free_turnover_std = free_turnover_ratio_series.rolling(zscore_window, min_periods=1).std()
+    free_turnover_spread_mean = free_turnover_spread_series.rolling(zscore_window, min_periods=1).mean()
+    free_turnover_spread_std = free_turnover_spread_series.rolling(zscore_window, min_periods=1).std()
     volume_ratio_mean = volume_ratio.rolling(zscore_window, min_periods=1).mean()
     volume_ratio_std = volume_ratio.rolling(zscore_window, min_periods=1).std()
+    dividend_yield_ttm_series = pd.Series(out["dividend_yield_ttm"], index=base.index)
+    dividend_yield_ttm_baseline = dividend_yield_ttm_series.rolling(zscore_window, min_periods=1).mean().shift(1)
+    daily_ret = close.pct_change(fill_method=None)
+    daily_ret_abs = daily_ret.abs()
+    amount_abs = amount.abs()
+    amihud_short = (daily_ret_abs / (amount_abs + EPS)).rolling(short_flow_window, min_periods=1).mean()
+    amihud_long = (daily_ret_abs / (amount_abs + EPS)).rolling(long_flow_window, min_periods=1).mean()
+    downside_amihud = (daily_ret_abs.where(daily_ret < 0) / (amount_abs + EPS)).rolling(
+        long_flow_window,
+        min_periods=1,
+    ).mean()
     out[f"amplitude_zscore_{zscore_window}"] = (amplitude - amplitude_mean) / (amplitude_std + EPS)
     out[f"pct_chg_zscore_{zscore_window}"] = (pct_chg - pct_chg_mean) / (pct_chg_std + EPS)
     out[f"free_turnover_ratio_zscore_{zscore_window}"] = (free_turnover_ratio_series - free_turnover_mean) / (free_turnover_std + EPS)
+    out[f"free_turnover_spread_zscore_{zscore_window}"] = (
+        free_turnover_spread_series - free_turnover_spread_mean
+    ) / (free_turnover_spread_std + EPS)
     out[f"volume_ratio_raw_zscore_{zscore_window}"] = (volume_ratio - volume_ratio_mean) / (volume_ratio_std + EPS)
+    out[f"amihud_term_{short_flow_window}_{long_flow_window}"] = amihud_short / (amihud_long + EPS) - 1.0
+    out[f"downside_amihud_{long_flow_window}"] = downside_amihud
+    out[f"dividend_yield_ttm_surprise_{zscore_window}"] = dividend_yield_ttm_series - dividend_yield_ttm_baseline
     out["latest_eps"] = fi_eps
     out["latest_dt_eps"] = fi_dt_eps
     out["latest_bps"] = fi_bps

@@ -6,12 +6,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-try:
-    from src.config_utils import deep_update, load_yaml_file
-    from src.data_source import get_default_factor_store_dir, resolve_data_source_name
-except ModuleNotFoundError:
-    from config_utils import deep_update, load_yaml_file  # type: ignore
-    from data_source import get_default_factor_store_dir, resolve_data_source_name  # type: ignore
+from src.config_utils import deep_update, load_yaml_file
+from src.data_source import get_default_factor_store_dir, resolve_data_source_name
 
 
 DEFAULT_PROFILE_CONFIG_PATH = "configs/feature_profiles.yaml"
@@ -66,18 +62,11 @@ def _normalize_profile_repeat_columns(
 
 
 def _materialize_profile_selected_columns(profile: dict[str, Any]) -> list[str] | None:
-    try:
-        from src.gen_feature import (
-            ALL_FACTORS_LGBM_PREFIX,
-            get_alpha158_feature_config,
-            get_lgbm_purified_feature_names,
-        )
-    except ModuleNotFoundError:
-        from gen_feature import (  # type: ignore
-            ALL_FACTORS_LGBM_PREFIX,
-            get_alpha158_feature_config,
-            get_lgbm_purified_feature_names,
-        )
+    from src.gen_feature import (
+        ALL_FACTORS_LGBM_PREFIX,
+        get_alpha158_feature_config,
+        get_lgbm_purified_feature_names,
+    )
 
     if "selected_columns" in profile:
         selected_columns = profile.get("selected_columns")

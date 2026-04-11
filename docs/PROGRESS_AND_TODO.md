@@ -202,7 +202,7 @@ system baseline for feature research.
   Current state: `fina_indicator`, `dividend`, `forecast`, `express` are already wired; next batch should be `income`, `balancesheet`, `cashflow`, then `fina_audit`, `fina_mainbz`
 - [ ] Design the second Tushare factor layer around financial/event tables instead of only daily market tables
 - [x] Finish a full `--stages all` Tushare backfill to a stable converged state and verify repeated reruns are purely incremental for the currently landed stage set
-- [x] Build the Tushare factor store after raw convergence: `uv run python src/gen_feature.py --data-source tushare --workers 16 --incremental`
+- [x] Build the Tushare factor store after raw convergence: `uv run python -m src.gen_feature --data-source tushare --workers 16 --incremental`
 - [x] Run the first Tushare-native rolling baseline before adding more tables
 - [ ] Deduplicate `main.py` and `run_native_rolling.py` into shared training/prediction/evaluation helpers before continuing to add more run modes
 - [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder

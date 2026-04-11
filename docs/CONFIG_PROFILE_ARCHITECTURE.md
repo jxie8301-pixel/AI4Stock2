@@ -158,7 +158,7 @@ They are resolved separately and used only for factor-store selection.
 The preferred entry points should be:
 
 ```bash
-uv run python src/gen_feature.py
+uv run python -m src.gen_feature
 uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10
 uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10
 ```

@@ -10,7 +10,7 @@ The current stable path is still AkShare / Eastmoney-compatible data; GM and Tus
 Generate the factor store for the active config:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python src/gen_feature.py --workers 8
+UV_CACHE_DIR=/tmp/uv-cache uv run python -m src.gen_feature --workers 8
 ```
 
 Run a rolling LightGBM experiment by explicitly naming the experiment profile:

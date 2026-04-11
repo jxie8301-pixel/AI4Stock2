@@ -168,7 +168,7 @@ This preserves the current rolling logic while drastically reducing on-disk byte
 Recommended CLI evolution:
 
 ```bash
-uv run python src/gen_feature.py --workers 24
+uv run python -m src.gen_feature --workers 24
 ```
 
 still does both steps by default.
@@ -176,8 +176,8 @@ still does both steps by default.
 Optional advanced modes:
 
 ```bash
-uv run python src/gen_feature.py --mode shards --incremental
-uv run python src/gen_feature.py --mode compact
+uv run python -m src.gen_feature --mode shards --incremental
+uv run python -m src.gen_feature --mode compact
 ```
 
 ## File-Level Change Plan

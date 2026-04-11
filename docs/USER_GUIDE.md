@@ -31,12 +31,12 @@
 运行以下命令，自动补全缺失数据并刷新本地 Parquet 数据：
 ```bash
 # 更新数据
-uv run python src/collector_akshare.py --update --workers 8
+uv run python -m src.collector_akshare --update --workers 8
 ```
 
 如果你要切到 `proxy_patch` 后端，需要显式传入：
 ```bash
-uv run python src/collector_akshare.py --update --network-backend proxy_patch --proxy-auth-token <TOKEN> --workers 8
+uv run python -m src.collector_akshare --update --network-backend proxy_patch --proxy-auth-token <TOKEN> --workers 8
 ```
 
 当前 collector 直接内置 README 示例里的固定网关 `101.201.173.125`，不再暴露 `--proxy-auth-ip` 这个选项。
@@ -56,7 +56,7 @@ uv run python src/collector_akshare.py --update --network-backend proxy_patch --
 
 如果你希望在增量更新时顺手把新上市股票也带进来，再显式加：
 ```bash
-uv run python src/collector_akshare.py --update --refresh-stock-list --workers 8
+uv run python -m src.collector_akshare --update --refresh-stock-list --workers 8
 ```
 
 这时才会联网刷新一份 live 股票列表，并用：
@@ -77,7 +77,7 @@ uv run python src/collector_akshare.py --update --refresh-stock-list --workers 8
 
 如果单个 cookie 无法跑完整个股票列表分页，可以先只刷新或续跑股票列表缓存：
 ```bash
-uv run python src/collector_akshare.py --refresh-stock-list-only
+uv run python -m src.collector_akshare --refresh-stock-list-only
 ```
 
 切换 cookie 后重复执行这条命令即可从缺失页继续，不会丢掉已经抓到的页。
@@ -92,12 +92,12 @@ uv run python src/collector_akshare.py --refresh-stock-list-only
 
 如果只是修复融合逻辑、列名或本地 processed 文件，而不想重新联网抓取，可以只用本地 raw 重建：
 ```bash
-uv run python src/collector_akshare.py --rebuild-processed --workers 8
+uv run python -m src.collector_akshare --rebuild-processed --workers 8
 ```
 
 如需构建或刷新常用股票池文件：
 ```bash
-uv run python src/build_universes.py
+uv run python -m src.build_universes
 ```
 
 ### GM 数据采集
@@ -110,17 +110,17 @@ export GM_TOKEN=<YOUR_TOKEN>
 
 全量或缓存股票池更新：
 ```bash
-uv run python src/collector_gm.py --all --workers 8 --end-date 2026-03-31
+uv run python -m src.collector_gm --all --workers 8 --end-date 2026-03-31
 ```
 
 只刷新 GM 股票列表缓存：
 ```bash
-uv run python src/collector_gm.py --refresh-symbols-only
+uv run python -m src.collector_gm --refresh-symbols-only
 ```
 
 只用本地 raw 重建 GM 规范化 parquet：
 ```bash
-uv run python src/collector_gm.py --rebuild-processed --workers 8
+uv run python -m src.collector_gm --rebuild-processed --workers 8
 ```
 
 GM raw 目录当前拆分为：
@@ -135,7 +135,7 @@ GM raw 目录当前拆分为：
 
 如果你要基于 GM 的规范化 parquet 生成因子库，直接显式指定输入目录：
 ```bash
-uv run python src/gen_feature.py --parquet-dir data/gm/processed/combined --output-dir data/factor_store/gm_full_factor_space --workers 8
+uv run python -m src.gen_feature --parquet-dir data/gm/processed/combined --output-dir data/factor_store/gm_full_factor_space --workers 8
 ```
 
 ### Tushare 数据采集
@@ -163,37 +163,37 @@ export TUSHARE_TOKEN=<YOUR_TOKEN>
 
 刷新 Tushare 股票列表缓存：
 ```bash
-uv run python src/collector_tushare.py --refresh-symbols-only
+uv run python -m src.collector_tushare --refresh-symbols-only
 ```
 
 抓取全量或缓存股票池：
 ```bash
-uv run python src/collector_tushare.py --all --workers 8 --end-date 2026-03-31
+uv run python -m src.collector_tushare --all --workers 8 --end-date 2026-03-31
 ```
 
 按本地已有 symbol + 缓存股票池做增量更新：
 ```bash
-uv run python src/collector_tushare.py --update --workers 8 --end-date 2026-03-31
+uv run python -m src.collector_tushare --update --workers 8 --end-date 2026-03-31
 ```
 
 只刷新 Tushare 指数 benchmark 文件：
 ```bash
-uv run python src/collector_tushare.py --refresh-benchmarks-only --end-date 2026-03-31
+uv run python -m src.collector_tushare --refresh-benchmarks-only --end-date 2026-03-31
 ```
 
 如果你希望在更新股票 raw 的同时顺手刷新 benchmark：
 ```bash
-uv run python src/collector_tushare.py --update --refresh-benchmarks --workers 8 --end-date 2026-03-31
+uv run python -m src.collector_tushare --update --refresh-benchmarks --workers 8 --end-date 2026-03-31
 ```
 
 只跑少量 symbol 做验证：
 ```bash
-uv run python src/collector_tushare.py --symbols 600000,000333 --workers 2 --end-date 2026-03-31
+uv run python -m src.collector_tushare --symbols 600000,000333 --workers 2 --end-date 2026-03-31
 ```
 
 如果 raw 已经完整，只想从本地 raw 重建 `hfq` 规范化 parquet：
 ```bash
-uv run python src/collector_tushare.py --rebuild-processed --workers 8
+uv run python -m src.collector_tushare --rebuild-processed --workers 8
 ```
 
 Tushare raw 目录当前拆分为：
@@ -221,7 +221,7 @@ Tushare benchmark 指数文件默认输出到：
 
 如果你想先看真实接口列名和速度，再决定是否接入新的财务表，可以用探针脚本：
 ```bash
-uv run python src/probe_tushare.py --symbol 000333.SZ
+uv run python -m src.probe_tushare --symbol 000333.SZ
 ```
 
 当前脚本默认生成：
@@ -231,22 +231,22 @@ uv run python src/probe_tushare.py --symbol 000333.SZ
 
 Native 训练前，建议先按当前配置生成本地特征缓存：
 ```bash
-uv run python src/gen_feature.py --workers 8
+uv run python -m src.gen_feature --workers 8
 ```
 
 现在默认就是先生成一个足够大的全集 cache，然后训练时按需选列：
 ```bash
-uv run python src/gen_feature.py --workers 8
+uv run python -m src.gen_feature --workers 8
 ```
 
 如果要基于 Tushare 处理后的 parquet 生成独立因子库，显式切换数据源：
 ```bash
-uv run python src/gen_feature.py --data-source tushare --workers 8
+uv run python -m src.gen_feature --data-source tushare --workers 8
 ```
 
 如果只是更新了部分 Parquet，希望尽量少重算特征，可以使用增量模式：
 ```bash
-uv run python src/gen_feature.py --workers 8 --incremental
+uv run python -m src.gen_feature --workers 8 --incremental
 ```
 
 当前增量模式的语义是：

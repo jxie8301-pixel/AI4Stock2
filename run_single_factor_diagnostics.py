@@ -6,13 +6,17 @@ import argparse
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 
+import numpy as np
 import pandas as pd
 
+from src.data_source import resolve_data_source_name
+from src.evaluate import build_benchmark_series
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import resolve_selected_feature_columns
-from src.label_utils import get_label_column_name, resolve_signal_horizon
+from src.label_utils import build_opportunity_edge_series, get_label_column_name, resolve_signal_horizon
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 from src.single_factor_diagnostics import (
     build_segmented_single_factor_diagnostics,
@@ -61,6 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
             "This is evaluated after the main date filter and can be combined with --segment-scheme=config_split."
         ),
     )
+    parser.add_argument(
+        "--diagnostic-label-space",
+        choices=["raw_return", "industry_excess", "benchmark_excess"],
+        default="raw_return",
+        help="Which realized label space to diagnose factors against. Default: raw_return.",
+    )
+    parser.add_argument(
+        "--diagnostic-threshold",
+        type=float,
+        default=0.0,
+        help="Optional excess hurdle for relative diagnostics. Default: 0.0.",
+    )
     return parser
 
 
@@ -85,12 +101,13 @@ def _default_output_dir(cfg: dict, args: argparse.Namespace, *, signal_horizon: 
     feature_profile = str(cfg.get("features", {}).get("profile") or "all")
     data_source = str(cfg.get("data", {}).get("source") or "default")
     universe = str(cfg.get("universe") or "all")
+    label_space = str(getattr(args, "diagnostic_label_space", "raw_return") or "raw_return")
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return (
         Path("results")
         / "diagnostics"
         / "single_factor"
-        / f"{stamp}__{data_source}__{universe}__{feature_profile}__h{signal_horizon}__{args.period}{tag_suffix}"
+        / f"{stamp}__{data_source}__{universe}__{feature_profile}__h{signal_horizon}__{label_space}__{args.period}{tag_suffix}"
     )
 
 
@@ -138,7 +155,105 @@ def _resolve_segments(cfg: dict, args: argparse.Namespace, *, main_start: str, m
     return deduped
 
 
+def _load_instrument_industry_groups(
+    cfg: dict,
+    *,
+    instruments: pd.Index,
+) -> pd.Series | None:
+    data_source = resolve_data_source_name(cfg)
+    raw_meta_dir = Path("data") / data_source / "raw" / "meta"
+    symbol_cache_path = raw_meta_dir / "symbol_cache.parquet"
+    if not symbol_cache_path.exists():
+        return None
+    try:
+        frame = pd.read_parquet(symbol_cache_path, columns=["local_symbol", "industry"])
+    except Exception:
+        return None
+    if frame.empty or "local_symbol" not in frame.columns or "industry" not in frame.columns:
+        return None
+    frame["local_symbol"] = frame["local_symbol"].astype(str).str.zfill(6)
+    frame["industry"] = frame["industry"].fillna("").replace("", pd.NA)
+    frame = frame.drop_duplicates("local_symbol", keep="last").set_index("local_symbol")
+    instrument_index = pd.Index(instruments.astype(str), dtype=object)
+    groups = frame["industry"].reindex(instrument_index)
+    return groups if groups.notna().any() else None
+
+
+def _build_forward_compound_return_series(
+    daily_returns: pd.Series,
+    *,
+    horizon: int,
+) -> pd.Series:
+    clean = pd.Series(daily_returns, copy=True).sort_index().astype(float)
+    horizon = max(int(horizon), 1)
+    if clean.empty:
+        return pd.Series(dtype=float)
+    values = clean.to_numpy(dtype=np.float64, copy=False)
+    if len(values) <= horizon:
+        return pd.Series(np.full(len(clean), np.nan, dtype=np.float64), index=clean.index, dtype=float)
+    future_windows = np.lib.stride_tricks.sliding_window_view(values[1:], horizon)
+    valid_mask = np.isfinite(future_windows).all(axis=1)
+    out = np.full(len(clean), np.nan, dtype=np.float64)
+    if bool(valid_mask.any()):
+        out[: len(future_windows)][valid_mask] = np.prod(1.0 + future_windows[valid_mask], axis=1) - 1.0
+    return pd.Series(out, index=clean.index, dtype=float)
+
+
+def _derive_diagnostic_label_series(
+    frame: pd.DataFrame,
+    *,
+    cfg: dict,
+    signal_horizon: int,
+    diagnostic_label_space: str,
+    diagnostic_threshold: float,
+) -> pd.Series:
+    label_space = str(diagnostic_label_space or "raw_return").strip().lower()
+    base = frame[["date", "symbol", "label"]].copy()
+    base["date"] = pd.to_datetime(base["date"])
+    base["symbol"] = base["symbol"].astype(str)
+    multi_index = pd.MultiIndex.from_arrays(
+        [base["date"], base["symbol"]],
+        names=["datetime", "instrument"],
+    )
+    labels = pd.Series(pd.to_numeric(base["label"], errors="coerce").to_numpy(), index=multi_index, dtype=float)
+
+    if label_space == "raw_return":
+        return labels
+
+    opportunity_cfg = {
+        "mode": label_space,
+        "threshold": float(diagnostic_threshold),
+        "neutral_band": 0.0,
+    }
+    instrument_groups = None
+    benchmark_forward_returns = None
+
+    if label_space == "industry_excess":
+        instrument_groups = _load_instrument_industry_groups(
+            cfg,
+            instruments=base["symbol"].drop_duplicates(),
+        )
+        if instrument_groups is None:
+            raise ValueError("Industry-excess diagnostics require instrument industry groups, but none were loaded.")
+    elif label_space == "benchmark_excess":
+        benchmark_series, _ = build_benchmark_series(labels, cfg.get("backtest", {}).get("benchmark"))
+        benchmark_forward_returns = _build_forward_compound_return_series(
+            benchmark_series,
+            horizon=signal_horizon,
+        )
+        if benchmark_forward_returns.empty:
+            raise ValueError("Benchmark-excess diagnostics produced an empty benchmark forward-return series.")
+
+    return build_opportunity_edge_series(
+        labels,
+        opportunity_cfg=opportunity_cfg,
+        instrument_groups=instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
+
+
 def main() -> None:
+    start_time = perf_counter()
     parser = build_parser()
     args = parser.parse_args()
     cfg = load_validated_config_from_args(args, parser)
@@ -160,6 +275,7 @@ def main() -> None:
         f"[*] Single-factor diagnostics: period={args.period}, "
         f"date_start={date_start}, date_end={date_end}, features={len(feature_names)}"
     )
+    load_started = perf_counter()
     factor_frame = load_factor_frame(
         store_dir=factor_store_dir,
         columns=feature_names,
@@ -173,14 +289,34 @@ def main() -> None:
     )
     if factor_frame.empty:
         raise ValueError("Factor store returned no rows for the requested diagnostics period.")
+    load_elapsed = perf_counter() - load_started
 
+    diagnostic_label_space = str(args.diagnostic_label_space or "raw_return").strip().lower()
+    label_started = perf_counter()
+    diagnostic_labels = _derive_diagnostic_label_series(
+        factor_frame,
+        cfg=cfg,
+        signal_horizon=signal_horizon,
+        diagnostic_label_space=diagnostic_label_space,
+        diagnostic_threshold=float(args.diagnostic_threshold),
+    )
+    factor_frame = factor_frame.copy()
+    factor_frame["label"] = diagnostic_labels.to_numpy(dtype=float, copy=False)
+    factor_frame = factor_frame.loc[pd.to_numeric(factor_frame["label"], errors="coerce").notna()].reset_index(drop=True)
+    if factor_frame.empty:
+        raise ValueError("All rows were dropped after applying the requested diagnostic label space.")
+    label_elapsed = perf_counter() - label_started
+
+    summary_started = perf_counter()
     summary = build_single_factor_diagnostics(
         factor_frame,
         feature_names=feature_names,
         label_column="label",
         quantile_bins=max(int(args.quantile_bins), 2),
     )
+    summary_elapsed = perf_counter() - summary_started
     segments = _resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
+    segment_started = perf_counter()
     segment_comparison, segment_summaries = build_segmented_single_factor_diagnostics(
         factor_frame,
         feature_names=feature_names,
@@ -188,6 +324,7 @@ def main() -> None:
         label_column="label",
         quantile_bins=max(int(args.quantile_bins), 2),
     )
+    segment_elapsed = perf_counter() - segment_started
     output_dir = _default_output_dir(cfg, args, signal_horizon=signal_horizon)
     metadata = {
         "data_source": cfg.get("data", {}).get("source", ""),
@@ -198,11 +335,17 @@ def main() -> None:
         "period": args.period,
         "date_start": date_start,
         "date_end": date_end,
+        "diagnostic_label_space": diagnostic_label_space,
+        "diagnostic_threshold": float(args.diagnostic_threshold),
         "feature_count": len(feature_names),
         "row_count": len(factor_frame),
         "quantile_bins": max(int(args.quantile_bins), 2),
         "segment_scheme": args.segment_scheme,
         "segment_count": len(segment_summaries),
+        "load_elapsed_sec": round(load_elapsed, 6),
+        "label_elapsed_sec": round(label_elapsed, 6),
+        "summary_elapsed_sec": round(summary_elapsed, 6),
+        "segment_elapsed_sec": round(segment_elapsed, 6),
     }
     artifacts = save_single_factor_diagnostics(
         summary,
@@ -215,6 +358,14 @@ def main() -> None:
     )
 
     print(f"[+] Single-factor diagnostics saved to: {output_dir}")
+    print(
+        "    timings:"
+        f" load={load_elapsed:.2f}s"
+        f" label={label_elapsed:.2f}s"
+        f" summary={summary_elapsed:.2f}s"
+        f" segments={segment_elapsed:.2f}s"
+        f" total={perf_counter() - start_time:.2f}s"
+    )
     print(f"    summary: {artifacts['summary_csv']}")
     print(f"    top abs RankIC: {artifacts['top_abs_rankic_csv']}")
     print(f"    readme: {artifacts['readme_path']}")

@@ -46,24 +46,26 @@ def _load_dataset_frame(
     progress_desc: str | None,
     allowed_symbols: set[str] | None = None,
 ) -> pd.DataFrame:
-    dataset = ds.dataset(shards_dir, format="parquet")
-    fragments = list(dataset.get_fragments(filter=scan_filter))
     if allowed_symbols is not None:
-        fragments = [
-            fragment
-            for fragment in fragments
-            if "".join(ch for ch in Path(fragment.path).stem if ch.isdigit()) in allowed_symbols
+        fragment_paths = [
+            str(shards_dir / f"{symbol}.parquet")
+            for symbol in sorted(allowed_symbols)
+            if (shards_dir / f"{symbol}.parquet").exists()
         ]
-    if not fragments:
-        return pd.DataFrame(columns=selected_columns)
-
-    scan_dataset = dataset
-    if allowed_symbols is not None:
-        fragment_paths = [fragment.path for fragment in fragments]
+        if not fragment_paths:
+            return pd.DataFrame(columns=selected_columns)
         scan_dataset = ds.dataset(fragment_paths, format="parquet")
+        fragment_count = len(fragment_paths)
+    else:
+        dataset = ds.dataset(shards_dir, format="parquet")
+        fragments = list(dataset.get_fragments(filter=scan_filter))
+        if not fragments:
+            return pd.DataFrame(columns=selected_columns)
+        scan_dataset = dataset
+        fragment_count = len(fragments)
 
     if progress_desc:
-        print(f"{progress_desc}: reading {len(fragments)} shard(s) with pyarrow dataset scan...")
+        print(f"{progress_desc}: reading {fragment_count} shard(s) with pyarrow dataset scan...")
 
     table = scan_dataset.to_table(
         columns=selected_columns,

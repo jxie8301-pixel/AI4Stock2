@@ -53,15 +53,18 @@ Active migration note:
 
 ## Current Technical Priorities
 
-1. Shift research toward learning absolute profit opportunity, not only cross-sectional ranking.
-2. Preserve more regime information in the feature pipeline instead of fully collapsing everything into daily rank space.
-3. Extend rolling-memory experiments (`train_days`, weighting function) before widening the research universe.
-4. Add model diagnostics that answer whether the model truly learned what can make money: probability calibration, score monotonicity, regime slices, and industry hit-rate.
-5. Keep pipeline cleanup and backtest realism work moving, but stop treating portfolio-layer tuning as the main alpha research path.
+1. Split the research target into layered tasks instead of forcing one score to solve everything at once.
+   - market / universe opportunity
+   - industry relative opportunity
+   - within-industry stock selection
+2. Treat industry-relative opportunity as the first genuinely learnable task on the current stack.
+3. Stop using portfolio-layer tuning as the main research loop until the model-side task definition is cleaner.
+4. Expand the data range before broadening the feature / strategy search space.
+5. Add diagnostics that separate "learned better signal" from "mapped the same signal into holdings more cleverly".
 
 ## Current Research Baselines
 
-The project now needs three baseline concepts instead of one:
+The project now needs four baseline concepts instead of one:
 
 1. Feature baseline
    - `core_v4_techlite`
@@ -71,22 +74,32 @@ The project now needs three baseline concepts instead of one:
    - Current default offensive reference:
      `top8_drop2 + score_softmax + rank_pct + intraperiod_exit(rank_pct<=0.45) + validation posrate overlay + conditional desticky(d4 @ 0.35)`
    - Candidate reference: `offensive_industry_cond_desticky_d4_t035_t8`
-   - Use this as the main offensive benchmark for opportunity-modeling, training-memory, and mixed absolute/ranked feature research.
+   - Use this as the portfolio-conversion benchmark, not as the default label-design benchmark.
 3. Stable production baseline
    - `core_v4_techlite_tushare_plus_industry_nostruct_v1` + `core_v4_lgbm_ranker_default_10x20x10`
    - Current default stable reference:
      `top10_drop2 + score_softmax + rank_pct + intraperiod_exit(rank_pct<=0.45) + validation posrate overlay`
    - Candidate reference: `stable_industry_nostruct_t10`
-   - Use this as the primary benchmark for new objectives, absolute-opportunity filtering, and regime-adaptation experiments.
+   - Use this as the portfolio-conversion benchmark for stable shaping, not as proof that the core task is already correct.
 4. Research-only defensive branch
    - `selective-price-confirm` variants remain research branches only
    - Best observed shape so far: `top10_drop2 + rank_pct exit 0.45 + pcma5_mr5`
    - This branch improved local exit quality but did not beat the stable baseline at the portfolio level, so it should not be promoted.
+5. Layered-learning research baseline
+   - Primary learnable task candidate:
+     `industry_excess_hard_none` buyability / secondary head
+   - Key references:
+     `results/two_stage_excess_focused_batch_20260410_000611.tsv`
+     `results/two_stage_industry_blend_tune_batch_20260410_042559.tsv`
+   - Interpretation:
+     the current stack appears to learn relative industry opportunity more cleanly than absolute future return magnitude.
 
 Important interpretation:
 
 - Industry context and de-stickiness are now treated as support layers, not the primary research target.
+- Conditional de-stickiness, overlays, and exit refinements improved portfolio conversion, but did not materially change the underlying learned signal after the `industry_nostruct` jump.
 - The next meaningful leap should come from improving what the model learns, not from another round of portfolio-rule polishing.
+- Current evidence suggests the most learnable signal is ordinal / relative opportunity, especially industry-relative opportunity, rather than raw future-return magnitude.
 
 The old `top30 + equal weight + no score transform + no intraperiod exit` rolling setup
 should remain available as a simple historical reference, but it is no longer the main
@@ -94,29 +107,66 @@ system baseline for feature research.
 
 ## Immediate TODO
 
-### 0. Alpha-First Research Direction
+### 0. Task Decomposition First
 
-- [ ] Add a formal "absolute opportunity" research track alongside the current ranker track
-- [ ] Add training labels that directly answer whether a stock is worth buying over the holding horizon, not only how it ranks cross-sectionally
-  First batch should include:
+- [ ] Reframe the main research question from "improve one final score" to "which subtask is actually learnable?"
+- [ ] Separate the problem into three explicit targets:
+  - market / universe opportunity
+  - industry relative opportunity
+  - within-industry stock selection
+- [ ] Freeze broad portfolio-rule tuning while these task definitions are being tested
+- [ ] Keep cumulative return as a downstream check, not the primary gate for model-side ideas
+- [ ] Promote future research results only after asking:
+  - did the learned ordering improve?
+  - did the selected positive-rate improve?
+  - did the improvement survive regime slices?
+
+### 1. Relative-Opportunity Research Track
+
+- [ ] Promote `industry_excess` style labels from side experiment to first-class research track
+- [ ] Build a formal label family for relative opportunity:
+  - `ret_20d > industry_ret_20d`
+  - `ret_20d > benchmark_ret_20d`
   - `ret_20d > 0`
   - `ret_20d > cost_buffer`
-  - `ret_20d > benchmark_ret_20d`
-  - `ret_20d > industry_ret_20d`
-- [ ] Build a simple two-stage scoring prototype:
-  - stage A: current ranker score
-  - stage B: profit-probability or buyability score
-  - merge rule: probability filter and/or `rank_score * profit_prob`
+- [ ] Explicitly compare which task is most learnable using:
+  - selected positive-rate
+  - opportunity-rate monotonicity
+  - return monotonicity
+  - bucket spread
+- [ ] Treat raw future-return magnitude as optional / secondary until it proves learnable on the same stack
+- [ ] Add a within-industry evaluation view so we can tell whether the model is selecting the right industry, the right stock inside an industry, or both
+
+### 2. Two-Layer Modeling Direction
+
+- [ ] Build a research prototype where the primary target is no longer forced to be absolute return ranking
+- [ ] Test a layered scoring structure:
+  - layer A: industry / relative-opportunity score
+  - layer B: within-industry stock-selection score
+  - layer C: optional buyability / tail-risk gate
+- [ ] Compare layered scoring against the current single-score mainline on the same dates and universe
+- [ ] Record whether improvements come from:
+  - better industry allocation
+  - better stock selection inside chosen industries
+  - better avoidance of no-opportunity windows
+- [ ] Do not optimize blend weights first; optimize the task split first
+
+### 3. Diagnostics That Distinguish Learning From Mapping
+
 - [ ] Add diagnostics for whether the model actually learned something useful:
   - score bucket monotonicity for realized return
   - score bucket monotonicity for positive-rate
   - calibration of predicted buyability vs realized buyability
   - regime-sliced diagnostics by year / quarter / bear windows
   - industry-level hit-rate diagnostics for selected names
-- [ ] Stop using cumulative return as the primary promotion criterion for new model-side ideas
-- [ ] Keep candidate promotion portfolio-first, but keep alpha research model-first
+  - between-industry vs within-industry attribution
+- [ ] Add "same signal, different strategy" comparison views so portfolio-layer changes cannot masquerade as alpha improvements
+- [ ] Add explicit flags in summaries for:
+  - model-side change
+  - feature-side change
+  - portfolio-conversion-side change
 
-### 1. Regime Memory And Absolute Context
+### 4. Regime Memory And Data Range
 
 - [ ] Run controlled memory-length experiments on the current stable and offensive baselines:
   - `train_days = 242`
@@ -130,8 +180,9 @@ system baseline for feature research.
   Preferred next target: extend analysis to at least `2018-2025`, ideally `2016-2025` if data coverage is acceptable
 - [ ] Treat global backtest range and rolling train window as separate levers; do not conflate them
 - [ ] Add regime-level summaries so weak-signal / weak-opportunity periods can be studied directly instead of inferred from the final equity curve
+- [ ] Only revisit wider-universe research after the longer-horizon regime study is stable enough to compare task learnability
 
-### 2. Mixed Feature Representation
+### 5. Mixed Feature Representation
 
 - [ ] Add a mixed feature-transform path instead of ranking every feature column by default
 - [ ] Keep cross-sectional-rank versions for stock-selection features that benefit from relative comparison
@@ -143,7 +194,7 @@ system baseline for feature research.
 - [ ] Compare full-rank vs mixed-rank/raw pipelines on the same baselines
 - [ ] Make sure experiment manifests record which features stayed absolute and which were ranked
 
-### 3. Tushare Migration And Pipeline Cleanup
+### 6. Tushare Migration And Pipeline Cleanup
 
 - [x] Finalize the first canonical Tushare market-data normalized schema for `combined` parquet
 - [x] Wire the Tushare collector into the formal native feature/training workflow as an optional `data.source`
@@ -158,7 +209,7 @@ system baseline for feature research.
 - [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py`, `collector_gm.py`, and `collector_tushare.py` stop diverging
 - [ ] Upgrade training-time transforms from ad-hoc functions to a real fit/transform pipeline before adding more transform combinations
 
-### 4. LightGBM Feature Research
+### 7. LightGBM Feature Research
 
 - [x] Add a native `lgbm_purified_v1` feature profile inspired by the strongest old-project factors
 - [x] Add native support for valuation/style factors such as `ep_ttm`, `bp`, `log_mcap`, `is_loss`
@@ -186,7 +237,7 @@ system baseline for feature research.
   - industry dispersion and rotation-intensity signals
   - industry-vs-benchmark absolute opportunity signals
 
-### 5. Training-Time Transforms
+### 8. Training-Time Transforms
 
 - [x] Add optional daily cross-sectional rank transform before model training for LightGBM
 - [ ] Add optional feature winsorization / clipping transform in the training path
@@ -198,7 +249,7 @@ system baseline for feature research.
 - [ ] Support transform policies by feature group instead of only one global toggle
 - [ ] Add label transforms targeted at buyability / positive-rate modeling instead of only ranking-friendly transforms
 
-### 6. Native Data Quality
+### 9. Native Data Quality
 
 - [x] Stand up a GM-native collector that stores full raw endpoint fields under `data/gm/raw/` before any schema reduction
 - [x] Add GM lifecycle-aware precheck with `effective_end_date` so delisted symbols do not stay pending forever
@@ -218,7 +269,7 @@ system baseline for feature research.
 - [ ] Add collector performance telemetry: request count, empty-return count, write time, throughput by stage
 - [ ] Split collector common helpers into shared parquet/lifecycle utilities instead of duplicating logic in both collectors
 
-### 7. Backtest Realism
+### 10. Backtest Realism
 
 - [ ] Add explicit tradability flags for suspension / invalid rows where possible
 - [ ] Evaluate whether limit-up / limit-down blocking should be modeled in native backtest
@@ -227,7 +278,7 @@ system baseline for feature research.
   Current state: signal-strength and benchmark-aware risk control modes are implemented and already in the current shortlist; realism and attribution work still remains.
 - [ ] Add embargo / gap controls between train, valid, and test windows to reduce boundary leakage in rolling runs
 
-### 8. Strategy Layer
+### 11. Strategy Layer
 
 - [x] Add score-weighted portfolio construction instead of pure equal weight
 - [x] Promote the shortlist winner set into the current production baseline definition
@@ -240,8 +291,9 @@ system baseline for feature research.
   Promotion rule:
   - if the change only reshapes holdings but does not improve learning diagnostics, treat it as secondary
   - if the change improves learning diagnostics but needs portfolio help, keep it in the alpha pipeline
+- [ ] Avoid broad new sweeps in this section until the layered-task roadmap above has a first answer
 
-### 9. Native Model Roadmap
+### 12. Native Model Roadmap
 
 - [ ] Decide whether native LSTM should remain supported as a secondary path
 - [ ] If sequence models remain in scope, build a real native Transformer implementation
@@ -258,7 +310,7 @@ system baseline for feature research.
 - [ ] Compare ranking-only vs buyability-only vs two-stage ranking+buyability on the same feature/profile stack
 - [ ] Add model-side promotion criteria based on calibration, monotonicity, and regime robustness, not only IC and backtest return
 
-### 10. Tooling And UX
+### 13. Tooling And UX
 
 - [x] Split feature-set definitions into dedicated files under `configs/features/`
 - [x] Upgrade model presets into first-class model profiles under `configs/models/`
@@ -276,10 +328,12 @@ system baseline for feature research.
 If only one direction should be pursued next, it should be:
 
 1. native LightGBM
-2. explicit absolute-opportunity modeling on top of the current ranker baseline
-3. mixed absolute/ranked feature representation plus longer rolling memory
-4. diagnostics that verify the model learned what can make money
-5. only then more feature expansion and portfolio-layer tuning
+2. layered task decomposition: market / industry / stock
+3. explicit relative-opportunity modeling before raw magnitude modeling
+4. longer regime coverage plus mixed absolute/ranked feature representation
+5. diagnostics that verify the model learned what can make money
+6. only then more feature expansion and portfolio-layer tuning
 
 This is more likely to produce a model that truly knows what can make money than
-another round of backtest-driven strategy polishing or another deep model right now.
+another round of backtest-driven strategy polishing, blend-weight tuning, or another deep
+model right now.

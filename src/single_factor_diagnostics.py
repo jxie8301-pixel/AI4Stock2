@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 import json
 from typing import Any
@@ -10,10 +11,17 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.evaluate import safe_cross_sectional_corr
-
 
 DEFAULT_QUANTILE_BINS = 5
+
+
+@dataclass(frozen=True)
+class PreparedSingleFactorDiagnosticsContext:
+    row_dates: np.ndarray
+    label_values: np.ndarray
+    feature_arrays: dict[str, np.ndarray]
+    date_index: pd.DatetimeIndex
+    date_slices: tuple[slice, ...]
 
 
 def _safe_ratio(numerator: int | float, denominator: int | float) -> float:
@@ -26,7 +34,7 @@ def _safe_ratio(numerator: int | float, denominator: int | float) -> float:
 def _safe_mean(values: list[float]) -> float:
     if not values:
         return float("nan")
-    return float(pd.Series(values, dtype=float).mean())
+    return float(np.asarray(values, dtype=float).mean())
 
 
 def _safe_std(values: pd.Series) -> float:
@@ -58,61 +66,91 @@ def _build_date_slices(dates: pd.Series | pd.DatetimeIndex) -> tuple[pd.Datetime
     return unique_dates, slices
 
 
-def _rank_to_quantile_bins(values: pd.Series, quantile_bins: int) -> pd.Series:
-    rank_pct = values.rank(method="average", pct=True)
-    bucket = np.floor(rank_pct.to_numpy(dtype=float, copy=False) * float(quantile_bins) - 1e-12).astype(int)
-    bucket = np.clip(bucket, 0, max(int(quantile_bins) - 1, 0))
-    return pd.Series(bucket, index=values.index, dtype=int)
+def _series_to_float_array(values: pd.Series) -> np.ndarray:
+    if pd.api.types.is_numeric_dtype(values):
+        return values.to_numpy(dtype=np.float64, copy=False)
+    return pd.to_numeric(values, errors="coerce").to_numpy(dtype=np.float64, copy=False)
 
 
-def normalize_segments(
-    segments: list[tuple[str, str | pd.Timestamp, str | pd.Timestamp]] | None,
-) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
-    if not segments:
-        return []
-    normalized: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
-    seen_names: set[str] = set()
-    for raw_name, raw_start, raw_end in segments:
-        name = str(raw_name).strip()
-        if not name:
-            raise ValueError("Segment name must be non-empty.")
-        if name in seen_names:
-            raise ValueError(f"Duplicate segment name: {name}")
-        start = pd.Timestamp("".join(str(raw_start).split()))
-        end = pd.Timestamp("".join(str(raw_end).split()))
-        if start > end:
-            raise ValueError(f"Segment '{name}' start must be <= end.")
-        normalized.append((name, start, end))
-        seen_names.add(name)
-    return normalized
+def _pearson_corr_from_arrays(xs: np.ndarray, ys: np.ndarray) -> float:
+    if xs.size < 2 or ys.size < 2:
+        return float("nan")
+    xs_centered = xs - xs.mean()
+    ys_centered = ys - ys.mean()
+    xs_ss = float(np.dot(xs_centered, xs_centered))
+    ys_ss = float(np.dot(ys_centered, ys_centered))
+    if not np.isfinite(xs_ss) or not np.isfinite(ys_ss) or xs_ss <= 0.0 or ys_ss <= 0.0:
+        return float("nan")
+    return float(np.dot(xs_centered, ys_centered) / np.sqrt(xs_ss * ys_ss))
 
 
-def compute_feature_diagnostics(
-    feature_values: pd.Series,
-    labels: pd.Series,
+def _rank_average(values: np.ndarray) -> np.ndarray:
+    return pd.Series(values, dtype=float).rank(method="average").to_numpy(dtype=np.float64, copy=False)
+
+
+def _spearman_corr_from_arrays(xs: np.ndarray, ys: np.ndarray) -> float:
+    if xs.size < 2 or ys.size < 2:
+        return float("nan")
+    return _pearson_corr_from_arrays(_rank_average(xs), _rank_average(ys))
+
+
+def _rank_to_quantile_bins_array(values: np.ndarray, quantile_bins: int) -> np.ndarray:
+    rank_pct = pd.Series(values, dtype=float).rank(method="average", pct=True).to_numpy(dtype=np.float64, copy=False)
+    bucket = np.floor(rank_pct * float(quantile_bins) - 1e-12).astype(np.int32)
+    return np.clip(bucket, 0, max(int(quantile_bins) - 1, 0))
+
+
+def _prepare_single_factor_diagnostics_context(
+    frame: pd.DataFrame,
     *,
+    feature_names: list[str],
+    label_column: str,
+) -> PreparedSingleFactorDiagnosticsContext:
+    required_columns = ["date", "symbol", label_column, *feature_names]
+    subset = frame[required_columns].copy()
+    subset["date"] = pd.to_datetime(subset["date"])
+    subset["symbol"] = subset["symbol"].astype(str)
+    subset = subset.sort_values(["date", "symbol"]).reset_index(drop=True)
+
+    row_dates = subset["date"].to_numpy(dtype="datetime64[ns]", copy=False)
+    label_values = _series_to_float_array(subset[label_column])
+    feature_arrays = {feature_name: _series_to_float_array(subset[feature_name]) for feature_name in feature_names}
+    date_index, date_slices = _build_date_slices(pd.DatetimeIndex(row_dates))
+
+    return PreparedSingleFactorDiagnosticsContext(
+        row_dates=row_dates,
+        label_values=label_values,
+        feature_arrays=feature_arrays,
+        date_index=date_index,
+        date_slices=tuple(date_slices),
+    )
+
+
+def _resolve_segment_row_slice(
+    row_dates: np.ndarray,
+    *,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+) -> slice:
+    if row_dates.size == 0:
+        return slice(0, 0)
+    start_ts = np.datetime64(pd.Timestamp(start).to_datetime64())
+    end_ts = np.datetime64(pd.Timestamp(end).to_datetime64())
+    start_idx = int(row_dates.searchsorted(start_ts, side="left"))
+    end_idx = int(row_dates.searchsorted(end_ts, side="right"))
+    return slice(start_idx, end_idx)
+
+
+def _compute_feature_diagnostics_from_arrays(
+    feature_values: np.ndarray,
+    labels: np.ndarray,
+    *,
+    date_index: pd.DatetimeIndex,
+    date_slices: tuple[slice, ...] | list[slice],
     quantile_bins: int = DEFAULT_QUANTILE_BINS,
 ) -> dict[str, Any]:
-    """Summarize one factor's cross-sectional predictive quality over time."""
-    if not feature_values.index.equals(labels.index):
-        raise ValueError("feature_values and labels must share the same index")
-    if feature_values.index.nlevels != 2:
-        raise ValueError("feature_values must be indexed by [datetime, instrument]")
-
     quantile_bins = max(int(quantile_bins), 2)
-    paired = pd.DataFrame(
-        {
-            "feature": pd.to_numeric(feature_values, errors="coerce"),
-            "label": pd.to_numeric(labels, errors="coerce"),
-        },
-        index=feature_values.index,
-    ).sort_index()
-
-    dates = pd.DatetimeIndex(paired.index.get_level_values(0))
-    date_index, date_slices = _build_date_slices(dates)
-    total_obs = int(len(paired))
-    feature_arr = paired["feature"].to_numpy(dtype=float, copy=False)
-    label_arr = paired["label"].to_numpy(dtype=float, copy=False)
+    total_obs = int(len(feature_values))
 
     daily_coverage_values: list[float] = []
     daily_ic_values: list[float] = []
@@ -124,8 +162,8 @@ def compute_feature_diagnostics(
     valid_observation_count = 0
 
     for current_date, row_slice in zip(date_index, date_slices):
-        feature_slice = feature_arr[row_slice]
-        label_slice = label_arr[row_slice]
+        feature_slice = feature_values[row_slice]
+        label_slice = labels[row_slice]
         valid_mask = np.isfinite(feature_slice) & np.isfinite(label_slice)
         valid_count = int(valid_mask.sum())
         row_count = int(len(feature_slice))
@@ -134,31 +172,30 @@ def compute_feature_diagnostics(
         if valid_count < 2:
             continue
 
-        xs = pd.Series(feature_slice[valid_mask], dtype=float)
-        ys = pd.Series(label_slice[valid_mask], dtype=float)
-        ic = safe_cross_sectional_corr(xs, ys, method="pearson")
-        rank_ic = safe_cross_sectional_corr(xs, ys, method="spearman")
+        xs = feature_slice[valid_mask]
+        ys = label_slice[valid_mask]
+        ic = _pearson_corr_from_arrays(xs, ys)
+        rank_ic = _spearman_corr_from_arrays(xs, ys)
         if np.isfinite(ic) and np.isfinite(rank_ic):
             effective_dates.append(pd.Timestamp(current_date))
             daily_ic_values.append(float(ic))
             daily_rank_ic_values.append(float(rank_ic))
 
-        if xs.nunique(dropna=True) < 2 or ys.nunique(dropna=True) < 2:
+        if np.unique(xs).size < 2 or np.unique(ys).size < 2:
             continue
         if valid_count < quantile_bins:
             continue
 
-        bucket = _rank_to_quantile_bins(xs, quantile_bins)
-        grouped = ys.groupby(bucket).mean().sort_index()
-        if len(grouped) < 2:
+        bucket = _rank_to_quantile_bins_array(xs, quantile_bins)
+        bucket_count = np.bincount(bucket, minlength=quantile_bins)
+        populated_mask = bucket_count > 0
+        if int(populated_mask.sum()) < 2:
             continue
 
-        spread = float(grouped.iloc[-1] - grouped.iloc[0])
-        monotonicity = safe_cross_sectional_corr(
-            pd.Series(grouped.index.to_numpy(dtype=float, copy=False), dtype=float),
-            pd.Series(grouped.to_numpy(dtype=float, copy=False), dtype=float),
-            method="spearman",
-        )
+        bucket_mean = np.bincount(bucket, weights=ys, minlength=quantile_bins)[populated_mask] / bucket_count[populated_mask]
+        bucket_index = np.flatnonzero(populated_mask).astype(np.float64, copy=False)
+        spread = float(bucket_mean[-1] - bucket_mean[0])
+        monotonicity = _spearman_corr_from_arrays(bucket_index, bucket_mean.astype(np.float64, copy=False))
         if np.isfinite(monotonicity):
             monotonic_dates.append(pd.Timestamp(current_date))
             monotonicity_values.append(float(monotonicity))
@@ -213,40 +250,31 @@ def compute_feature_diagnostics(
     }
 
 
-def build_single_factor_diagnostics(
-    frame: pd.DataFrame,
+def _build_single_factor_summary_from_context(
+    context: PreparedSingleFactorDiagnosticsContext,
     *,
     feature_names: list[str],
-    label_column: str = "label",
     quantile_bins: int = DEFAULT_QUANTILE_BINS,
+    row_slice: slice | None = None,
 ) -> pd.DataFrame:
-    """Compute summary diagnostics for a list of features."""
-    if "date" not in frame.columns:
-        raise ValueError("frame must contain a 'date' column")
-    if label_column not in frame.columns:
-        raise ValueError(f"frame must contain label column: {label_column}")
-
-    required_columns = ["date", "symbol", label_column, *feature_names]
-    subset = frame[required_columns].copy()
-    subset["date"] = pd.to_datetime(subset["date"])
-    subset["symbol"] = subset["symbol"].astype(str)
-    subset = subset.sort_values(["date", "symbol"]).reset_index(drop=True)
-    multi_index = pd.MultiIndex.from_arrays(
-        [subset["date"], subset["symbol"]],
-        names=["datetime", "instrument"],
-    )
-    labels = pd.Series(pd.to_numeric(subset[label_column], errors="coerce").to_numpy(), index=multi_index, dtype=float)
+    if row_slice is None:
+        label_values = context.label_values
+        date_index = context.date_index
+        date_slices = context.date_slices
+    else:
+        label_values = context.label_values[row_slice]
+        row_dates = context.row_dates[row_slice]
+        date_index, date_slices = _build_date_slices(pd.DatetimeIndex(row_dates))
+        date_slices = tuple(date_slices)
 
     rows: list[dict[str, Any]] = []
     for feature_name in feature_names:
-        feature_series = pd.Series(
-            pd.to_numeric(subset[feature_name], errors="coerce").to_numpy(),
-            index=multi_index,
-            dtype=float,
-        )
-        metrics = compute_feature_diagnostics(
-            feature_series,
-            labels,
+        feature_values = context.feature_arrays[feature_name] if row_slice is None else context.feature_arrays[feature_name][row_slice]
+        metrics = _compute_feature_diagnostics_from_arrays(
+            feature_values,
+            label_values,
+            date_index=date_index,
+            date_slices=date_slices,
             quantile_bins=quantile_bins,
         )
         rows.append({"feature": feature_name, **metrics})
@@ -265,6 +293,86 @@ def build_single_factor_diagnostics(
     return summary
 
 
+def normalize_segments(
+    segments: list[tuple[str, str | pd.Timestamp, str | pd.Timestamp]] | None,
+) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
+    if not segments:
+        return []
+    normalized: list[tuple[str, pd.Timestamp, pd.Timestamp]] = []
+    seen_names: set[str] = set()
+    for raw_name, raw_start, raw_end in segments:
+        name = str(raw_name).strip()
+        if not name:
+            raise ValueError("Segment name must be non-empty.")
+        if name in seen_names:
+            raise ValueError(f"Duplicate segment name: {name}")
+        start = pd.Timestamp("".join(str(raw_start).split()))
+        end = pd.Timestamp("".join(str(raw_end).split()))
+        if start > end:
+            raise ValueError(f"Segment '{name}' start must be <= end.")
+        normalized.append((name, start, end))
+        seen_names.add(name)
+    return normalized
+
+
+def compute_feature_diagnostics(
+    feature_values: pd.Series,
+    labels: pd.Series,
+    *,
+    quantile_bins: int = DEFAULT_QUANTILE_BINS,
+) -> dict[str, Any]:
+    """Summarize one factor's cross-sectional predictive quality over time."""
+    if not feature_values.index.equals(labels.index):
+        raise ValueError("feature_values and labels must share the same index")
+    if feature_values.index.nlevels != 2:
+        raise ValueError("feature_values must be indexed by [datetime, instrument]")
+
+    paired = pd.DataFrame(
+        {
+            "feature": pd.to_numeric(feature_values, errors="coerce"),
+            "label": pd.to_numeric(labels, errors="coerce"),
+        },
+        index=feature_values.index,
+    ).sort_index()
+
+    dates = pd.DatetimeIndex(paired.index.get_level_values(0))
+    date_index, date_slices = _build_date_slices(dates)
+    feature_arr = paired["feature"].to_numpy(dtype=float, copy=False)
+    label_arr = paired["label"].to_numpy(dtype=float, copy=False)
+    return _compute_feature_diagnostics_from_arrays(
+        feature_arr,
+        label_arr,
+        date_index=date_index,
+        date_slices=tuple(date_slices),
+        quantile_bins=quantile_bins,
+    )
+
+
+def build_single_factor_diagnostics(
+    frame: pd.DataFrame,
+    *,
+    feature_names: list[str],
+    label_column: str = "label",
+    quantile_bins: int = DEFAULT_QUANTILE_BINS,
+) -> pd.DataFrame:
+    """Compute summary diagnostics for a list of features."""
+    if "date" not in frame.columns:
+        raise ValueError("frame must contain a 'date' column")
+    if label_column not in frame.columns:
+        raise ValueError(f"frame must contain label column: {label_column}")
+
+    context = _prepare_single_factor_diagnostics_context(
+        frame,
+        feature_names=feature_names,
+        label_column=label_column,
+    )
+    return _build_single_factor_summary_from_context(
+        context,
+        feature_names=feature_names,
+        quantile_bins=quantile_bins,
+    )
+
+
 def build_segmented_single_factor_diagnostics(
     frame: pd.DataFrame,
     *,
@@ -279,20 +387,27 @@ def build_segmented_single_factor_diagnostics(
     if "date" not in frame.columns:
         raise ValueError("frame must contain a 'date' column")
 
-    base = frame.copy()
-    base["date"] = pd.to_datetime(base["date"])
+    context = _prepare_single_factor_diagnostics_context(
+        frame,
+        feature_names=feature_names,
+        label_column=label_column,
+    )
     segment_frames: dict[str, pd.DataFrame] = {}
     comparison_rows: list[pd.DataFrame] = []
 
     for name, start, end in normalized_segments:
-        segment_frame = base[(base["date"] >= start) & (base["date"] <= end)].copy()
-        if segment_frame.empty:
+        row_slice = _resolve_segment_row_slice(
+            context.row_dates,
+            start=start,
+            end=end,
+        )
+        if row_slice.start >= row_slice.stop:
             continue
-        summary = build_single_factor_diagnostics(
-            segment_frame,
+        summary = _build_single_factor_summary_from_context(
+            context,
             feature_names=feature_names,
-            label_column=label_column,
             quantile_bins=quantile_bins,
+            row_slice=row_slice,
         )
         segment_frames[name] = summary
         rename_map = {

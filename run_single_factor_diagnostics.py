@@ -19,6 +19,7 @@ from src.feature_selection import resolve_selected_feature_columns
 from src.label_utils import build_opportunity_edge_series, get_label_column_name, resolve_signal_horizon
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 from src.single_factor_diagnostics import (
+    build_single_factor_detail_frames,
     build_segmented_single_factor_diagnostics,
     build_single_factor_diagnostics,
     save_single_factor_diagnostics,
@@ -51,11 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-dir", help="Optional explicit output directory.")
     parser.add_argument(
         "--segment-scheme",
-        choices=["none", "config_split"],
+        choices=["none", "config_split", "yearly"],
         default="none",
         help=(
             "Optional segmented diagnostics scheme. "
-            "`config_split` compares train/valid/test over the currently loaded range."
+            "`config_split` compares train/valid/test over the currently loaded range. "
+            "`yearly` creates one segment per calendar year in range."
         ),
     )
     parser.add_argument(
@@ -76,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.0,
         help="Optional excess hurdle for relative diagnostics. Default: 0.0.",
+    )
+    parser.add_argument(
+        "--industry-neutral",
+        action="store_true",
+        help="Demean each factor within date x industry before diagnostics when industry groups are available.",
     )
     return parser
 
@@ -131,6 +138,14 @@ def _parse_custom_segments(raw: str | None) -> list[tuple[str, str, str]]:
 
 def _resolve_segments(cfg: dict, args: argparse.Namespace, *, main_start: str, main_end: str) -> list[tuple[str, str, str]]:
     segments: list[tuple[str, str, str]] = []
+    if args.segment_scheme == "yearly":
+        start_ts = pd.Timestamp(main_start)
+        end_ts = pd.Timestamp(main_end)
+        for year in range(int(start_ts.year), int(end_ts.year) + 1):
+            seg_start = max(start_ts, pd.Timestamp(f"{year}-01-01"))
+            seg_end = min(end_ts, pd.Timestamp(f"{year}-12-31"))
+            if seg_start <= seg_end:
+                segments.append((f"y{year}", str(seg_start.date()), str(seg_end.date())))
     if args.segment_scheme == "config_split":
         main_start_ts = pd.Timestamp(main_start)
         main_end_ts = pd.Timestamp(main_end)
@@ -177,6 +192,37 @@ def _load_instrument_industry_groups(
     instrument_index = pd.Index(instruments.astype(str), dtype=object)
     groups = frame["industry"].reindex(instrument_index)
     return groups if groups.notna().any() else None
+
+
+def _apply_industry_neutralization(
+    frame: pd.DataFrame,
+    *,
+    cfg: dict,
+    feature_names: list[str],
+) -> tuple[pd.DataFrame, int]:
+    groups = _load_instrument_industry_groups(
+        cfg,
+        instruments=frame["symbol"].drop_duplicates(),
+    )
+    if groups is None:
+        raise ValueError("Industry-neutral diagnostics requested, but no industry groups were loaded.")
+
+    out = frame.copy()
+    industry_series = pd.Series(out["symbol"].astype(str)).map(groups.to_dict())
+    out["_industry_group"] = industry_series.to_numpy(copy=False)
+    valid_mask = out["_industry_group"].notna()
+    if not bool(valid_mask.any()):
+        raise ValueError("Industry-neutral diagnostics requested, but no rows mapped to a valid industry group.")
+    neutralized_feature_count = 0
+    grouped = out.loc[valid_mask].groupby(["date", "_industry_group"], observed=True)
+    for feature_name in feature_names:
+        out.loc[valid_mask, feature_name] = (
+            out.loc[valid_mask, feature_name]
+            - grouped[feature_name].transform("mean")
+        )
+        neutralized_feature_count += 1
+    out = out.drop(columns=["_industry_group"])
+    return out, neutralized_feature_count
 
 
 def _build_forward_compound_return_series(
@@ -307,6 +353,17 @@ def main() -> None:
         raise ValueError("All rows were dropped after applying the requested diagnostic label space.")
     label_elapsed = perf_counter() - label_started
 
+    neutralize_elapsed = 0.0
+    neutralized_feature_count = 0
+    if bool(getattr(args, "industry_neutral", False)):
+        neutralize_started = perf_counter()
+        factor_frame, neutralized_feature_count = _apply_industry_neutralization(
+            factor_frame,
+            cfg=cfg,
+            feature_names=feature_names,
+        )
+        neutralize_elapsed = perf_counter() - neutralize_started
+
     summary_started = perf_counter()
     summary = build_single_factor_diagnostics(
         factor_frame,
@@ -315,6 +372,14 @@ def main() -> None:
         quantile_bins=max(int(args.quantile_bins), 2),
     )
     summary_elapsed = perf_counter() - summary_started
+    detail_started = perf_counter()
+    detail_frames = build_single_factor_detail_frames(
+        factor_frame,
+        feature_names=feature_names,
+        label_column="label",
+        quantile_bins=max(int(args.quantile_bins), 2),
+    )
+    detail_elapsed = perf_counter() - detail_started
     segments = _resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
     segment_started = perf_counter()
     segment_comparison, segment_summaries = build_segmented_single_factor_diagnostics(
@@ -337,6 +402,8 @@ def main() -> None:
         "date_end": date_end,
         "diagnostic_label_space": diagnostic_label_space,
         "diagnostic_threshold": float(args.diagnostic_threshold),
+        "industry_neutral": bool(getattr(args, "industry_neutral", False)),
+        "neutralized_feature_count": neutralized_feature_count,
         "feature_count": len(feature_names),
         "row_count": len(factor_frame),
         "quantile_bins": max(int(args.quantile_bins), 2),
@@ -344,7 +411,9 @@ def main() -> None:
         "segment_count": len(segment_summaries),
         "load_elapsed_sec": round(load_elapsed, 6),
         "label_elapsed_sec": round(label_elapsed, 6),
+        "neutralize_elapsed_sec": round(neutralize_elapsed, 6),
         "summary_elapsed_sec": round(summary_elapsed, 6),
+        "detail_elapsed_sec": round(detail_elapsed, 6),
         "segment_elapsed_sec": round(segment_elapsed, 6),
     }
     artifacts = save_single_factor_diagnostics(
@@ -355,6 +424,7 @@ def main() -> None:
         top_n=max(int(args.top_n), 1),
         segment_comparison=segment_comparison,
         segment_summaries=segment_summaries,
+        detail_frames=detail_frames,
     )
 
     print(f"[+] Single-factor diagnostics saved to: {output_dir}")
@@ -362,7 +432,9 @@ def main() -> None:
         "    timings:"
         f" load={load_elapsed:.2f}s"
         f" label={label_elapsed:.2f}s"
+        f" neutralize={neutralize_elapsed:.2f}s"
         f" summary={summary_elapsed:.2f}s"
+        f" detail={detail_elapsed:.2f}s"
         f" segments={segment_elapsed:.2f}s"
         f" total={perf_counter() - start_time:.2f}s"
     )

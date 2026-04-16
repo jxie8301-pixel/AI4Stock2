@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.single_factor_diagnostics import (
+    build_single_factor_detail_frames,
     build_segmented_single_factor_diagnostics,
     build_single_factor_diagnostics,
     compute_feature_diagnostics,
@@ -89,6 +90,32 @@ def test_build_single_factor_diagnostics_preserves_negative_direction() -> None:
     assert by_feature.loc["inverse", "monthly_rank_ic_directional_hit_rate"] == 1.0
     assert by_feature.loc["flat", "effective_date_count"] == 0
     assert pd.isna(by_feature.loc["flat", "rank_ic_mean"])
+    assert by_feature.loc["signal", "feature_group"] == "alpha158"
+
+
+def test_build_single_factor_detail_frames_exports_daily_and_yearly_artifacts() -> None:
+    frame = _build_test_frame()
+
+    details = build_single_factor_detail_frames(
+        frame,
+        feature_names=["signal", "inverse"],
+        label_column="label",
+        quantile_bins=2,
+    )
+
+    assert set(details.bucket_return_daily["feature"]) == {"signal", "inverse"}
+    assert set(details.bucket_return_daily["bucket"]) == {0, 1}
+    assert set(details.top_bottom_spread_daily["feature"]) == {"signal", "inverse"}
+    signal_spread = details.top_bottom_spread_daily[
+        details.top_bottom_spread_daily["feature"] == "signal"
+    ]["top_bottom_spread"]
+    inverse_spread = details.top_bottom_spread_daily[
+        details.top_bottom_spread_daily["feature"] == "inverse"
+    ]["top_bottom_spread"]
+    assert bool((signal_spread > 0).all())
+    assert bool((inverse_spread < 0).all())
+    assert set(details.rank_ic_monthly["feature"]) == {"signal", "inverse"}
+    assert details.feature_missing_by_year["feature_coverage_pct"].min() == 1.0
 
 
 def test_build_segmented_single_factor_diagnostics_detects_direction_flip() -> None:
@@ -187,10 +214,21 @@ def test_save_single_factor_diagnostics_renders_segment_comparison_columns() -> 
             top_n=10,
             segment_comparison=segment_comparison,
             segment_summaries=None,
+            detail_frames=build_single_factor_detail_frames(
+                _build_test_frame(),
+                feature_names=["signal"],
+                label_column="label",
+                quantile_bins=2,
+            ),
         )
         readme = (Path(tmpdir) / "README.md").read_text(encoding="utf-8")
+        assert (Path(tmpdir) / "single_factor_bucket_return_daily.csv").exists()
+        assert (Path(tmpdir) / "single_factor_top_bottom_spread_daily.csv").exists()
+        assert (Path(tmpdir) / "single_factor_rank_ic_monthly.csv").exists()
+        assert (Path(tmpdir) / "single_factor_missing_by_year.csv").exists()
 
     assert "Segment Comparison" in readme
+    assert "Detailed Artifacts" in readme
     assert "direction_flip" in readme
     assert "best_segment_by_abs_rank_ic" in readme
     assert "seg_a" in readme

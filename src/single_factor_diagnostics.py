@@ -24,6 +24,14 @@ class PreparedSingleFactorDiagnosticsContext:
     date_slices: tuple[slice, ...]
 
 
+@dataclass(frozen=True)
+class SingleFactorDetailFrames:
+    bucket_return_daily: pd.DataFrame
+    top_bottom_spread_daily: pd.DataFrame
+    rank_ic_monthly: pd.DataFrame
+    feature_missing_by_year: pd.DataFrame
+
+
 def _safe_ratio(numerator: int | float, denominator: int | float) -> float:
     denominator_value = float(denominator)
     if denominator_value <= 0:
@@ -98,6 +106,33 @@ def _rank_to_quantile_bins_array(values: np.ndarray, quantile_bins: int) -> np.n
     rank_pct = pd.Series(values, dtype=float).rank(method="average", pct=True).to_numpy(dtype=np.float64, copy=False)
     bucket = np.floor(rank_pct * float(quantile_bins) - 1e-12).astype(np.int32)
     return np.clip(bucket, 0, max(int(quantile_bins) - 1, 0))
+
+
+def _infer_feature_group(feature_name: str) -> str:
+    if feature_name.startswith("TS_"):
+        raw = feature_name[3:]
+        if raw.startswith(("industry_", "stock_vs_industry", "stock_industry", "stock_relative_strength")):
+            return "tushare_industry"
+        if raw.startswith(("fi_", "latest_eps", "latest_dt_eps", "latest_bps", "latest_ocfps", "latest_roe", "latest_roa", "latest_grossprofit", "latest_netprofit", "latest_debt", "latest_q_", "latest_tr_", "latest_or_", "latest_op_", "latest_netprofit_yoy", "latest_ocf")):
+            return "tushare_financial_quality"
+        if raw.startswith(("fc_", "exp_", "latest_fc", "latest_exp")):
+            return "tushare_event_forecast_express"
+        if "limit" in raw or raw.startswith(("gap_", "hit_", "near_", "days_since_last", "up_limit", "down_limit")):
+            return "tushare_limit_state"
+        if "turnover" in raw or "amihud" in raw or raw.startswith(("free_", "volume_ratio", "downside_")):
+            return "tushare_flow_liquidity"
+        if raw.startswith(("ep", "sp", "bp", "dividend", "latest_div", "has_dividend", "has_stock_dividend")):
+            return "tushare_valuation_dividend"
+        return "tushare_other"
+    if feature_name.startswith("LGBM_"):
+        return "lgbm_purified"
+    if feature_name.startswith("TEMP_"):
+        return "temporal"
+    if feature_name.startswith("TECH_"):
+        return "technical"
+    if feature_name.startswith("A360_"):
+        return "alpha360"
+    return "alpha158"
 
 
 def _prepare_single_factor_diagnostics_context(
@@ -219,6 +254,7 @@ def _compute_feature_diagnostics_from_arrays(
         monthly_directional_hit_rate = float((monthly_rank_ic * direction > 0).mean())
 
     return {
+        "feature_group": "",
         "observation_count": total_obs,
         "valid_observation_count": int(valid_observation_count),
         "coverage_pct": _safe_ratio(valid_observation_count, total_obs),
@@ -250,6 +286,120 @@ def _compute_feature_diagnostics_from_arrays(
     }
 
 
+def _compute_feature_detail_frames_from_arrays(
+    *,
+    feature_name: str,
+    feature_values: np.ndarray,
+    labels: np.ndarray,
+    date_index: pd.DatetimeIndex,
+    date_slices: tuple[slice, ...] | list[slice],
+    quantile_bins: int = DEFAULT_QUANTILE_BINS,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    quantile_bins = max(int(quantile_bins), 2)
+    bucket_rows: list[dict[str, Any]] = []
+    spread_rows: list[dict[str, Any]] = []
+    rank_ic_rows: list[dict[str, Any]] = []
+    feature_group = _infer_feature_group(feature_name)
+
+    for current_date, row_slice in zip(date_index, date_slices):
+        feature_slice = feature_values[row_slice]
+        label_slice = labels[row_slice]
+        valid_mask = np.isfinite(feature_slice) & np.isfinite(label_slice)
+        valid_count = int(valid_mask.sum())
+        if valid_count < 2:
+            continue
+
+        xs = feature_slice[valid_mask]
+        ys = label_slice[valid_mask]
+        ic = _pearson_corr_from_arrays(xs, ys)
+        rank_ic = _spearman_corr_from_arrays(xs, ys)
+        rank_ic_rows.append(
+            {
+                "feature": feature_name,
+                "feature_group": feature_group,
+                "date": pd.Timestamp(current_date),
+                "ic": ic,
+                "rank_ic": rank_ic,
+                "valid_count": valid_count,
+            }
+        )
+
+        if np.unique(xs).size < 2 or valid_count < quantile_bins:
+            continue
+        bucket = _rank_to_quantile_bins_array(xs, quantile_bins)
+        bucket_count = np.bincount(bucket, minlength=quantile_bins)
+        bucket_sum = np.bincount(bucket, weights=ys, minlength=quantile_bins)
+        populated = np.flatnonzero(bucket_count > 0)
+        if populated.size < 2:
+            continue
+        bucket_mean = bucket_sum[populated] / bucket_count[populated]
+        date_value = pd.Timestamp(current_date)
+        for bucket_id, mean_value in zip(populated, bucket_mean, strict=False):
+            bucket_rows.append(
+                {
+                    "feature": feature_name,
+                    "feature_group": feature_group,
+                    "date": date_value,
+                    "bucket": int(bucket_id),
+                    "bucket_mean_label": float(mean_value),
+                    "bucket_count": int(bucket_count[int(bucket_id)]),
+                }
+            )
+        bottom_bucket = int(populated[0])
+        top_bucket = int(populated[-1])
+        bottom_mean = float(bucket_mean[0])
+        top_mean = float(bucket_mean[-1])
+        spread_rows.append(
+            {
+                "feature": feature_name,
+                "feature_group": feature_group,
+                "date": date_value,
+                "bottom_bucket": bottom_bucket,
+                "top_bucket": top_bucket,
+                "bottom_mean_label": bottom_mean,
+                "top_mean_label": top_mean,
+                "top_bottom_spread": top_mean - bottom_mean,
+                "valid_count": valid_count,
+            }
+        )
+
+    return bucket_rows, spread_rows, rank_ic_rows
+
+
+def _compute_feature_missing_by_year(
+    *,
+    feature_name: str,
+    feature_values: np.ndarray,
+    row_dates: np.ndarray,
+    labels: np.ndarray,
+) -> list[dict[str, Any]]:
+    if row_dates.size == 0:
+        return []
+    years = pd.DatetimeIndex(row_dates).year.to_numpy()
+    feature_group = _infer_feature_group(feature_name)
+    rows: list[dict[str, Any]] = []
+    for year in sorted(set(int(value) for value in years)):
+        mask = years == int(year)
+        obs = int(mask.sum())
+        feature_valid = np.isfinite(feature_values[mask])
+        label_valid = np.isfinite(labels[mask])
+        paired_valid = feature_valid & label_valid
+        rows.append(
+            {
+                "feature": feature_name,
+                "feature_group": feature_group,
+                "year": int(year),
+                "observation_count": obs,
+                "feature_valid_count": int(feature_valid.sum()),
+                "paired_valid_count": int(paired_valid.sum()),
+                "feature_coverage_pct": _safe_ratio(int(feature_valid.sum()), obs),
+                "paired_coverage_pct": _safe_ratio(int(paired_valid.sum()), obs),
+                "feature_missing_pct": 1.0 - _safe_ratio(int(feature_valid.sum()), obs),
+            }
+        )
+    return rows
+
+
 def _build_single_factor_summary_from_context(
     context: PreparedSingleFactorDiagnosticsContext,
     *,
@@ -277,6 +427,7 @@ def _build_single_factor_summary_from_context(
             date_slices=date_slices,
             quantile_bins=quantile_bins,
         )
+        metrics["feature_group"] = _infer_feature_group(feature_name)
         rows.append({"feature": feature_name, **metrics})
 
     summary = pd.DataFrame(rows)
@@ -291,6 +442,109 @@ def _build_single_factor_summary_from_context(
         na_position="last",
     ).reset_index(drop=True)
     return summary
+
+
+def build_single_factor_detail_frames(
+    frame: pd.DataFrame,
+    *,
+    feature_names: list[str],
+    label_column: str = "label",
+    quantile_bins: int = DEFAULT_QUANTILE_BINS,
+) -> SingleFactorDetailFrames:
+    """Build detailed time-series artifacts for single-factor research."""
+    if "date" not in frame.columns:
+        raise ValueError("frame must contain a 'date' column")
+    if label_column not in frame.columns:
+        raise ValueError(f"frame must contain label column: {label_column}")
+
+    context = _prepare_single_factor_diagnostics_context(
+        frame,
+        feature_names=feature_names,
+        label_column=label_column,
+    )
+    bucket_rows: list[dict[str, Any]] = []
+    spread_rows: list[dict[str, Any]] = []
+    rank_ic_rows: list[dict[str, Any]] = []
+    missing_rows: list[dict[str, Any]] = []
+
+    for feature_name in feature_names:
+        feature_values = context.feature_arrays[feature_name]
+        current_bucket_rows, current_spread_rows, current_rank_ic_rows = _compute_feature_detail_frames_from_arrays(
+            feature_name=feature_name,
+            feature_values=feature_values,
+            labels=context.label_values,
+            date_index=context.date_index,
+            date_slices=context.date_slices,
+            quantile_bins=quantile_bins,
+        )
+        bucket_rows.extend(current_bucket_rows)
+        spread_rows.extend(current_spread_rows)
+        rank_ic_rows.extend(current_rank_ic_rows)
+        missing_rows.extend(
+            _compute_feature_missing_by_year(
+                feature_name=feature_name,
+                feature_values=feature_values,
+                row_dates=context.row_dates,
+                labels=context.label_values,
+            )
+        )
+
+    rank_ic_daily = pd.DataFrame(rank_ic_rows)
+    if not rank_ic_daily.empty:
+        rank_ic_daily["month"] = pd.to_datetime(rank_ic_daily["date"]).dt.to_period("M").dt.to_timestamp("M")
+        rank_ic_monthly = (
+            rank_ic_daily.groupby(["feature", "feature_group", "month"], observed=True)
+            .agg(
+                ic_mean=("ic", "mean"),
+                rank_ic_mean=("rank_ic", "mean"),
+                rank_ic_count=("rank_ic", "count"),
+                avg_valid_count=("valid_count", "mean"),
+            )
+            .reset_index()
+            .sort_values(["feature", "month"])
+            .reset_index(drop=True)
+        )
+    else:
+        rank_ic_monthly = pd.DataFrame(
+            columns=["feature", "feature_group", "month", "ic_mean", "rank_ic_mean", "rank_ic_count", "avg_valid_count"]
+        )
+
+    return SingleFactorDetailFrames(
+        bucket_return_daily=pd.DataFrame(bucket_rows).sort_values(["feature", "date", "bucket"]).reset_index(drop=True)
+        if bucket_rows
+        else pd.DataFrame(columns=["feature", "feature_group", "date", "bucket", "bucket_mean_label", "bucket_count"]),
+        top_bottom_spread_daily=pd.DataFrame(spread_rows).sort_values(["feature", "date"]).reset_index(drop=True)
+        if spread_rows
+        else pd.DataFrame(
+            columns=[
+                "feature",
+                "feature_group",
+                "date",
+                "bottom_bucket",
+                "top_bucket",
+                "bottom_mean_label",
+                "top_mean_label",
+                "top_bottom_spread",
+                "valid_count",
+            ]
+        ),
+        rank_ic_monthly=rank_ic_monthly,
+        feature_missing_by_year=pd.DataFrame(missing_rows).sort_values(["feature", "year"]).reset_index(drop=True)
+        if missing_rows
+        else pd.DataFrame(
+            columns=[
+                "feature",
+                "feature_group",
+                "year",
+                "observation_count",
+                "feature_valid_count",
+                "paired_valid_count",
+                "feature_coverage_pct",
+                "paired_coverage_pct",
+                "feature_missing_pct",
+            ]
+        ),
+    )
 
 
 def normalize_segments(
@@ -524,6 +778,7 @@ def save_single_factor_diagnostics(
     top_n: int = 50,
     segment_comparison: pd.DataFrame | None = None,
     segment_summaries: dict[str, pd.DataFrame] | None = None,
+    detail_frames: SingleFactorDetailFrames | None = None,
 ) -> dict[str, str]:
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -537,6 +792,10 @@ def save_single_factor_diagnostics(
     config_path = output_path / "config_snapshot.yaml"
     segment_comparison_path = output_path / "single_factor_segment_comparison.csv"
     segment_dir = output_path / "segments"
+    bucket_return_daily_path = output_path / "single_factor_bucket_return_daily.csv"
+    spread_daily_path = output_path / "single_factor_top_bottom_spread_daily.csv"
+    rank_ic_monthly_path = output_path / "single_factor_rank_ic_monthly.csv"
+    missing_by_year_path = output_path / "single_factor_missing_by_year.csv"
 
     summary.to_csv(summary_path, index=False)
     summary.sort_values(["rank_ic_abs_mean", "coverage_pct"], ascending=[False, False]).head(top_n).to_csv(
@@ -564,6 +823,20 @@ def save_single_factor_diagnostics(
         "manifest_path": str(manifest_path),
         "config_snapshot_path": str(config_path),
     }
+
+    if detail_frames is not None:
+        detail_frames.bucket_return_daily.to_csv(bucket_return_daily_path, index=False)
+        detail_frames.top_bottom_spread_daily.to_csv(spread_daily_path, index=False)
+        detail_frames.rank_ic_monthly.to_csv(rank_ic_monthly_path, index=False)
+        detail_frames.feature_missing_by_year.to_csv(missing_by_year_path, index=False)
+        artifacts.update(
+            {
+                "bucket_return_daily_csv": str(bucket_return_daily_path),
+                "top_bottom_spread_daily_csv": str(spread_daily_path),
+                "rank_ic_monthly_csv": str(rank_ic_monthly_path),
+                "missing_by_year_csv": str(missing_by_year_path),
+            }
+        )
 
     segment_section: list[str] = []
     if segment_comparison is not None and not segment_comparison.empty:
@@ -609,6 +882,19 @@ def save_single_factor_diagnostics(
             summary.sort_values(["rank_ic_ir", "coverage_pct"], ascending=[False, False]),
             max_rows=min(int(top_n), 20),
         ),
+        "## Detailed Artifacts",
+        "",
+        *(
+            [
+                f"- bucket_return_daily_csv: `{artifacts.get('bucket_return_daily_csv', '')}`",
+                f"- top_bottom_spread_daily_csv: `{artifacts.get('top_bottom_spread_daily_csv', '')}`",
+                f"- rank_ic_monthly_csv: `{artifacts.get('rank_ic_monthly_csv', '')}`",
+                f"- missing_by_year_csv: `{artifacts.get('missing_by_year_csv', '')}`",
+            ]
+            if detail_frames is not None
+            else []
+        ),
+        *([] if detail_frames is None else [""]),
         *segment_section,
     ]
     with open(summary_md_path, "w", encoding="utf-8") as f:

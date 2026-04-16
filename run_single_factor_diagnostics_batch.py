@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from run_single_factor_diagnostics import (
+    _apply_industry_neutralization,
     _derive_diagnostic_label_series,
     _resolve_period_dates,
     _resolve_segments,
@@ -26,6 +27,7 @@ from src.label_utils import get_label_column_name, resolve_signal_horizon
 from src.override_utils import parse_override_arg
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 from src.single_factor_diagnostics import (
+    build_single_factor_detail_frames,
     build_segmented_single_factor_diagnostics,
     build_single_factor_diagnostics,
     save_single_factor_diagnostics,
@@ -64,11 +66,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--top-n", type=int, default=50, help="How many factors to keep in top-factor exports.")
     parser.add_argument(
         "--segment-scheme",
-        choices=["none", "config_split"],
+        choices=["none", "config_split", "yearly"],
         default="none",
         help=(
             "Optional segmented diagnostics scheme. "
-            "`config_split` compares train/valid/test over the currently loaded range."
+            "`config_split` compares train/valid/test over the currently loaded range. "
+            "`yearly` creates one segment per calendar year in range."
         ),
     )
     parser.add_argument(
@@ -100,6 +103,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Required keys: name, feature_profile. "
             "Optional keys: diagnostic_label_space, diagnostic_threshold, output_dir, run_tag."
         ),
+    )
+    parser.add_argument(
+        "--industry-neutral",
+        action="store_true",
+        help="Demean each factor within date x industry before diagnostics when industry groups are available.",
     )
     return parser
 
@@ -278,7 +286,23 @@ def main() -> None:
         if case_frame.empty:
             raise ValueError(f"Case '{case.name}' dropped all rows after applying diagnostic labels.")
 
+        neutralized_feature_count = 0
+        neutralize_elapsed = 0.0
+        if bool(getattr(args, "industry_neutral", False)):
+            neutralize_started = perf_counter()
+            case_frame, neutralized_feature_count = _apply_industry_neutralization(
+                case_frame,
+                cfg=cfg,
+                feature_names=feature_names,
+            )
+            neutralize_elapsed = perf_counter() - neutralize_started
         summary = build_single_factor_diagnostics(
+            case_frame,
+            feature_names=feature_names,
+            label_column="label",
+            quantile_bins=max(int(args.quantile_bins), 2),
+        )
+        detail_frames = build_single_factor_detail_frames(
             case_frame,
             feature_names=feature_names,
             label_column="label",
@@ -307,12 +331,15 @@ def main() -> None:
             "date_end": date_end,
             "diagnostic_label_space": case.diagnostic_label_space,
             "diagnostic_threshold": float(case.diagnostic_threshold),
+            "industry_neutral": bool(getattr(args, "industry_neutral", False)),
+            "neutralized_feature_count": neutralized_feature_count,
             "feature_count": len(feature_names),
             "row_count": len(case_frame),
             "quantile_bins": max(int(args.quantile_bins), 2),
             "segment_scheme": args.segment_scheme,
             "segment_count": len(segment_summaries),
             "shared_load_elapsed_sec": round(load_elapsed, 6),
+            "neutralize_elapsed_sec": round(neutralize_elapsed, 6),
             "case_elapsed_sec": round(perf_counter() - case_started, 6),
         }
         case_cfg_snapshot = deepcopy(cfg)
@@ -326,6 +353,7 @@ def main() -> None:
             top_n=max(int(args.top_n), 1),
             segment_comparison=segment_comparison,
             segment_summaries=segment_summaries,
+            detail_frames=detail_frames,
         )
 
         top = summary.iloc[0] if not summary.empty else pd.Series(dtype=object)

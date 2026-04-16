@@ -249,6 +249,98 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}turnover_accel_5_20", profile["selected_columns"])
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_20", profile["cross_sectional_rank_exclude_columns"])
 
+    def test_core_v4_tushare_plus_quality_event_flow_profile_is_registered(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v4_techlite_tushare_plus_quality_event_flow_v1"},
+            }
+        )
+
+        self.assertTrue(
+            str(profile["profile_path"]).endswith(
+                "configs/feature_profiles.yaml::core_v4_techlite_tushare_plus_quality_event_flow_v1"
+            )
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}fi_ocf_to_eps", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}fc_surprise_fresh", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}exp_growth_fresh", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}up_down_turnover_ratio_20", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_breadth_accel_20_60", profile["selected_columns"])
+
+    def test_core_v4_tushare_plus_industry_excess_flow_value_slim_profiles_are_registered(self):
+        slim_a = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_a_v1"},
+            }
+        )
+        slim_b = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1"},
+            }
+        )
+
+        self.assertTrue(
+            str(slim_a["profile_path"]).endswith(
+                "configs/feature_profiles.yaml::core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_a_v1"
+            )
+        )
+        self.assertTrue(
+            str(slim_b["profile_path"]).endswith(
+                "configs/feature_profiles.yaml::core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1"
+            )
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_mean_20", slim_a["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}downside_amihud_20", slim_a["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}bp_change_20", slim_a["selected_columns"])
+        self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}industry_dispersion_60", slim_a["selected_columns"])
+
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_dispersion_60", slim_b["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_std_ratio_20", slim_b["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_std_20", slim_b["cross_sectional_rank_exclude_columns"])
+
+    def test_core_v4_tushare_plus_industry_excess_flow_value_slim_b_family_profiles_are_registered(self):
+        slim_b_breadth = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_breadth_v1"},
+            }
+        )
+        slim_b_support = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {
+                    "profile": "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_flow_value_support_v1"
+                },
+            }
+        )
+
+        self.assertTrue(
+            str(slim_b_breadth["profile_path"]).endswith(
+                "configs/feature_profiles.yaml::"
+                "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_breadth_v1"
+            )
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_20", slim_b_breadth["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_60", slim_b_breadth["selected_columns"])
+        self.assertIn(
+            f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_20",
+            slim_b_breadth["cross_sectional_rank_exclude_columns"],
+        )
+
+        self.assertTrue(
+            str(slim_b_support["profile_path"]).endswith(
+                "configs/feature_profiles.yaml::"
+                "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_flow_value_support_v1"
+            )
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}free_turnover_spread", slim_b_support["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}turnover_accel_5_20", slim_b_support["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}ep_ttm_change_20", slim_b_support["selected_columns"])
+        self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_20", slim_b_support["selected_columns"])
+
     def test_core_v5_diag_prefilter_profile_is_registered(self):
         profile = resolve_feature_profile(
             {

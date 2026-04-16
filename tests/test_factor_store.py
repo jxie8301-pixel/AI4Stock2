@@ -154,6 +154,103 @@ class FactorStoreTest(unittest.TestCase):
             dates = load_available_dates(store_dir=root, date_start="2024-01-03", date_end="2024-01-04")
             self.assertEqual([str(x.date()) for x in dates], ["2024-01-03", "2024-01-04"])
 
+    def test_load_factor_frame_supports_bucket_shards_layout(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            buckets = root / "buckets"
+            buckets.mkdir(parents=True, exist_ok=True)
+            manifest = pd.DataFrame(
+                {
+                    "symbol": ["000001", "000002"],
+                    "bucket_id": [1, 1],
+                    "source_path": ["/tmp/a.parquet", "/tmp/b.parquet"],
+                    "source_size": [1, 1],
+                    "source_mtime_ns": [1, 1],
+                    "row_count": [2, 1],
+                    "min_date": ["2024-01-02", "2024-01-03"],
+                    "max_date": ["2024-01-03", "2024-01-03"],
+                }
+            )
+            manifest.to_parquet(root / "manifest.parquet", index=False)
+            with open(root / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "feature_names": ["F1"],
+                        "storage_layout": "bucket_shards",
+                        "bucket_ids": [1],
+                        "available_dates": ["2024-01-02", "2024-01-03"],
+                    },
+                    f,
+                )
+
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-03"]),
+                    "symbol": ["000001", "000001", "000002"],
+                    "label": [0.1, 0.2, 0.3],
+                    "F1": [1.0, 2.0, 3.0],
+                }
+            ).to_parquet(buckets / "part-0001.parquet", index=False)
+
+            loaded = load_factor_frame(
+                store_dir=root,
+                columns=["F1"],
+                date_end="2024-01-03",
+            )
+
+            self.assertEqual(list(loaded.columns), ["date", "symbol", "label", "F1"])
+            self.assertEqual(len(loaded), 3)
+            self.assertEqual(loaded["symbol"].tolist(), ["000001", "000001", "000002"])
+
+    def test_load_factor_frame_bucket_shards_can_filter_universe(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            buckets = root / "buckets"
+            universe_dir = root / "universes"
+            buckets.mkdir(parents=True, exist_ok=True)
+            universe_dir.mkdir(parents=True, exist_ok=True)
+            (universe_dir / "demo.txt").write_text("000002\t2024-01-01\t2024-12-31\n", encoding="utf-8")
+            manifest = pd.DataFrame(
+                {
+                    "symbol": ["000001", "000002"],
+                    "bucket_id": [2, 2],
+                    "source_path": ["/tmp/a.parquet", "/tmp/b.parquet"],
+                    "source_size": [1, 1],
+                    "source_mtime_ns": [1, 1],
+                    "row_count": [1, 1],
+                    "min_date": ["2024-01-02", "2024-01-02"],
+                    "max_date": ["2024-01-02", "2024-01-02"],
+                }
+            )
+            manifest.to_parquet(root / "manifest.parquet", index=False)
+            with open(root / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "feature_names": ["F1"],
+                        "storage_layout": "bucket_shards",
+                        "bucket_ids": [2],
+                    },
+                    f,
+                )
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+                    "symbol": ["000001", "000002"],
+                    "label": [0.1, 0.2],
+                    "F1": [1.0, 2.0],
+                }
+            ).to_parquet(buckets / "part-0002.parquet", index=False)
+
+            loaded = load_factor_frame(
+                store_dir=root,
+                columns=["F1"],
+                universe_name="demo",
+                universe_dir=universe_dir,
+            )
+
+            self.assertEqual(loaded["symbol"].tolist(), ["000002"])
+            self.assertEqual(loaded["F1"].tolist(), [2.0])
+
     def test_load_available_dates_cached_meta_can_filter_universe_ranges(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

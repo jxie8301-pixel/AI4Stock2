@@ -69,6 +69,38 @@ def _rolling_rank_pct(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window, min_periods=1).rank(method="average", pct=True)
 
 
+def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    return numerator / (denominator.abs() + EPS)
+
+
+def _event_age(event: pd.Series) -> pd.Series:
+    ages: list[float] = []
+    last_idx: int | None = None
+    values = pd.to_numeric(event, errors="coerce").to_numpy()
+    for idx, value in enumerate(values):
+        if np.isfinite(value) and value > 0:
+            last_idx = idx
+            ages.append(0.0)
+        elif last_idx is None:
+            ages.append(np.nan)
+        else:
+            ages.append(float(idx - last_idx))
+    return pd.Series(ages, index=event.index)
+
+
+def _event_streak(event: pd.Series) -> pd.Series:
+    streaks: list[float] = []
+    streak = 0.0
+    values = pd.to_numeric(event, errors="coerce").to_numpy()
+    for value in values:
+        if np.isfinite(value) and value > 0:
+            streak += 1.0
+        else:
+            streak = 0.0
+        streaks.append(streak)
+    return pd.Series(streaks, index=event.index)
+
+
 def _rolling_idxmax(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window, min_periods=1).apply(lambda x: float(np.argmax(x) + 1), raw=True)
 
@@ -726,6 +758,7 @@ def compute_tushare_factor_features(
     fc_net_profit_min = _series("fc_net_profit_min")
     fc_net_profit_max = _series("fc_net_profit_max")
     fc_last_parent_net = _series("fc_last_parent_net")
+    fc_days_since_ann = _series("fc_days_since_ann")
     exp_revenue = _series("exp_revenue")
     exp_operate_profit = _series("exp_operate_profit")
     exp_total_profit = _series("exp_total_profit")
@@ -741,6 +774,7 @@ def compute_tushare_factor_features(
     exp_yoy_roe = _series("exp_yoy_roe")
     exp_growth_assets = _series("exp_growth_assets")
     exp_yoy_assets = _series("exp_yoy_assets")
+    exp_days_since_ann = _series("exp_days_since_ann")
     ind_member_count = _series("ind_member_count")
     ind_daily_ret = _series("ind_daily_ret")
     ind_excess_daily_ret = _series("ind_excess_daily_ret")
@@ -872,6 +906,78 @@ def compute_tushare_factor_features(
     out[f"amihud_term_{short_flow_window}_{long_flow_window}"] = amihud_short / (amihud_long + EPS) - 1.0
     out[f"downside_amihud_{long_flow_window}"] = downside_amihud
     out[f"dividend_yield_ttm_surprise_{zscore_window}"] = dividend_yield_ttm_series - dividend_yield_ttm_baseline
+    out["fi_ocf_to_eps"] = _safe_ratio(fi_ocfps, fi_eps)
+    out["fi_ocf_yoy_minus_np_yoy"] = fi_ocf_yoy - fi_netprofit_yoy
+    out["fi_roe_quality_gap"] = fi_roe_dt - fi_roe
+    out["fi_q_roe_quality_gap"] = fi_q_dt_roe - fi_q_roe
+    out["fi_margin_quality"] = fi_gpm - fi_npm
+    out["fi_profitability_combo"] = fi_roe_dt + fi_roa + fi_npm
+    out["fi_growth_quality_combo"] = fi_or_yoy + fi_op_yoy + fi_netprofit_yoy + fi_ocf_yoy
+    fc_p_change_mid = (fc_p_change_min + fc_p_change_max) / 2.0
+    fc_p_change_width = fc_p_change_max - fc_p_change_min
+    fc_net_profit_mid = (fc_net_profit_min + fc_net_profit_max) / 2.0
+    fc_net_profit_width = fc_net_profit_max - fc_net_profit_min
+    fc_freshness_weight = np.exp(-fc_days_since_ann.clip(lower=0) / 20.0)
+    out["fc_p_change_mid"] = fc_p_change_mid
+    out["fc_p_change_width"] = fc_p_change_width
+    out["fc_net_profit_mid"] = fc_net_profit_mid
+    out["fc_net_profit_width"] = fc_net_profit_width
+    out["fc_net_profit_mid_ratio"] = _safe_ratio(fc_net_profit_mid, fc_last_parent_net)
+    out["fc_positive_confidence"] = np.where(
+        fc_p_change_min > 0,
+        fc_p_change_mid / (fc_p_change_width.abs() + EPS),
+        np.where(fc_p_change_max < 0, -fc_p_change_mid.abs() / (fc_p_change_width.abs() + EPS), 0.0),
+    )
+    out["fc_days_since_ann"] = fc_days_since_ann
+    out["fc_freshness_weight"] = fc_freshness_weight
+    out["fc_surprise_fresh"] = fc_p_change_mid * fc_freshness_weight
+    exp_growth_combo = exp_yoy_sales + exp_yoy_op + exp_yoy_dedu_np + exp_yoy_eps
+    exp_freshness_weight = np.exp(-exp_days_since_ann.clip(lower=0) / 20.0)
+    out["exp_growth_combo"] = exp_growth_combo
+    out["exp_profit_quality_gap"] = exp_yoy_dedu_np - exp_yoy_tp
+    out["exp_asset_efficiency"] = exp_yoy_sales - exp_growth_assets
+    out["exp_profit_margin_proxy"] = exp_n_income / (exp_revenue.abs() + EPS)
+    out["exp_op_margin_proxy"] = exp_operate_profit / (exp_revenue.abs() + EPS)
+    out["exp_days_since_ann"] = exp_days_since_ann
+    out["exp_freshness_weight"] = exp_freshness_weight
+    out["exp_growth_fresh"] = exp_growth_combo * exp_freshness_weight
+    up_turnover = turnover.where(daily_ret > 0)
+    down_turnover = turnover.where(daily_ret < 0)
+    up_turnover_sum = up_turnover.rolling(long_flow_window, min_periods=1).sum()
+    down_turnover_sum = down_turnover.rolling(long_flow_window, min_periods=1).sum()
+    total_turnover_sum = turnover.rolling(long_flow_window, min_periods=1).sum()
+    out[f"up_down_turnover_ratio_{long_flow_window}"] = up_turnover_sum / (down_turnover_sum + EPS)
+    out[f"return_turnover_corr_{long_flow_window}"] = daily_ret.rolling(long_flow_window, min_periods=1).corr(turnover)
+    out[f"downside_turnover_pressure_{long_flow_window}"] = down_turnover_sum / (total_turnover_sum + EPS)
+    out["days_since_last_up_limit"] = _event_age(hit_up_limit)
+    out["days_since_last_down_limit"] = _event_age(hit_down_limit)
+    out["up_limit_streak"] = _event_streak(hit_up_limit)
+    out["down_limit_streak"] = _event_streak(hit_down_limit)
+    limit_band_pos_series = pd.Series(out["limit_band_pos"], index=base.index)
+    near_up_limit = ((limit_band_pos_series >= 0.9) & (hit_up_limit <= 0)).astype(float)
+    near_down_limit = ((limit_band_pos_series <= 0.1) & (hit_down_limit <= 0)).astype(float)
+    out[f"near_up_limit_count_{long_flow_window}"] = near_up_limit.rolling(long_flow_window, min_periods=1).sum()
+    out[f"near_down_limit_count_{long_flow_window}"] = near_down_limit.rolling(long_flow_window, min_periods=1).sum()
+    mid_industry_window = int(industry_windows[-2])
+    long_industry_window = int(industry_windows[-1])
+    short_industry_window = int(industry_windows[0])
+    industry_pos_mid = _series(f"ind_pos_rate_{mid_industry_window}")
+    industry_pos_long = _series(f"ind_pos_rate_{long_industry_window}")
+    industry_ret_short = _series(f"ind_ret_{short_industry_window}")
+    industry_ret_mid = _series(f"ind_ret_{mid_industry_window}")
+    industry_ret_long = _series(f"ind_ret_{long_industry_window}")
+    own_ret_short = close.pct_change(short_industry_window, fill_method=None)
+    own_ret_mid = close.pct_change(mid_industry_window, fill_method=None)
+    own_ret_long = close.pct_change(long_industry_window, fill_method=None)
+    rel_ret_short = own_ret_short - industry_ret_short
+    rel_ret_mid = own_ret_mid - industry_ret_mid
+    rel_ret_long = own_ret_long - industry_ret_long
+    out[f"industry_breadth_accel_{mid_industry_window}_{long_industry_window}"] = industry_pos_mid - industry_pos_long
+    out[f"industry_momentum_accel_{mid_industry_window}_{long_industry_window}"] = industry_ret_mid - industry_ret_long
+    out[f"stock_industry_ret_gap_{short_industry_window}_{mid_industry_window}"] = rel_ret_short - rel_ret_mid
+    out[f"stock_industry_ret_gap_{mid_industry_window}_{long_industry_window}"] = rel_ret_mid - rel_ret_long
+    out[f"stock_relative_strength_quality_{mid_industry_window}"] = rel_ret_mid / (_series(f"ind_std_{mid_industry_window}") + EPS)
+    out[f"stock_relative_strength_quality_{long_industry_window}"] = rel_ret_long / (_series(f"ind_std_{long_industry_window}") + EPS)
     out["latest_eps"] = fi_eps
     out["latest_dt_eps"] = fi_dt_eps
     out["latest_bps"] = fi_bps

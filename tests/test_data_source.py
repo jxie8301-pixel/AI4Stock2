@@ -21,7 +21,7 @@ class DataSourceTest(unittest.TestCase):
     def test_tushare_defaults_resolve_expected_paths(self):
         cfg = {"data": {"source": "tushare"}}
         self.assertEqual(resolve_data_source_name(cfg), "tushare")
-        self.assertEqual(resolve_source_parquet_dir(cfg), "data/tushare/processed/combined")
+        self.assertEqual(resolve_source_parquet_dir(cfg), "data/tushare/source")
         self.assertEqual(
             get_default_factor_store_dir("tushare", "full_factor_space"),
             "data/factor_store/tushare_full_factor_space",

@@ -51,6 +51,7 @@ from src.collector_tushare import (
     precheck_stage_updates,
     run_tushare_update_pipeline,
     refresh_tushare_benchmarks,
+    rebuild_packed_source_from_local,
     resolve_all_symbols,
     resolve_effective_end_date,
     resolve_symbol_lifecycle_status,
@@ -58,6 +59,7 @@ from src.collector_tushare import (
     ts_symbol_to_local,
     update_raw_table,
 )
+from src.source_store import stable_bucket_id
 
 
 def test_symbol_conversion_round_trip_for_a_share_codes() -> None:
@@ -672,6 +674,66 @@ def test_precheck_stage_updates_respects_effective_end_dates(monkeypatch: pytest
     assert set(plan.ready_outputs) == {"600001", "000001"}
 
 
+def test_precheck_stage_updates_uses_stage_manifest_without_metadata_reads(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stage_dir = tmp_path / "daily"
+    meta_dir = tmp_path / "meta"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    path = stage_dir / "000001.parquet"
+    pd.DataFrame(
+        {
+            "ts_code": ["000001.SZ"],
+            "trade_date": [pd.Timestamp("2026-03-31")],
+            "open": [10.0],
+        }
+    ).to_parquet(path, index=False)
+    stat = path.stat()
+    pd.DataFrame(
+        {
+            "local_symbol": ["000001"],
+            "file_path": [str(path.resolve())],
+            "file_size": [int(stat.st_size)],
+            "file_mtime_ns": [int(stat.st_mtime_ns)],
+            "earliest_date": [pd.Timestamp("2000-01-01")],
+            "latest_date": [pd.Timestamp("2026-03-31")],
+            "schema_columns": ["open,trade_date,ts_code"],
+            "recorded_at": [pd.Timestamp("2026-04-15")],
+        }
+    ).to_parquet(meta_dir / "daily.parquet", index=False)
+
+    monkeypatch.setattr("src.collector_tushare.RAW_STAGE_MANIFEST_DIR", meta_dir)
+
+    def fail_latest(*args, **kwargs):
+        raise AssertionError("infer_latest_date should not be called when stage manifest is valid")
+
+    def fail_earliest(*args, **kwargs):
+        raise AssertionError("infer_earliest_date should not be called when stage manifest is valid")
+
+    def fail_schema(*args, **kwargs):
+        raise AssertionError("_get_parquet_schema_names should not be called when stage manifest is valid")
+
+    monkeypatch.setattr("src.collector_tushare.infer_latest_date", fail_latest)
+    monkeypatch.setattr("src.collector_tushare.infer_earliest_date", fail_earliest)
+    monkeypatch.setattr("src.collector_tushare._get_parquet_schema_names", fail_schema)
+
+    plan = precheck_stage_updates(
+        ["000001"],
+        stage_name="daily",
+        stage_dir=stage_dir,
+        target_end_date=pd.Timestamp("2026-03-31"),
+        effective_end_dates={"000001": pd.Timestamp("2026-03-31")},
+        expected_start_dates={"000001": pd.Timestamp("2000-01-01")},
+        required_columns=["ts_code", "trade_date", "open"],
+        max_workers=PRECHECK_WORKERS,
+    )
+
+    assert plan.pending_symbols == []
+    assert list(plan.ready_outputs) == ["000001"]
+
+
 def test_is_backfill_satisfied_accepts_exhaustion_marker() -> None:
     lookup = build_backfill_exhaustion_lookup(
         pd.DataFrame(
@@ -727,7 +789,10 @@ def test_precheck_pending_symbols_skips_not_yet_listed_symbols(monkeypatch: pyte
         ),
         "301999": SymbolState("301999", None, None, None, None, None, None, None, None),
     }
-    monkeypatch.setattr("src.collector_tushare.load_symbol_state", lambda symbol: state_map[symbol])
+    monkeypatch.setattr(
+        "src.collector_tushare.load_symbol_state",
+        lambda symbol, stage_manifest_lookups=None: state_map[symbol],
+    )
     monkeypatch.setattr("src.collector_tushare._is_symbol_schema_complete", lambda symbol, target_end_date: True)
 
     pending, completed, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
@@ -925,6 +990,51 @@ def test_update_raw_table_refetches_when_stk_limit_pre_close_missing(tmp_path: P
     assert stored.loc[0, "pre_close"] == pytest.approx(10.0)
 
 
+def test_update_raw_table_batches_stage_manifest_update_in_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "daily_basic.parquet"
+    meta_dir = tmp_path / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("src.collector_tushare.RAW_STAGE_MANIFEST_DIR", meta_dir)
+
+    result = update_raw_table(
+        "000001",
+        path,
+        lambda symbol, start, end: pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"],
+                "trade_date": ["20260331"],
+                "close": [10.0],
+                "turnover_rate": [1.0],
+                "turnover_rate_f": [1.1],
+                "volume_ratio": [1.2],
+                "pe": [10.0],
+                "pe_ttm": [9.0],
+                "pb": [1.0],
+                "ps": [2.0],
+                "ps_ttm": [2.1],
+                "dv_ratio": [0.5],
+                "dv_ttm": [0.1],
+                "total_share": [100.0],
+                "float_share": [80.0],
+                "free_share": [60.0],
+                "total_mv": [1000.0],
+                "circ_mv": [800.0],
+            }
+        ),
+        pd.Timestamp("2026-03-31"),
+        required_columns=DAILY_BASIC_API_FIELDS,
+        stage_name="daily_basic",
+    )
+
+    assert result.changed is True
+    assert result.stage_manifest_row is not None
+    assert result.stage_manifest_row["local_symbol"] == "000001"
+    assert (meta_dir / "daily_basic.parquet").exists() is False
+
+
 def test_collect_stage_skips_remaining_symbols_after_failure_threshold() -> None:
     def flaky_worker(symbol: str) -> str:
         if symbol in {"a", "b"}:
@@ -947,3 +1057,124 @@ def test_collect_stage_skips_remaining_symbols_after_failure_threshold() -> None
     assert detail_by_symbol["b"].startswith("RuntimeError:")
     assert detail_by_symbol["c"] == "daily skipped after 2 consecutive failures"
     assert detail_by_symbol["d"] == "daily skipped after 2 consecutive failures"
+
+
+def test_rebuild_packed_source_from_local_writes_bucket_store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    processed_dir = tmp_path / "processed"
+    source_dir = tmp_path / "source"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "buckets").mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+            "symbol": ["000001", "000001"],
+            "open": [10.0, 11.0],
+            "high": [10.5, 11.5],
+            "low": [9.8, 10.8],
+            "close": [10.0, 11.0],
+            "pre_close": [9.5, 10.0],
+            "volume": [100.0, 120.0],
+            "amount": [1000.0, 1200.0],
+        }
+    ).to_parquet(processed_dir / "000001.parquet", index=False)
+
+    import src.collector_tushare as collector_module
+
+    monkeypatch.setattr(collector_module, "PROCESSED_DIR", processed_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_DIR", source_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_BUCKET_DIR", source_dir / "buckets")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
+    monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
+    monkeypatch.setattr(
+        "src.gen_feature._augment_tushare_symbol_frame",
+        lambda df, symbol: df.assign(ind_member_count=24.0),
+    )
+
+    meta = rebuild_packed_source_from_local(["000001"], bucket_count=8, workers=1)
+
+    bucket_files = sorted((source_dir / "buckets").glob("part-*.parquet"))
+    assert meta["storage_layout"] == "bucket_shards"
+    assert meta["num_symbols"] == 1
+    assert (source_dir / "manifest.parquet").exists()
+    assert (source_dir / "meta.json").exists()
+    assert len(bucket_files) == 1
+
+    stored = pd.read_parquet(bucket_files[0])
+    manifest = pd.read_parquet(source_dir / "manifest.parquet")
+
+    assert "ind_member_count" in stored.columns
+    assert stored["ind_member_count"].tolist() == pytest.approx([24.0, 24.0])
+    assert manifest["symbol"].tolist() == ["000001"]
+
+
+def test_rebuild_packed_source_from_local_reuses_unchanged_buckets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    processed_dir = tmp_path / "processed"
+    source_dir = tmp_path / "source"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "buckets").mkdir(parents=True, exist_ok=True)
+
+    symbols = ["000001", "000002"]
+    for idx, symbol in enumerate(symbols, start=1):
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+                "symbol": [symbol, symbol],
+                "open": [10.0 + idx, 11.0 + idx],
+                "high": [10.5 + idx, 11.5 + idx],
+                "low": [9.8 + idx, 10.8 + idx],
+                "close": [10.0 + idx, 11.0 + idx],
+                "pre_close": [9.5 + idx, 10.0 + idx],
+                "volume": [100.0, 120.0],
+                "amount": [1000.0, 1200.0],
+            }
+        ).to_parquet(processed_dir / f"{symbol}.parquet", index=False)
+
+    import src.collector_tushare as collector_module
+
+    monkeypatch.setattr(collector_module, "PROCESSED_DIR", processed_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_DIR", source_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_BUCKET_DIR", source_dir / "buckets")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
+    monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
+    monkeypatch.setattr(
+        "src.gen_feature._augment_tushare_symbol_frame",
+        lambda df, symbol: df.assign(ind_member_count=float(int(symbol[-1]))),
+    )
+
+    bucket_count = 8
+    meta_first = rebuild_packed_source_from_local(symbols, bucket_count=bucket_count, workers=1, incremental=True)
+    bucket_by_symbol = {symbol: stable_bucket_id(symbol, bucket_count) for symbol in symbols}
+    bucket_paths = {bucket_id: source_dir / "buckets" / f"part-{bucket_id:04d}.parquet" for bucket_id in set(bucket_by_symbol.values())}
+    mtimes_before = {bucket_id: path.stat().st_mtime_ns for bucket_id, path in bucket_paths.items()}
+
+    time.sleep(0.01)
+    pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+            "symbol": ["000001", "000001"],
+            "open": [20.0, 21.0],
+            "high": [20.5, 21.5],
+            "low": [19.8, 20.8],
+            "close": [20.0, 21.0],
+            "pre_close": [19.5, 20.0],
+            "volume": [100.0, 120.0],
+            "amount": [1000.0, 1200.0],
+        }
+    ).to_parquet(processed_dir / "000001.parquet", index=False)
+
+    meta_second = rebuild_packed_source_from_local(symbols, bucket_count=bucket_count, workers=1, incremental=True)
+    mtimes_after = {bucket_id: path.stat().st_mtime_ns for bucket_id, path in bucket_paths.items()}
+
+    changed_bucket = bucket_by_symbol["000001"]
+    unchanged_bucket = bucket_by_symbol["000002"]
+    assert meta_first["incremental"]["rebuilt_buckets"] >= 1
+    assert meta_second["incremental"]["rebuilt_buckets"] == 1
+    assert mtimes_after[changed_bucket] > mtimes_before[changed_bucket]
+    if changed_bucket != unchanged_bucket:
+        assert mtimes_after[unchanged_bucket] == mtimes_before[unchanged_bucket]

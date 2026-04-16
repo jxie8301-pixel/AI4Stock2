@@ -180,6 +180,68 @@ class RunNativeRollingTest(unittest.TestCase):
         self.assertEqual(list(market_data.index.get_level_values("symbol").unique()), ["A"])
         self.assertEqual(market_data["close"].tolist(), [10.0, 11.0])
 
+    def test_load_source_market_data_frame_reads_bucket_source_close(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            source_dir = Path(tmpdir) / "source"
+            buckets = source_dir / "buckets"
+            buckets.mkdir(parents=True, exist_ok=True)
+            with open(source_dir / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "storage_layout": "bucket_shards",
+                        "bucket_ids": [3],
+                    },
+                    f,
+                )
+            pd.DataFrame(
+                {
+                    "symbol": ["A"],
+                    "bucket_id": [3],
+                    "source_path": ["/tmp/A.parquet"],
+                    "source_size": [1],
+                    "source_mtime_ns": [1],
+                    "row_count": [2],
+                    "min_date": ["2024-01-02"],
+                    "max_date": ["2024-01-03"],
+                }
+            ).to_parquet(source_dir / "manifest.parquet", index=False)
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]),
+                    "symbol": ["A", "A", "A"],
+                    "close": [10.0, 11.0, 12.0],
+                }
+            ).to_parquet(buckets / "part-0003.parquet", index=False)
+
+            runtime_data = run_native_rolling.RollingRuntimeData(
+                factor_frame=pd.DataFrame(
+                    {
+                        "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+                        "symbol": ["A", "A"],
+                        "f1": [1.0, 2.0],
+                    }
+                ),
+                dt_index=pd.Series(pd.to_datetime(["2024-01-02", "2024-01-03"])),
+                y=np.array([0.1, 0.2], dtype=np.float32),
+                backtest_y=np.array([0.01, 0.02], dtype=np.float32),
+                full_calendar=pd.Series(pd.to_datetime(["2024-01-02", "2024-01-03"])),
+                test_start=pd.Timestamp("2024-01-02"),
+                test_end=pd.Timestamp("2024-01-03"),
+                test_calendar=pd.Series(pd.to_datetime(["2024-01-02", "2024-01-03"])),
+                selected_feature_names=["f1"],
+                selected_feature_sources=["f1"],
+                finite_feature_mask=np.array([True, True]),
+                lookback=20,
+                batch_size=2,
+            )
+            cfg = {"data": {"source": "tushare", "parquet_dir": str(source_dir)}}
+
+            market_data = load_source_market_data_frame(cfg, runtime_data, columns=["close"])
+
+        self.assertEqual(list(market_data.columns), ["close"])
+        self.assertEqual(list(market_data.index.get_level_values("symbol").unique()), ["A"])
+        self.assertEqual(market_data["close"].tolist(), [10.0, 11.0])
+
 
 if __name__ == "__main__":
     unittest.main()

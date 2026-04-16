@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -19,6 +18,7 @@ from src.feature_selection import (
 )
 from src.label_utils import resolve_opportunity_label_cfg, sanitize_label_series
 from src.rolling_types import RollingRuntimeData
+from src.source_store import load_source_frame
 
 
 def load_rolling_runtime_data(
@@ -183,11 +183,6 @@ def load_source_market_data_frame(
     *,
     columns: list[str],
 ) -> pd.DataFrame:
-    parquet_dir = Path(resolve_source_parquet_dir(cfg))
-    if not parquet_dir.exists():
-        raise FileNotFoundError(f"Source parquet dir does not exist: {parquet_dir}")
-
-    required_columns = ["date", *columns]
     global_test_mask = (runtime_data.dt_index >= runtime_data.test_start) & (runtime_data.dt_index <= runtime_data.test_end)
     symbols = (
         runtime_data.factor_frame.loc[global_test_mask, "symbol"]
@@ -200,27 +195,13 @@ def load_source_market_data_frame(
     if not symbols:
         return pd.DataFrame(columns=columns)
 
-    frames: list[pd.DataFrame] = []
-    for symbol in symbols:
-        path = parquet_dir / f"{symbol}.parquet"
-        if not path.exists():
-            continue
-        frame = pd.read_parquet(path, columns=required_columns)
-        if frame.empty:
-            continue
-        frame["date"] = pd.to_datetime(frame["date"])
-        frame = frame.loc[
-            (frame["date"] >= runtime_data.test_start) & (frame["date"] <= runtime_data.test_end),
-            required_columns,
-        ].copy()
-        if frame.empty:
-            continue
-        frame["symbol"] = symbol
-        frames.append(frame)
-
-    if not frames:
+    out = load_source_frame(
+        store_dir=resolve_source_parquet_dir(cfg),
+        columns=columns,
+        date_start=runtime_data.test_start,
+        date_end=runtime_data.test_end,
+        symbols=symbols,
+    )
+    if out.empty:
         return pd.DataFrame(columns=columns)
-
-    out = pd.concat(frames, ignore_index=True)
-    out["symbol"] = out["symbol"].astype(str)
     return out.set_index(["date", "symbol"]).sort_index()

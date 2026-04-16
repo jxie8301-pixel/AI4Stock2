@@ -1,20 +1,29 @@
 from __future__ import annotations
 
 import argparse
-from collections import deque
+import json
 import os
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 import tushare as ts
 from tqdm import tqdm
+
+from src.source_store import (
+    SOURCE_BUCKET_DIRNAME,
+    SOURCE_BUCKET_MANIFEST_FILENAME,
+    stable_bucket_id,
+)
 
 TS_ROOT = Path("data/tushare")
 RAW_ROOT = TS_ROOT / "raw"
@@ -29,6 +38,12 @@ RAW_DIVIDEND_DIR = RAW_ROOT / "dividend"
 RAW_FORECAST_DIR = RAW_ROOT / "forecast"
 RAW_EXPRESS_DIR = RAW_ROOT / "express"
 PROCESSED_DIR = TS_ROOT / "processed" / "combined"
+PACKED_SOURCE_DIR = TS_ROOT / "source"
+PACKED_SOURCE_BUCKET_DIR = PACKED_SOURCE_DIR / SOURCE_BUCKET_DIRNAME
+PACKED_SOURCE_MANIFEST_PATH = PACKED_SOURCE_DIR / SOURCE_BUCKET_MANIFEST_FILENAME
+PACKED_SOURCE_META_PATH = PACKED_SOURCE_DIR / "meta.json"
+DEFAULT_PACKED_SOURCE_BUCKET_COUNT = 128
+RAW_STAGE_MANIFEST_DIR = RAW_META_DIR / "stage_manifests"
 
 SYMBOL_CACHE_PATH = RAW_META_DIR / "symbol_cache.parquet"
 TRADE_CALENDAR_PATH = RAW_META_DIR / "trade_calendar.parquet"
@@ -40,6 +55,9 @@ DEFAULT_TOKEN_ENV = "TUSHARE_TOKEN"
 DEFAULT_START_DATE = "19900101"
 MAX_CONSECUTIVE_FAILURES = 10
 PRECHECK_WORKERS = 16
+# Use a near-"full history" market chunk by default to minimize per-symbol
+# request count. A-share history from 1990 to today still fits comfortably
+# inside a single chunk at current horizon.
 MARKET_CHUNK_YEARS = 12
 STK_LIMIT_COVERAGE_START = pd.Timestamp("2007-01-04")
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
@@ -273,6 +291,17 @@ AUX_EMPTY_RESULT_COLS = [
     "recorded_at",
 ]
 
+STAGE_MANIFEST_COLS = [
+    "local_symbol",
+    "file_path",
+    "file_size",
+    "file_mtime_ns",
+    "earliest_date",
+    "latest_date",
+    "schema_columns",
+    "recorded_at",
+]
+
 TS_PROCESSED_CANONICAL_COLS = [
     "date",
     "symbol",
@@ -328,6 +357,8 @@ for directory in [
     RAW_FORECAST_DIR,
     RAW_EXPRESS_DIR,
     PROCESSED_DIR,
+    PACKED_SOURCE_BUCKET_DIR,
+    RAW_STAGE_MANIFEST_DIR,
 ]:
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -354,6 +385,7 @@ class UpdateResult:
     latest: pd.Timestamp | None
     earliest: pd.Timestamp | None = None
     backfill_exhausted: bool = False
+    stage_manifest_row: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)
@@ -416,8 +448,12 @@ def local_symbol_to_ts(symbol: str) -> str:
 
 def _normalize_date_series(series: pd.Series) -> pd.Series:
     if pd.api.types.is_datetime64_any_dtype(series):
-        return pd.to_datetime(series, errors="coerce").dt.tz_localize(None).dt.normalize()
-    return pd.to_datetime(series.astype(str), format="%Y%m%d", errors="coerce").dt.normalize()
+        return (
+            pd.to_datetime(series, errors="coerce").dt.tz_localize(None).dt.normalize()
+        )
+    return pd.to_datetime(
+        series.astype(str), format="%Y%m%d", errors="coerce"
+    ).dt.normalize()
 
 
 def _normalize_symbol_date_frame(
@@ -428,7 +464,9 @@ def _normalize_symbol_date_frame(
     out = df.copy()
     out[date_column] = _normalize_date_series(out[date_column])
     out = out.dropna(subset=[date_column])
-    dedupe_cols = [symbol_column, date_column] if symbol_column in out.columns else [date_column]
+    dedupe_cols = (
+        [symbol_column, date_column] if symbol_column in out.columns else [date_column]
+    )
     out = out.drop_duplicates(subset=dedupe_cols, keep="last")
     sort_cols = [date_column]
     if symbol_column in out.columns:
@@ -446,13 +484,21 @@ def _normalize_symbol_event_frame(
     out = df.copy()
     out[date_column] = _normalize_date_series(out[date_column])
     out = out.dropna(subset=[date_column])
-    dedupe_cols = [col for col in (dedupe_columns or [symbol_column, date_column]) if col in out.columns]
+    dedupe_cols = [
+        col
+        for col in (dedupe_columns or [symbol_column, date_column])
+        if col in out.columns
+    ]
     if dedupe_cols:
         out = out.drop_duplicates(subset=dedupe_cols, keep="last")
     sort_cols = [date_column]
     if symbol_column in out.columns:
         sort_cols.append(symbol_column)
-    extra_sort = [col for col in (dedupe_columns or []) if col not in sort_cols and col in out.columns]
+    extra_sort = [
+        col
+        for col in (dedupe_columns or [])
+        if col not in sort_cols and col in out.columns
+    ]
     sort_cols.extend(extra_sort)
     return out.sort_values(sort_cols).reset_index(drop=True)
 
@@ -481,14 +527,18 @@ def save_optimized_parquet(df: pd.DataFrame, path: Path) -> None:
     optimized = _optimize_numeric_dtypes(df)
     tmp_path = path.with_name(f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}")
     try:
-        optimized.to_parquet(tmp_path, index=False, engine="pyarrow", compression="zstd")
+        optimized.to_parquet(
+            tmp_path, index=False, engine="pyarrow", compression="zstd"
+        )
         os.replace(tmp_path, path)
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
 
 
-def _read_parquet_safe(path: Path, columns: list[str] | None = None) -> pd.DataFrame | None:
+def _read_parquet_safe(
+    path: Path, columns: list[str] | None = None
+) -> pd.DataFrame | None:
     if not path.exists():
         return None
     try:
@@ -502,17 +552,83 @@ def _read_parquet_safe(path: Path, columns: list[str] | None = None) -> pd.DataF
         return None
 
 
+def _path_cache_key(path: Path) -> tuple[str, int, int] | None:
+    if not path.exists():
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return str(path.resolve()), int(stat.st_size), int(stat.st_mtime_ns)
+
+
+@lru_cache(maxsize=131072)
+def _read_parquet_metadata_cached(cache_path: str, file_size: int, mtime_ns: int):  # type: ignore[no-untyped-def]
+    del file_size, mtime_ns
+    return pq.read_metadata(cache_path)
+
+
+def _read_parquet_metadata(path: Path):
+    cache_key = _path_cache_key(path)
+    if cache_key is None:
+        return None
+    try:
+        return _read_parquet_metadata_cached(*cache_key)
+    except Exception:
+        return None
+
+
+def _get_parquet_schema_names(path: Path) -> set[str]:
+    meta = _read_parquet_metadata(path)
+    if meta is not None:
+        return set(meta.schema.names)
+    frame = _read_parquet_safe(path)
+    if frame is None:
+        return set()
+    return set(frame.columns)
+
+
+def _get_parquet_date_bounds(
+    path: Path, date_column: str
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    meta = _read_parquet_metadata(path)
+    if (
+        meta is not None
+        and date_column in meta.schema.names
+        and meta.num_row_groups > 0
+    ):
+        try:
+            index = meta.schema.names.index(date_column)
+            first_group = meta.row_group(0)
+            last_group = meta.row_group(meta.num_row_groups - 1)
+            min_stats = first_group.column(index).statistics
+            max_stats = last_group.column(index).statistics
+            earliest = (
+                pd.Timestamp(min_stats.min).tz_localize(None).normalize()
+                if min_stats and min_stats.min is not None
+                else None
+            )
+            latest = (
+                pd.Timestamp(max_stats.max).tz_localize(None).normalize()
+                if max_stats and max_stats.max is not None
+                else None
+            )
+            if earliest is not None or latest is not None:
+                return earliest, latest
+        except Exception:
+            pass
+
+    frame = _read_parquet_safe(path, columns=[date_column])
+    if frame is None or frame.empty or date_column not in frame.columns:
+        return None, None
+    normalized = _normalize_date_series(frame[date_column])
+    return normalized.min(), normalized.max()
+
+
 def _parquet_missing_columns(path: Path, required_columns: list[str]) -> list[str]:
     if not path.exists():
         return list(required_columns)
-    try:
-        meta = pq.read_metadata(str(path))
-        present = set(meta.schema.names)
-    except Exception:
-        frame = _read_parquet_safe(path)
-        if frame is None:
-            return list(required_columns)
-        present = set(frame.columns)
+    present = _get_parquet_schema_names(path)
     return [col for col in required_columns if col not in present]
 
 
@@ -520,49 +636,27 @@ def load_parquet_if_exists(path: Path) -> pd.DataFrame | None:
     return _read_parquet_safe(path)
 
 
-def infer_latest_date(path: Path, date_column: str = "trade_date") -> pd.Timestamp | None:
+def infer_latest_date(
+    path: Path, date_column: str = "trade_date"
+) -> pd.Timestamp | None:
     if not path.exists():
         return None
-    try:
-        meta = pq.read_metadata(str(path))
-        if date_column not in meta.schema.names:
-            return None
-        index = meta.schema.names.index(date_column)
-        row_group = meta.row_group(meta.num_row_groups - 1)
-        stats = row_group.column(index).statistics
-        if stats and stats.max is not None:
-            return pd.Timestamp(stats.max).tz_localize(None).normalize()
-    except Exception:
-        pass
-
-    frame = _read_parquet_safe(path, columns=[date_column])
-    if frame is None or frame.empty or date_column not in frame.columns:
-        return None
-    return _normalize_date_series(frame[date_column]).max()
+    _, latest = _get_parquet_date_bounds(path, date_column)
+    return latest
 
 
-def infer_earliest_date(path: Path, date_column: str = "trade_date") -> pd.Timestamp | None:
+def infer_earliest_date(
+    path: Path, date_column: str = "trade_date"
+) -> pd.Timestamp | None:
     if not path.exists():
         return None
-    try:
-        meta = pq.read_metadata(str(path))
-        if date_column not in meta.schema.names:
-            return None
-        index = meta.schema.names.index(date_column)
-        row_group = meta.row_group(0)
-        stats = row_group.column(index).statistics
-        if stats and stats.min is not None:
-            return pd.Timestamp(stats.min).tz_localize(None).normalize()
-    except Exception:
-        pass
-
-    frame = _read_parquet_safe(path, columns=[date_column])
-    if frame is None or frame.empty or date_column not in frame.columns:
-        return None
-    return _normalize_date_series(frame[date_column]).min()
+    earliest, _ = _get_parquet_date_bounds(path, date_column)
+    return earliest
 
 
-def _coerce_numeric_columns(df: pd.DataFrame, exclude: set[str] | None = None) -> pd.DataFrame:
+def _coerce_numeric_columns(
+    df: pd.DataFrame, exclude: set[str] | None = None
+) -> pd.DataFrame:
     out = df.copy()
     exclude = exclude or set()
     for col in out.columns:
@@ -584,7 +678,9 @@ def normalize_symbol_cache_frame(
     required = {"ts_code", "symbol", "name", "market", "list_date", "list_status"}
     missing = required - set(df.columns)
     if missing:
-        raise ValueError(f"Tushare symbol cache missing required columns: {sorted(missing)}")
+        raise ValueError(
+            f"Tushare symbol cache missing required columns: {sorted(missing)}"
+        )
 
     out = df.copy()
     out["ts_code"] = out["ts_code"].astype(str).str.strip()
@@ -609,9 +705,13 @@ def normalize_symbol_cache_frame(
             if field in out.columns
             else pd.Series("", index=out.index, dtype=object)
         )
-    out["list_date"] = pd.to_datetime(out["list_date"], format="%Y%m%d", errors="coerce")
+    out["list_date"] = pd.to_datetime(
+        out["list_date"], format="%Y%m%d", errors="coerce"
+    )
     if "delist_date" in out.columns:
-        out["delist_date"] = pd.to_datetime(out["delist_date"], format="%Y%m%d", errors="coerce")
+        out["delist_date"] = pd.to_datetime(
+            out["delist_date"], format="%Y%m%d", errors="coerce"
+        )
     else:
         out["delist_date"] = pd.NaT
     out["list_status"] = list_status
@@ -645,7 +745,9 @@ def load_symbol_cache() -> pd.DataFrame | None:
 
 
 def save_symbol_lifecycle(df: pd.DataFrame) -> None:
-    save_optimized_parquet(df.reindex(columns=SYMBOL_LIFECYCLE_COLS), SYMBOL_LIFECYCLE_PATH)
+    save_optimized_parquet(
+        df.reindex(columns=SYMBOL_LIFECYCLE_COLS), SYMBOL_LIFECYCLE_PATH
+    )
 
 
 def load_symbol_lifecycle() -> pd.DataFrame | None:
@@ -686,7 +788,9 @@ def get_tushare_client():
     return client
 
 
-def _ts_call(endpoint_name: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+def _ts_call(
+    endpoint_name: str, func: Callable[..., Any], *args: Any, **kwargs: Any
+) -> Any:
     return func(*args, **kwargs)
 
 
@@ -708,8 +812,12 @@ def fetch_stock_basic_by_status(list_status: str) -> pd.DataFrame:
 
 def refresh_symbol_cache() -> pd.DataFrame:
     fetched_at = pd.Timestamp.now().normalize()
-    active = normalize_symbol_cache_frame(fetch_stock_basic_by_status("L"), "L", fetched_at)
-    delisted = normalize_symbol_cache_frame(fetch_stock_basic_by_status("D"), "D", fetched_at)
+    active = normalize_symbol_cache_frame(
+        fetch_stock_basic_by_status("L"), "L", fetched_at
+    )
+    delisted = normalize_symbol_cache_frame(
+        fetch_stock_basic_by_status("D"), "D", fetched_at
+    )
     merged = (
         pd.concat([active, delisted], ignore_index=True)
         .drop_duplicates(subset=["local_symbol"], keep="first")
@@ -743,7 +851,9 @@ def refresh_trade_calendar(target_end_date: pd.Timestamp) -> pd.DataFrame:
     out = frame.copy()
     out = out.reindex(columns=TRADE_CAL_API_FIELDS)
     out["cal_date"] = pd.to_datetime(out["cal_date"], format="%Y%m%d", errors="coerce")
-    out["pretrade_date"] = pd.to_datetime(out["pretrade_date"], format="%Y%m%d", errors="coerce")
+    out["pretrade_date"] = pd.to_datetime(
+        out["pretrade_date"], format="%Y%m%d", errors="coerce"
+    )
     out = out.dropna(subset=["cal_date"]).sort_values("cal_date").reset_index(drop=True)
     save_trade_calendar(out)
     return out
@@ -758,16 +868,22 @@ def resolve_latest_trading_date(target_end_date: pd.Timestamp) -> pd.Timestamp:
             (cached["cal_date"] <= target_end_date)
             & (pd.to_numeric(cached["is_open"], errors="coerce") == 1)
         ]
-        if not usable.empty and usable["cal_date"].max() >= target_end_date - pd.Timedelta(days=40):
+        if not usable.empty and usable[
+            "cal_date"
+        ].max() >= target_end_date - pd.Timedelta(days=40):
             return usable["cal_date"].max().normalize()
     frame = refresh_trade_calendar(target_end_date)
     usable = frame[(frame["cal_date"] <= target_end_date) & (frame["is_open"] == 1)]
     if usable.empty:
-        raise RuntimeError(f"no trading date found on or before {target_end_date.date()}")
+        raise RuntimeError(
+            f"no trading date found on or before {target_end_date.date()}"
+        )
     return usable["cal_date"].max().normalize()
 
 
-def _fetch_index_daily_chunk(ts_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+def _fetch_index_daily_chunk(
+    ts_code: str, start_date: str, end_date: str
+) -> pd.DataFrame:
     pro = get_tushare_client()
     frame = _ts_call(
         "index_daily",
@@ -790,12 +906,40 @@ def fetch_index_daily(ts_code: str, start_date: str, end_date: str) -> pd.DataFr
             continue
         frames.append(frame.reindex(columns=INDEX_DAILY_API_FIELDS))
     if not frames:
-        return pd.DataFrame(columns=["ts_code", "date", "close", "open", "high", "low", "pre_close", "change", "pct_chg", "vol", "amount"])
-    merged = _concat_schema_preserving_frames(frames, ordered_columns=INDEX_DAILY_API_FIELDS)
+        return pd.DataFrame(
+            columns=[
+                "ts_code",
+                "date",
+                "close",
+                "open",
+                "high",
+                "low",
+                "pre_close",
+                "change",
+                "pct_chg",
+                "vol",
+                "amount",
+            ]
+        )
+    merged = _concat_schema_preserving_frames(
+        frames, ordered_columns=INDEX_DAILY_API_FIELDS
+    )
     merged = _normalize_symbol_date_frame(merged, "trade_date", "ts_code")
     merged = merged.rename(columns={"trade_date": "date"})
     return merged.reindex(
-        columns=["ts_code", "date", "close", "open", "high", "low", "pre_close", "change", "pct_chg", "vol", "amount"]
+        columns=[
+            "ts_code",
+            "date",
+            "close",
+            "open",
+            "high",
+            "low",
+            "pre_close",
+            "change",
+            "pct_chg",
+            "vol",
+            "amount",
+        ]
     )
 
 
@@ -814,7 +958,9 @@ def refresh_tushare_benchmarks(
         path = BENCHMARK_DIR / f"{benchmark_key}.parquet"
         save_optimized_parquet(frame, path)
         outputs.append(path)
-        print(f"[*] Refreshed Tushare benchmark {benchmark_key}: rows={len(frame)} path={path}")
+        print(
+            f"[*] Refreshed Tushare benchmark {benchmark_key}: rows={len(frame)} path={path}"
+        )
     return outputs
 
 
@@ -878,7 +1024,9 @@ def _normalize_optional_timestamp(value: Any) -> pd.Timestamp | None:
 
 def _latest_trade_date(state: SymbolState) -> pd.Timestamp | None:
     latest_dates = [
-        item for item in [state.daily_latest, state.daily_basic_latest] if item is not None
+        item
+        for item in [state.daily_latest, state.daily_basic_latest]
+        if item is not None
     ]
     if not latest_dates:
         return None
@@ -897,7 +1045,9 @@ def load_backfill_exhaustion() -> pd.DataFrame:
 
 
 def save_backfill_exhaustion(df: pd.DataFrame) -> None:
-    save_optimized_parquet(df.reindex(columns=BACKFILL_EXHAUSTION_COLS), BACKFILL_EXHAUSTION_PATH)
+    save_optimized_parquet(
+        df.reindex(columns=BACKFILL_EXHAUSTION_COLS), BACKFILL_EXHAUSTION_PATH
+    )
 
 
 def load_aux_empty_results() -> pd.DataFrame:
@@ -912,17 +1062,169 @@ def load_aux_empty_results() -> pd.DataFrame:
 
 
 def save_aux_empty_results(df: pd.DataFrame) -> None:
-    save_optimized_parquet(df.reindex(columns=AUX_EMPTY_RESULT_COLS), AUX_EMPTY_RESULTS_PATH)
+    save_optimized_parquet(
+        df.reindex(columns=AUX_EMPTY_RESULT_COLS), AUX_EMPTY_RESULTS_PATH
+    )
 
 
-def build_aux_empty_lookup(frame: pd.DataFrame) -> dict[tuple[str, str], pd.Timestamp | None]:
+def _stage_manifest_path(stage_name: str) -> Path:
+    return RAW_STAGE_MANIFEST_DIR / f"{str(stage_name).strip()}.parquet"
+
+
+def _serialize_schema_columns(
+    schema_names: set[str] | list[str] | tuple[str, ...],
+) -> str:
+    return ",".join(sorted(str(name) for name in schema_names if str(name).strip()))
+
+
+def _deserialize_schema_columns(raw: Any) -> set[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return set()
+    return {item for item in text.split(",") if item}
+
+
+def load_stage_manifest(stage_name: str) -> pd.DataFrame:
+    path = _stage_manifest_path(stage_name)
+    frame = _read_parquet_safe(path)
+    if frame is None or frame.empty:
+        return pd.DataFrame(columns=STAGE_MANIFEST_COLS)
+    out = frame.copy()
+    for col in ["earliest_date", "latest_date", "recorded_at"]:
+        if col in out.columns:
+            out[col] = pd.to_datetime(out[col], errors="coerce")
+    for col in ["local_symbol", "file_path", "schema_columns"]:
+        if col in out.columns:
+            out[col] = out[col].fillna("").astype(str)
+    for col in ["file_size", "file_mtime_ns"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+    return out.reindex(columns=STAGE_MANIFEST_COLS)
+
+
+def save_stage_manifest(stage_name: str, df: pd.DataFrame) -> None:
+    path = _stage_manifest_path(stage_name)
+    if df.empty:
+        if path.exists():
+            path.unlink()
+        return
+    save_optimized_parquet(df.reindex(columns=STAGE_MANIFEST_COLS), path)
+
+
+def merge_stage_manifest_rows(
+    stage_name: str,
+    manifest_rows: list[dict[str, Any]],
+    *,
+    inspected_symbols: list[str] | set[str] | None = None,
+) -> None:
+    existing = load_stage_manifest(stage_name)
+    inspected_symbols = {str(symbol) for symbol in (inspected_symbols or [])}
+    preserved = (
+        existing.loc[~existing["local_symbol"].isin(inspected_symbols)].copy()
+        if not existing.empty
+        else pd.DataFrame(columns=STAGE_MANIFEST_COLS)
+    )
+    updates = (
+        pd.DataFrame(manifest_rows).reindex(columns=STAGE_MANIFEST_COLS)
+        if manifest_rows
+        else pd.DataFrame(columns=STAGE_MANIFEST_COLS)
+    )
+    combined = (
+        pd.concat([preserved, updates], ignore_index=True)
+        .drop_duplicates(subset=["local_symbol"], keep="last")
+        .sort_values("local_symbol")
+        .reset_index(drop=True)
+        if not preserved.empty or not updates.empty
+        else pd.DataFrame(columns=STAGE_MANIFEST_COLS)
+    )
+    save_stage_manifest(stage_name, combined)
+
+
+def _build_stage_manifest_row(
+    *,
+    symbol: str,
+    path: Path,
+    earliest: pd.Timestamp | None,
+    latest: pd.Timestamp | None,
+    schema_columns: set[str] | list[str] | tuple[str, ...],
+) -> dict[str, Any] | None:
+    cache_key = _path_cache_key(path)
+    if cache_key is None:
+        return None
+    file_path, file_size, file_mtime_ns = cache_key
+    return {
+        "local_symbol": str(symbol),
+        "file_path": file_path,
+        "file_size": int(file_size),
+        "file_mtime_ns": int(file_mtime_ns),
+        "earliest_date": earliest,
+        "latest_date": latest,
+        "schema_columns": _serialize_schema_columns(set(schema_columns)),
+        "recorded_at": pd.Timestamp.now().normalize(),
+    }
+
+
+def _manifest_row_matches_path(manifest_row: dict[str, Any] | None, path: Path) -> bool:
+    if not manifest_row:
+        return False
+    cache_key = _path_cache_key(path)
+    if cache_key is None:
+        return False
+    file_path, file_size, file_mtime_ns = cache_key
+    return (
+        str(manifest_row.get("file_path") or "") == file_path
+        and int(manifest_row.get("file_size") or -1) == int(file_size)
+        and int(manifest_row.get("file_mtime_ns") or -1) == int(file_mtime_ns)
+    )
+
+
+def _inspect_stage_symbol_snapshot(
+    *,
+    symbol: str,
+    path: Path,
+    date_column: str,
+    include_earliest: bool,
+    required_columns: list[str] | None,
+    manifest_row: dict[str, Any] | None,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None, bool, dict[str, Any] | None]:
+    required_columns = list(required_columns or [])
+    if _manifest_row_matches_path(manifest_row, path):
+        schema_names = _deserialize_schema_columns(manifest_row.get("schema_columns"))
+        schema_complete = not [
+            col for col in required_columns if col not in schema_names
+        ]
+        earliest = (
+            _normalize_optional_timestamp(manifest_row.get("earliest_date"))
+            if include_earliest
+            else None
+        )
+        latest = _normalize_optional_timestamp(manifest_row.get("latest_date"))
+        return earliest, latest, schema_complete, dict(manifest_row)
+
+    latest = infer_latest_date(path, date_column)
+    earliest = infer_earliest_date(path, date_column) if include_earliest else None
+    schema_names = _get_parquet_schema_names(path)
+    schema_complete = not [col for col in required_columns if col not in schema_names]
+    refreshed_row = _build_stage_manifest_row(
+        symbol=symbol,
+        path=path,
+        earliest=earliest,
+        latest=latest,
+        schema_columns=schema_names,
+    )
+    return earliest, latest, schema_complete, refreshed_row
+
+
+def build_aux_empty_lookup(
+    frame: pd.DataFrame,
+) -> dict[tuple[str, str], pd.Timestamp | None]:
     if frame is None or frame.empty:
         return {}
     lookup: dict[tuple[str, str], pd.Timestamp | None] = {}
     for _, row in frame.iterrows():
-        lookup[(str(row.get("stage_name") or ""), str(row.get("local_symbol") or ""))] = _normalize_optional_timestamp(
-            row.get("checked_end_date")
-        )
+        lookup[
+            (str(row.get("stage_name") or ""), str(row.get("local_symbol") or ""))
+        ] = _normalize_optional_timestamp(row.get("checked_end_date"))
     return lookup
 
 
@@ -935,7 +1237,10 @@ def merge_aux_empty_records(
     if removals and not out.empty:
         removal_keys = {(stage, symbol) for stage, symbol in removals}
         keep_mask = [
-            (str(row.get("stage_name") or "").strip(), str(row.get("local_symbol") or "").strip())
+            (
+                str(row.get("stage_name") or "").strip(),
+                str(row.get("local_symbol") or "").strip(),
+            )
             not in removal_keys
             for _, row in out.iterrows()
         ]
@@ -968,8 +1273,12 @@ def build_backfill_exhaustion_lookup(
         if not stage_name or not symbol:
             continue
         lookup[(stage_name, symbol)] = {
-            "expected_start_date": _normalize_optional_timestamp(row.get("expected_start_date")),
-            "observed_earliest_date": _normalize_optional_timestamp(row.get("observed_earliest_date")),
+            "expected_start_date": _normalize_optional_timestamp(
+                row.get("expected_start_date")
+            ),
+            "observed_earliest_date": _normalize_optional_timestamp(
+                row.get("observed_earliest_date")
+            ),
             "recorded_at": _normalize_optional_timestamp(row.get("recorded_at")),
         }
     return lookup
@@ -984,7 +1293,10 @@ def merge_backfill_exhaustion_records(
     if removals and not out.empty:
         removal_keys = {(stage, symbol) for stage, symbol in removals}
         keep_mask = [
-            (str(row.get("stage_name") or "").strip(), str(row.get("local_symbol") or "").strip())
+            (
+                str(row.get("stage_name") or "").strip(),
+                str(row.get("local_symbol") or "").strip(),
+            )
             not in removal_keys
             for _, row in out.iterrows()
         ]
@@ -1010,7 +1322,9 @@ def is_backfill_satisfied(
     symbol: str,
     expected_start_date: pd.Timestamp | None,
     earliest: pd.Timestamp | None,
-    exhaustion_lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None = None,
+    exhaustion_lookup: (
+        dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None
+    ) = None,
 ) -> bool:
     if expected_start_date is None:
         return True
@@ -1050,7 +1364,10 @@ def resolve_symbol_lifecycle_status(
         and latest_adj_ts >= target_end_date
         and (
             target_end_date < STK_LIMIT_COVERAGE_START
-            or (latest_stk_limit_ts is not None and latest_stk_limit_ts >= target_end_date)
+            or (
+                latest_stk_limit_ts is not None
+                and latest_stk_limit_ts >= target_end_date
+            )
         )
     ):
         return "suspended"
@@ -1086,16 +1403,75 @@ def resolve_effective_end_date(
     return target_end_date
 
 
-def load_symbol_state(symbol: str) -> SymbolState:
+def _load_stage_manifest_lookup(stage_name: str) -> dict[str, dict[str, Any]]:
+    manifest = load_stage_manifest(stage_name)
+    if manifest.empty:
+        return {}
+    return manifest.set_index("local_symbol", drop=False).to_dict(orient="index")
+
+
+def _load_symbol_stage_bounds_from_manifest(
+    *,
+    symbol: str,
+    stage_dir: Path,
+    date_column: str,
+    manifest_lookup: dict[str, dict[str, Any]] | None,
+    include_earliest: bool,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    manifest_row = (manifest_lookup or {}).get(symbol)
+    earliest, latest, _schema_complete, _manifest_row = _inspect_stage_symbol_snapshot(
+        symbol=symbol,
+        path=stage_dir / f"{symbol}.parquet",
+        date_column=date_column,
+        include_earliest=include_earliest,
+        required_columns=None,
+        manifest_row=manifest_row,
+    )
+    return earliest, latest
+
+
+def load_symbol_state(
+    symbol: str,
+    *,
+    stage_manifest_lookups: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> SymbolState:
+    daily_earliest, daily_latest = _load_symbol_stage_bounds_from_manifest(
+        symbol=symbol,
+        stage_dir=RAW_DAILY_DIR,
+        date_column="trade_date",
+        manifest_lookup=(stage_manifest_lookups or {}).get("daily"),
+        include_earliest=True,
+    )
+    daily_basic_earliest, daily_basic_latest = _load_symbol_stage_bounds_from_manifest(
+        symbol=symbol,
+        stage_dir=RAW_DAILY_BASIC_DIR,
+        date_column="trade_date",
+        manifest_lookup=(stage_manifest_lookups or {}).get("daily_basic"),
+        include_earliest=True,
+    )
+    adj_factor_earliest, adj_factor_latest = _load_symbol_stage_bounds_from_manifest(
+        symbol=symbol,
+        stage_dir=RAW_ADJ_FACTOR_DIR,
+        date_column="trade_date",
+        manifest_lookup=(stage_manifest_lookups or {}).get("adj_factor"),
+        include_earliest=True,
+    )
+    _unused_earliest, stk_limit_latest = _load_symbol_stage_bounds_from_manifest(
+        symbol=symbol,
+        stage_dir=RAW_STK_LIMIT_DIR,
+        date_column="trade_date",
+        manifest_lookup=(stage_manifest_lookups or {}).get("stk_limit"),
+        include_earliest=False,
+    )
     return SymbolState(
         symbol=symbol,
-        daily_earliest=infer_earliest_date(RAW_DAILY_DIR / f"{symbol}.parquet", "trade_date"),
-        daily_basic_earliest=infer_earliest_date(RAW_DAILY_BASIC_DIR / f"{symbol}.parquet", "trade_date"),
-        adj_factor_earliest=infer_earliest_date(RAW_ADJ_FACTOR_DIR / f"{symbol}.parquet", "trade_date"),
-        daily_latest=infer_latest_date(RAW_DAILY_DIR / f"{symbol}.parquet", "trade_date"),
-        daily_basic_latest=infer_latest_date(RAW_DAILY_BASIC_DIR / f"{symbol}.parquet", "trade_date"),
-        adj_factor_latest=infer_latest_date(RAW_ADJ_FACTOR_DIR / f"{symbol}.parquet", "trade_date"),
-        stk_limit_latest=infer_latest_date(RAW_STK_LIMIT_DIR / f"{symbol}.parquet", "trade_date"),
+        daily_earliest=daily_earliest,
+        daily_basic_earliest=daily_basic_earliest,
+        adj_factor_earliest=adj_factor_earliest,
+        daily_latest=daily_latest,
+        daily_basic_latest=daily_basic_latest,
+        adj_factor_latest=adj_factor_latest,
+        stk_limit_latest=stk_limit_latest,
         processed_latest=infer_latest_date(PROCESSED_DIR / f"{symbol}.parquet", "date"),
     )
 
@@ -1113,7 +1489,9 @@ def _is_symbol_schema_complete(symbol: str, target_end_date: pd.Timestamp) -> bo
         STK_LIMIT_API_FIELDS,
     ):
         return False
-    if _parquet_missing_columns(PROCESSED_DIR / f"{symbol}.parquet", TS_PROCESSED_CANONICAL_COLS):
+    if _parquet_missing_columns(
+        PROCESSED_DIR / f"{symbol}.parquet", TS_PROCESSED_CANONICAL_COLS
+    ):
         return False
     return True
 
@@ -1168,14 +1546,32 @@ def build_symbol_lifecycle_registry(
     cached = load_symbol_cache()
     cache_by_symbol: dict[str, dict[str, Any]] = {}
     if cached is not None and not cached.empty:
-        cache_by_symbol = cached.set_index("local_symbol", drop=False).to_dict(orient="index")
+        cache_by_symbol = cached.set_index("local_symbol", drop=False).to_dict(
+            orient="index"
+        )
 
     rows: list[dict[str, Any]] = []
     checked_at = pd.Timestamp.now().normalize()
-    print(f"[*] Building Tushare symbol lifecycle registry for {len(symbols)} symbols...")
+    stage_manifest_lookups = {
+        stage_name: _load_stage_manifest_lookup(stage_name)
+        for stage_name in PROCESSED_DEPENDENCY_STAGE_NAMES
+    }
+    print(
+        f"[*] Building Tushare symbol lifecycle registry for {len(symbols)} symbols..."
+    )
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {executor.submit(load_symbol_state, symbol): symbol for symbol in symbols}
-        pbar = tqdm(as_completed(future_map), total=len(symbols), desc="lifecycle", unit="symbol")
+        future_map = {
+            executor.submit(
+                load_symbol_state, symbol, stage_manifest_lookups=stage_manifest_lookups
+            ): symbol
+            for symbol in symbols
+        }
+        pbar = tqdm(
+            as_completed(future_map),
+            total=len(symbols),
+            desc="lifecycle",
+            unit="symbol",
+        )
         for future in pbar:
             symbol = future_map[future]
             state = future.result()
@@ -1235,7 +1631,9 @@ def build_symbol_lifecycle_registry(
 def split_symbols_by_completion(
     symbols: list[str],
     lifecycle_registry: pd.DataFrame,
-    exhaustion_lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None = None,
+    exhaustion_lookup: (
+        dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None
+    ) = None,
 ) -> tuple[list[str], list[str], dict[str, pd.Timestamp]]:
     if lifecycle_registry.empty:
         return list(symbols), [], {}
@@ -1275,14 +1673,28 @@ def split_symbols_by_completion(
         }
         state = SymbolState(
             symbol=symbol,
-            daily_earliest=_normalize_optional_timestamp(row.get("earliest_daily_date")),
-            daily_basic_earliest=_normalize_optional_timestamp(row.get("earliest_daily_basic_date")),
-            adj_factor_earliest=_normalize_optional_timestamp(row.get("earliest_adj_factor_date")),
+            daily_earliest=_normalize_optional_timestamp(
+                row.get("earliest_daily_date")
+            ),
+            daily_basic_earliest=_normalize_optional_timestamp(
+                row.get("earliest_daily_basic_date")
+            ),
+            adj_factor_earliest=_normalize_optional_timestamp(
+                row.get("earliest_adj_factor_date")
+            ),
             daily_latest=_normalize_optional_timestamp(row["latest_daily_date"]),
-            daily_basic_latest=_normalize_optional_timestamp(row["latest_daily_basic_date"]),
-            adj_factor_latest=_normalize_optional_timestamp(row["latest_adj_factor_date"]),
-            stk_limit_latest=_normalize_optional_timestamp(row["latest_stk_limit_date"]),
-            processed_latest=_normalize_optional_timestamp(row["latest_processed_date"]),
+            daily_basic_latest=_normalize_optional_timestamp(
+                row["latest_daily_basic_date"]
+            ),
+            adj_factor_latest=_normalize_optional_timestamp(
+                row["latest_adj_factor_date"]
+            ),
+            stk_limit_latest=_normalize_optional_timestamp(
+                row["latest_stk_limit_date"]
+            ),
+            processed_latest=_normalize_optional_timestamp(
+                row["latest_processed_date"]
+            ),
         )
         if is_symbol_complete(
             state,
@@ -1337,7 +1749,9 @@ def precheck_pending_symbols(
     pending, completed, effective_end_dates = split_symbols_by_completion(
         symbols, lifecycle_registry, exhaustion_lookup=exhaustion_lookup
     )
-    print(f"[*] Tushare precheck done. completed={len(completed)}, pending={len(pending)}")
+    print(
+        f"[*] Tushare precheck done. completed={len(completed)}, pending={len(pending)}"
+    )
     return pending, completed, effective_end_dates, lifecycle_registry
 
 
@@ -1349,7 +1763,9 @@ def precheck_stage_updates(
     effective_end_dates: dict[str, pd.Timestamp] | None = None,
     expected_start_dates: dict[str, pd.Timestamp] | None = None,
     coverage_start_date: pd.Timestamp | None = None,
-    exhaustion_lookup: dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None = None,
+    exhaustion_lookup: (
+        dict[tuple[str, str], dict[str, pd.Timestamp | None]] | None
+    ) = None,
     required_columns: list[str] | None = None,
     max_workers: int = PRECHECK_WORKERS,
 ) -> StageUpdatePlan:
@@ -1358,22 +1774,46 @@ def precheck_stage_updates(
     print(f"[*] Prechecking local {stage_name} shards with {max_workers} workers...")
     latest_by_symbol: dict[str, pd.Timestamp | None] = {}
     earliest_by_symbol: dict[str, pd.Timestamp | None] = {}
+    schema_complete_by_symbol: dict[str, bool] = {}
+    manifest_frame = load_stage_manifest(stage_name)
+    manifest_lookup = (
+        manifest_frame.set_index("local_symbol", drop=False).to_dict(orient="index")
+        if not manifest_frame.empty
+        else {}
+    )
+    manifest_rows: list[dict[str, Any]] = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_map = {}
-        for symbol in symbols:
-            path = stage_dir / f"{symbol}.parquet"
-            future_map[executor.submit(infer_latest_date, path, "trade_date")] = (symbol, "latest")
-            if expected_start_dates is not None:
-                future_map[executor.submit(infer_earliest_date, path, "trade_date")] = (symbol, "earliest")
-        pbar = tqdm(as_completed(future_map), total=len(future_map), desc=f"precheck {stage_name}", unit="task")
+        future_map = {
+            executor.submit(
+                _inspect_stage_symbol_snapshot,
+                symbol=symbol,
+                path=stage_dir / f"{symbol}.parquet",
+                date_column="trade_date",
+                include_earliest=expected_start_dates is not None,
+                required_columns=required_columns,
+                manifest_row=manifest_lookup.get(symbol),
+            ): symbol
+            for symbol in symbols
+        }
+        pbar = tqdm(
+            as_completed(future_map),
+            total=len(future_map),
+            desc=f"precheck {stage_name}",
+            unit="task",
+        )
         for future in pbar:
-            symbol, kind = future_map[future]
-            value = future.result()
-            if kind == "latest":
-                latest_by_symbol[symbol] = value
-            else:
-                earliest_by_symbol[symbol] = value
+            symbol = future_map[future]
+            earliest, latest, schema_complete, manifest_row = future.result()
+            latest_by_symbol[symbol] = latest
+            schema_complete_by_symbol[symbol] = schema_complete
+            if expected_start_dates is not None:
+                earliest_by_symbol[symbol] = earliest
+            if manifest_row is not None:
+                manifest_rows.append(manifest_row)
+    pbar.close()
+
+    merge_stage_manifest_rows(stage_name, manifest_rows, inspected_symbols=symbols)
     ready_outputs: dict[str, UpdateResult] = {}
     pending_set: set[str] = set()
     for symbol in symbols:
@@ -1403,8 +1843,13 @@ def precheck_stage_updates(
             earliest,
             exhaustion_lookup,
         )
-        schema_complete = not _parquet_missing_columns(stage_dir / f"{symbol}.parquet", required_columns or [])
-        if latest is not None and latest >= required_end_date and is_backfilled and schema_complete:
+        schema_complete = schema_complete_by_symbol.get(symbol, False)
+        if (
+            latest is not None
+            and latest >= required_end_date
+            and is_backfilled
+            and schema_complete
+        ):
             ready_outputs[symbol] = UpdateResult(
                 status=f"{stage_name} up-to-date at {latest.date()}",
                 changed=False,
@@ -1415,8 +1860,70 @@ def precheck_stage_updates(
             pending_set.add(symbol)
 
     pending_symbols = [symbol for symbol in symbols if symbol in pending_set]
-    print(f"[*] {stage_name}: ready={len(ready_outputs)}, pending={len(pending_symbols)}")
-    return StageUpdatePlan(stage_name, latest_by_symbol, earliest_by_symbol, pending_symbols, ready_outputs)
+    print(
+        f"[*] {stage_name}: ready={len(ready_outputs)}, pending={len(pending_symbols)}"
+    )
+    return StageUpdatePlan(
+        stage_name, latest_by_symbol, earliest_by_symbol, pending_symbols, ready_outputs
+    )
+
+
+def _inspect_stage_symbol_bounds(
+    path: Path,
+    date_column: str,
+    include_earliest: bool,
+) -> tuple[pd.Timestamp | None, pd.Timestamp | None]:
+    earliest = infer_earliest_date(path, date_column) if include_earliest else None
+    latest = infer_latest_date(path, date_column)
+    return earliest, latest
+
+
+def _preload_stage_latest_dates(
+    symbols: list[str],
+    *,
+    stage_name: str,
+    stage_dir: Path,
+    date_column: str,
+    max_workers: int,
+) -> dict[str, pd.Timestamp | None]:
+    if not symbols:
+        return {}
+    latest_by_symbol: dict[str, pd.Timestamp | None] = {}
+    manifest_frame = load_stage_manifest(stage_name)
+    manifest_lookup = (
+        manifest_frame.set_index("local_symbol", drop=False).to_dict(orient="index")
+        if not manifest_frame.empty
+        else {}
+    )
+    manifest_rows: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_map = {
+            executor.submit(
+                _inspect_stage_symbol_snapshot,
+                symbol=symbol,
+                path=stage_dir / f"{symbol}.parquet",
+                date_column=date_column,
+                include_earliest=False,
+                required_columns=None,
+                manifest_row=manifest_lookup.get(symbol),
+            ): symbol
+            for symbol in symbols
+        }
+        pbar = tqdm(
+            as_completed(future_map),
+            total=len(future_map),
+            desc=f"precheck {stage_dir.name}",
+            unit="task",
+        )
+        for future in pbar:
+            symbol = future_map[future]
+            _earliest, latest, _schema_complete, manifest_row = future.result()
+            latest_by_symbol[symbol] = latest
+            if manifest_row is not None:
+                manifest_rows.append(manifest_row)
+    pbar.close()
+    merge_stage_manifest_rows(stage_name, manifest_rows, inspected_symbols=symbols)
+    return latest_by_symbol
 
 
 def _iter_market_date_chunks(start_date: str, end_date: str) -> list[tuple[str, str]]:
@@ -1427,7 +1934,10 @@ def _iter_market_date_chunks(start_date: str, end_date: str) -> list[tuple[str, 
     windows: list[tuple[str, str]] = []
     cursor = start_ts
     while cursor <= end_ts:
-        chunk_end = min(cursor + pd.DateOffset(years=MARKET_CHUNK_YEARS) - pd.Timedelta(days=1), end_ts)
+        chunk_end = min(
+            cursor + pd.DateOffset(years=MARKET_CHUNK_YEARS) - pd.Timedelta(days=1),
+            end_ts,
+        )
         windows.append((cursor.strftime("%Y%m%d"), chunk_end.strftime("%Y%m%d")))
         cursor = chunk_end + pd.Timedelta(days=1)
     return windows
@@ -1492,7 +2002,9 @@ def _fetch_daily(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
     )
 
 
-def _fetch_daily_basic_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+def _fetch_daily_basic_chunk(
+    symbol: str, start_date: str, end_date: str
+) -> pd.DataFrame:
     pro = get_tushare_client()
     frame = _ts_call(
         "daily_basic",
@@ -1518,7 +2030,9 @@ def _fetch_daily_basic(symbol: str, start_date: str, end_date: str) -> pd.DataFr
     )
 
 
-def _fetch_adj_factor_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+def _fetch_adj_factor_chunk(
+    symbol: str, start_date: str, end_date: str
+) -> pd.DataFrame:
     pro = get_tushare_client()
     frame = _ts_call(
         "adj_factor",
@@ -1570,7 +2084,9 @@ def _fetch_stk_limit(symbol: str, start_date: str, end_date: str) -> pd.DataFram
     )
 
 
-def _fetch_fina_indicator_chunk(symbol: str, start_date: str, end_date: str) -> pd.DataFrame:
+def _fetch_fina_indicator_chunk(
+    symbol: str, start_date: str, end_date: str
+) -> pd.DataFrame:
     pro = get_tushare_client()
     out = _ts_call(
         "fina_indicator",
@@ -1717,6 +2233,7 @@ def update_raw_table(
     date_column: str = "trade_date",
     symbol_column: str = "ts_code",
     allow_empty_success: bool = False,
+    stage_name: str | None = None,
 ) -> UpdateResult:
     if latest is ...:
         latest = infer_latest_date(path, date_column)
@@ -1737,14 +2254,31 @@ def update_raw_table(
     existing = load_parquet_if_exists(path)
     if existing is not None and required_columns:
         existing = existing.reindex(columns=required_columns)
-    if existing is not None and not existing.empty and schema_missing and not refetch_on_schema_mismatch:
+    if (
+        existing is not None
+        and not existing.empty
+        and schema_missing
+        and not refetch_on_schema_mismatch
+    ):
         if not needs_future and not needs_backfill:
             save_optimized_parquet(existing, path)
+            manifest_row = (
+                _build_stage_manifest_row(
+                    symbol=symbol,
+                    path=path,
+                    earliest=earliest,
+                    latest=latest,
+                    schema_columns=set(required_columns or existing.columns.tolist()),
+                )
+                if stage_name
+                else None
+            )
             return UpdateResult(
                 status=f"{path.parent.name} schema normalized at {latest.date()}",
                 changed=True,
                 latest=latest,
                 earliest=earliest,
+                stage_manifest_row=manifest_row,
             )
 
     fetch_start = expected_start_date or pd.Timestamp(DEFAULT_START_DATE)
@@ -1766,7 +2300,9 @@ def update_raw_table(
             earliest=earliest,
         )
 
-    fetched = fetcher(symbol, fetch_start.strftime("%Y%m%d"), fetch_end.strftime("%Y%m%d"))
+    fetched = fetcher(
+        symbol, fetch_start.strftime("%Y%m%d"), fetch_end.strftime("%Y%m%d")
+    )
 
     if fetched.empty:
         if allow_empty_success:
@@ -1776,7 +2312,13 @@ def update_raw_table(
                 latest=latest,
                 earliest=earliest,
             )
-        if needs_backfill and not needs_future and existing is not None and not existing.empty and earliest is not None:
+        if (
+            needs_backfill
+            and not needs_future
+            and existing is not None
+            and not existing.empty
+            and earliest is not None
+        ):
             return UpdateResult(
                 status=f"{path.parent.name} backfill exhausted at {earliest.date()}",
                 changed=False,
@@ -1803,15 +2345,29 @@ def update_raw_table(
     save_optimized_parquet(combined, path)
     latest = combined[date_column].max()
     earliest = combined[date_column].min()
+    manifest_row = (
+        _build_stage_manifest_row(
+            symbol=symbol,
+            path=path,
+            earliest=earliest,
+            latest=latest,
+            schema_columns=set(required_columns or combined.columns.tolist()),
+        )
+        if stage_name
+        else None
+    )
     return UpdateResult(
         status=f"{path.parent.name} saved to {latest.date()}",
         changed=True,
         latest=latest,
         earliest=earliest,
+        stage_manifest_row=manifest_row,
     )
 
 
-def _merge_left(left: pd.DataFrame, right: pd.DataFrame | None, columns: list[str]) -> pd.DataFrame:
+def _merge_left(
+    left: pd.DataFrame, right: pd.DataFrame | None, columns: list[str]
+) -> pd.DataFrame:
     if right is None or right.empty:
         return left
     use_cols = [col for col in columns if col in right.columns]
@@ -1838,12 +2394,18 @@ def build_processed_symbol_frame_from_raw(
     if daily is None or daily.empty:
         raise FileNotFoundError(f"missing Tushare daily parquet for {symbol}")
 
-    out = _normalize_symbol_date_frame(daily.rename(columns={"vol": "volume"}), "trade_date", "ts_code")
+    out = _normalize_symbol_date_frame(
+        daily.rename(columns={"vol": "volume"}), "trade_date", "ts_code"
+    )
     out = _coerce_numeric_columns(out, exclude={"ts_code", "trade_date"})
     daily_basic = _prepare_optional_market_frame(daily_basic)
     adj_factor = _prepare_optional_market_frame(adj_factor)
     stk_limit = _prepare_optional_market_frame(stk_limit)
-    if stk_limit is not None and not stk_limit.empty and "pre_close" in stk_limit.columns:
+    if (
+        stk_limit is not None
+        and not stk_limit.empty
+        and "pre_close" in stk_limit.columns
+    ):
         stk_limit = stk_limit.rename(columns={"pre_close": "limit_pre_close"})
     out = _merge_left(
         out,
@@ -1877,7 +2439,9 @@ def build_processed_symbol_frame_from_raw(
         ["limit_pre_close", "up_limit", "down_limit"],
     )
 
-    out["adj_factor"] = pd.to_numeric(out.get("adj_factor"), errors="coerce").fillna(1.0)
+    out["adj_factor"] = pd.to_numeric(out.get("adj_factor"), errors="coerce").fillna(
+        1.0
+    )
 
     raw_open = pd.to_numeric(out["open"], errors="coerce")
     raw_high = pd.to_numeric(out["high"], errors="coerce")
@@ -1918,8 +2482,12 @@ def build_processed_symbol_frame_from_raw(
     out["ps_ttm"] = pd.to_numeric(out.get("ps_ttm"), errors="coerce")
     out["dv_ratio"] = pd.to_numeric(out.get("dv_ratio"), errors="coerce")
     out["dv_ttm"] = pd.to_numeric(out.get("dv_ttm"), errors="coerce")
-    out["limit_pre_close"] = pd.to_numeric(out.get("limit_pre_close"), errors="coerce") * factor
-    out["total_share"] = pd.to_numeric(out.get("total_share"), errors="coerce") * 10000.0
+    out["limit_pre_close"] = (
+        pd.to_numeric(out.get("limit_pre_close"), errors="coerce") * factor
+    )
+    out["total_share"] = (
+        pd.to_numeric(out.get("total_share"), errors="coerce") * 10000.0
+    )
     out["circ_share"] = pd.to_numeric(out.get("float_share"), errors="coerce") * 10000.0
     out["free_share"] = pd.to_numeric(out.get("free_share"), errors="coerce") * 10000.0
     out["total_mv"] = pd.to_numeric(out.get("total_mv"), errors="coerce") * 10000.0
@@ -1928,7 +2496,9 @@ def build_processed_symbol_frame_from_raw(
     out["down_limit"] = pd.to_numeric(out.get("down_limit"), errors="coerce") * factor
 
     out["change"] = out["close"] - out["pre_close"]
-    out["pct_chg"] = np.where(out["pre_close"] > 0, out["change"] / out["pre_close"] * 100.0, np.nan)
+    out["pct_chg"] = np.where(
+        out["pre_close"] > 0, out["change"] / out["pre_close"] * 100.0, np.nan
+    )
     out["amplitude"] = np.where(
         out["pre_close"] > 0,
         (out["high"] - out["low"]) / out["pre_close"] * 100.0,
@@ -1959,6 +2529,296 @@ def rebuild_processed_from_local(symbol: str) -> str:
     return f"processed rows={len(processed)} last_date={processed['date'].max().date()}"
 
 
+def _packed_source_bucket_path(bucket_id: int) -> Path:
+    return PACKED_SOURCE_BUCKET_DIR / f"part-{int(bucket_id):04d}.parquet"
+
+
+def _compute_available_dates_from_bucket_dir(bucket_dir: Path) -> list[str]:
+    if not bucket_dir.exists():
+        return []
+    bucket_files = sorted(bucket_dir.glob("part-*.parquet"))
+    if not bucket_files:
+        return []
+    dataset = ds.dataset([str(path) for path in bucket_files], format="parquet")
+    unique_dates: set[str] = set()
+    scanner = dataset.scanner(columns=["date"], batch_size=65536)
+    for batch in scanner.to_batches():
+        if batch.num_rows == 0:
+            continue
+        dates = pd.to_datetime(batch.column("date").to_pandas(), errors="coerce")
+        for value in dates.dropna().unique():
+            unique_dates.add(str(pd.Timestamp(value).date()))
+    return sorted(unique_dates)
+
+
+def _build_packed_source_bucket_worker(
+    symbols: list[str],
+    *,
+    bucket_id: int,
+) -> list[dict[str, Any]]:
+    from src.gen_feature import _augment_tushare_symbol_frame
+
+    frames: list[pd.DataFrame] = []
+    manifest_rows: list[dict[str, Any]] = []
+    for symbol in symbols:
+        processed_path = PROCESSED_DIR / f"{symbol}.parquet"
+        frame = load_parquet_if_exists(processed_path)
+        if frame is None or frame.empty:
+            continue
+        frame = frame.copy()
+        frame["symbol"] = str(symbol)
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
+        frame = frame.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
+        if frame.empty:
+            continue
+        augmented = _augment_tushare_symbol_frame(frame, symbol=symbol)
+        augmented = augmented.sort_values(["symbol", "date"]).reset_index(drop=True)
+        frames.append(augmented)
+        stat = processed_path.stat()
+        manifest_rows.append(
+            {
+                "symbol": str(symbol),
+                "bucket_id": int(bucket_id),
+                "source_path": str(processed_path.resolve()),
+                "source_size": int(stat.st_size),
+                "source_mtime_ns": int(stat.st_mtime_ns),
+                "row_count": int(len(augmented)),
+                "min_date": str(pd.to_datetime(augmented["date"]).min().date()),
+                "max_date": str(pd.to_datetime(augmented["date"]).max().date()),
+            }
+        )
+
+    if not frames:
+        return []
+
+    bucket_frame = (
+        pd.concat(frames, ignore_index=True)
+        .sort_values(["symbol", "date"])
+        .reset_index(drop=True)
+    )
+    save_optimized_parquet(bucket_frame, _packed_source_bucket_path(bucket_id))
+    return manifest_rows
+
+
+def _load_packed_source_manifest() -> pd.DataFrame:
+    frame = _read_parquet_safe(PACKED_SOURCE_MANIFEST_PATH)
+    if frame is None or frame.empty:
+        return pd.DataFrame(
+            columns=[
+                "symbol",
+                "bucket_id",
+                "source_path",
+                "source_size",
+                "source_mtime_ns",
+                "row_count",
+                "min_date",
+                "max_date",
+            ]
+        )
+    out = frame.copy()
+    for col in ["symbol", "source_path", "min_date", "max_date"]:
+        if col in out.columns:
+            out[col] = out[col].fillna("").astype(str)
+    for col in ["bucket_id", "source_size", "source_mtime_ns", "row_count"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+    return out
+
+
+def rebuild_packed_source_from_local(
+    symbols: list[str] | None = None,
+    *,
+    bucket_count: int = DEFAULT_PACKED_SOURCE_BUCKET_COUNT,
+    workers: int = 8,
+    incremental: bool = True,
+) -> dict[str, Any]:
+    from src.gen_feature import _ensure_tushare_industry_context_cache
+
+    all_symbols = sorted(
+        {str(symbol) for symbol in (symbols or []) if str(symbol).strip()}
+    )
+    if not all_symbols:
+        all_symbols = sorted(path.stem for path in PROCESSED_DIR.glob("*.parquet"))
+    all_symbols = [
+        symbol
+        for symbol in all_symbols
+        if (PROCESSED_DIR / f"{symbol}.parquet").exists()
+    ]
+    if not all_symbols:
+        raise FileNotFoundError(f"No processed parquet files found in {PROCESSED_DIR}")
+
+    PACKED_SOURCE_DIR.mkdir(parents=True, exist_ok=True)
+    PACKED_SOURCE_BUCKET_DIR.mkdir(parents=True, exist_ok=True)
+    bucket_count = max(1, int(bucket_count))
+    workers = max(1, int(workers))
+
+    _ensure_tushare_industry_context_cache(PROCESSED_DIR)
+
+    existing_meta: dict[str, Any] = {}
+    if PACKED_SOURCE_META_PATH.exists():
+        with open(PACKED_SOURCE_META_PATH, "r", encoding="utf-8") as f:
+            existing_meta = json.load(f)
+    existing_manifest = pd.DataFrame()
+    existing_manifest_lookup: dict[str, dict[str, Any]] = {}
+    can_reuse_manifest = (
+        incremental
+        and PACKED_SOURCE_MANIFEST_PATH.exists()
+        and existing_meta.get("storage_layout") == "bucket_shards"
+        and int(existing_meta.get("bucket_count") or 0) == bucket_count
+    )
+    if can_reuse_manifest:
+        existing_manifest = _load_packed_source_manifest()
+        if not existing_manifest.empty:
+            existing_manifest_lookup = {
+                str(row["source_path"]): row
+                for row in existing_manifest.to_dict(orient="records")
+                if row.get("source_path")
+            }
+
+    bucket_to_symbols: dict[int, list[str]] = {}
+    current_source_paths: set[str] = set()
+    dirty_buckets: set[int] = set()
+    for symbol in all_symbols:
+        bucket_id = stable_bucket_id(symbol, bucket_count)
+        bucket_to_symbols.setdefault(bucket_id, []).append(symbol)
+        processed_path = PROCESSED_DIR / f"{symbol}.parquet"
+        stat = processed_path.stat()
+        source_path = str(processed_path.resolve())
+        current_source_paths.add(source_path)
+        existing = existing_manifest_lookup.get(source_path)
+        reusable = False
+        if existing is not None and _packed_source_bucket_path(bucket_id).exists():
+            reusable = (
+                int(existing.get("source_size") or -1) == int(stat.st_size)
+                and int(existing.get("source_mtime_ns") or -1) == int(stat.st_mtime_ns)
+                and int(existing.get("bucket_id") or -1) == bucket_id
+            )
+        if not reusable:
+            dirty_buckets.add(bucket_id)
+    active_bucket_ids = sorted(bucket_to_symbols)
+    if not existing_manifest.empty:
+        removed_rows = existing_manifest.loc[
+            ~existing_manifest["source_path"].isin(current_source_paths)
+        ]
+        if not removed_rows.empty:
+            dirty_buckets.update(
+                int(value) for value in removed_rows["bucket_id"].dropna().tolist()
+            )
+
+    manifest_rows: list[dict[str, Any]] = []
+    reused_buckets = [
+        bucket_id
+        for bucket_id in active_bucket_ids
+        if bucket_id not in dirty_buckets
+        and _packed_source_bucket_path(bucket_id).exists()
+    ]
+    buckets_to_rebuild = [
+        bucket_id
+        for bucket_id in active_bucket_ids
+        if bucket_id in dirty_buckets
+        or not _packed_source_bucket_path(bucket_id).exists()
+    ]
+    if buckets_to_rebuild and workers == 1:
+        for bucket_id in tqdm(buckets_to_rebuild, desc="packed-source", unit="bucket"):
+            manifest_rows.extend(
+                _build_packed_source_bucket_worker(
+                    bucket_to_symbols[bucket_id], bucket_id=bucket_id
+                )
+            )
+    else:
+        if buckets_to_rebuild:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_map = {
+                    executor.submit(
+                        _build_packed_source_bucket_worker,
+                        bucket_to_symbols[bucket_id],
+                        bucket_id=bucket_id,
+                    ): bucket_id
+                    for bucket_id in buckets_to_rebuild
+                }
+                pbar = tqdm(total=len(future_map), desc="packed-source", unit="bucket")
+                for future in as_completed(future_map):
+                    manifest_rows.extend(future.result())
+                    pbar.update(1)
+                pbar.close()
+
+    for path in PACKED_SOURCE_BUCKET_DIR.glob("part-*.parquet"):
+        try:
+            bucket_id = int(path.stem.split("-")[-1])
+        except ValueError:
+            continue
+        if bucket_id not in active_bucket_ids:
+            path.unlink(missing_ok=True)
+
+    reused_manifest = (
+        existing_manifest.loc[
+            existing_manifest["bucket_id"].astype("Int64").isin(reused_buckets)
+            & existing_manifest["source_path"].isin(current_source_paths)
+        ].copy()
+        if not existing_manifest.empty
+        else pd.DataFrame()
+    )
+    written_manifest = pd.DataFrame(manifest_rows)
+    manifest_frame = (
+        pd.concat([reused_manifest, written_manifest], ignore_index=True)
+        if not reused_manifest.empty or not written_manifest.empty
+        else pd.DataFrame()
+    )
+    if manifest_frame.empty:
+        raise RuntimeError("Packed source rebuild produced no rows.")
+    manifest_frame = manifest_frame.sort_values(["bucket_id", "symbol"]).reset_index(
+        drop=True
+    )
+    manifest_frame.to_parquet(
+        PACKED_SOURCE_MANIFEST_PATH, index=False, engine="pyarrow", compression="zstd"
+    )
+
+    schema_columns = list(existing_meta.get("schema_columns") or [])
+    for bucket_id in active_bucket_ids:
+        path = _packed_source_bucket_path(bucket_id)
+        if not path.exists():
+            continue
+        schema_columns = list(pq.read_schema(path).names)
+        if schema_columns:
+            break
+
+    metadata = {
+        "storage_format": "parquet",
+        "storage_layout": "bucket_shards",
+        "source_kind": "tushare_packed_source",
+        "data_source": "tushare",
+        "processed_dir": str(PROCESSED_DIR),
+        "source_dir": str(PACKED_SOURCE_DIR),
+        "buckets_dir": str(PACKED_SOURCE_BUCKET_DIR),
+        "manifest_path": str(PACKED_SOURCE_MANIFEST_PATH),
+        "bucket_count": bucket_count,
+        "bucket_ids": active_bucket_ids,
+        "num_symbols": int(manifest_frame["symbol"].nunique()),
+        "num_rows": int(manifest_frame["row_count"].sum()),
+        "available_dates": _compute_available_dates_from_bucket_dir(
+            PACKED_SOURCE_BUCKET_DIR
+        ),
+        "schema_columns": schema_columns,
+        "incremental": {
+            "enabled": bool(incremental),
+            "reused_buckets": int(len(reused_buckets)),
+            "rebuilt_buckets": int(len(buckets_to_rebuild)),
+            "reused_symbols": int(
+                sum(len(bucket_to_symbols[bucket_id]) for bucket_id in reused_buckets)
+            ),
+            "rebuilt_symbols": int(
+                sum(
+                    len(bucket_to_symbols[bucket_id])
+                    for bucket_id in buckets_to_rebuild
+                )
+            ),
+        },
+    }
+    with open(PACKED_SOURCE_META_PATH, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    return metadata
+
+
 def should_rebuild_processed(symbol: str, updates: list[UpdateResult]) -> bool:
     if any(item.changed for item in updates):
         return True
@@ -1978,7 +2838,9 @@ def _run_stage_worker(symbol: str, worker: Callable[[str], Any]) -> StageTaskRes
         detail = payload.status if isinstance(payload, UpdateResult) else str(payload)
         return StageTaskResult(symbol=symbol, ok=True, detail=detail, payload=payload)
     except Exception as exc:
-        return StageTaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
+        return StageTaskResult(
+            symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}"
+        )
 
 
 def collect_stage_batch(
@@ -1993,8 +2855,13 @@ def collect_stage_batch(
     consecutive_failures = 0
     rate_limit_hit = False
     batch_symbols = list(symbols)
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(batch_symbols) or 1)) as executor:
-        future_map = {executor.submit(_run_stage_worker, symbol, worker): symbol for symbol in symbols}
+    with ThreadPoolExecutor(
+        max_workers=min(max_workers, len(batch_symbols) or 1)
+    ) as executor:
+        future_map = {
+            executor.submit(_run_stage_worker, symbol, worker): symbol
+            for symbol in symbols
+        }
         for future in as_completed(future_map):
             result = future.result()
             results.append(result)
@@ -2026,7 +2893,9 @@ def collect_stage_batch(
                     f"[!] Aborting stage '{stage_name}' after {consecutive_failures} consecutive failures."
                 )
     seen_symbols = {item.symbol for item in results}
-    deferred_symbols: list[str] = [symbol for symbol in batch_symbols if symbol not in seen_symbols]
+    deferred_symbols: list[str] = [
+        symbol for symbol in batch_symbols if symbol not in seen_symbols
+    ]
     return results, deferred_symbols, rate_limit_hit
 
 
@@ -2053,9 +2922,13 @@ def collect_stage(
             else f"{stage_name} skipped after {max_consecutive_failures} consecutive failures"
         )
         results.extend(
-            StageTaskResult(symbol=symbol, ok=False, detail=detail) for symbol in deferred_symbols
+            StageTaskResult(symbol=symbol, ok=False, detail=detail)
+            for symbol in deferred_symbols
         )
-    return [TaskResult(symbol=item.symbol, ok=item.ok, detail=item.detail) for item in results]
+    return [
+        TaskResult(symbol=item.symbol, ok=item.ok, detail=item.detail)
+        for item in results
+    ]
 
 
 def run_tushare_update_pipeline(
@@ -2093,6 +2966,7 @@ def run_tushare_update_pipeline(
                 latest=latest,
                 expected_start_date=expected_start_date,
                 required_columns=DAILY_RAW_COLS,
+                stage_name="daily",
             ),
         },
         "daily_basic": {
@@ -2108,6 +2982,7 @@ def run_tushare_update_pipeline(
                 latest=latest,
                 expected_start_date=expected_start_date,
                 required_columns=DAILY_BASIC_API_FIELDS,
+                stage_name="daily_basic",
             ),
         },
         "adj_factor": {
@@ -2123,6 +2998,7 @@ def run_tushare_update_pipeline(
                 latest=latest,
                 expected_start_date=expected_start_date,
                 required_columns=ADJ_FACTOR_API_FIELDS,
+                stage_name="adj_factor",
             ),
         },
         "stk_limit": {
@@ -2138,6 +3014,7 @@ def run_tushare_update_pipeline(
                 latest=latest,
                 required_columns=STK_LIMIT_API_FIELDS,
                 refetch_on_schema_mismatch=True,
+                stage_name="stk_limit",
             ),
         },
         "fina_indicator": {
@@ -2155,6 +3032,7 @@ def run_tushare_update_pipeline(
                 required_columns=FINA_INDICATOR_API_FIELDS,
                 date_column="ann_date",
                 allow_empty_success=True,
+                stage_name="fina_indicator",
             ),
         },
         "dividend": {
@@ -2172,6 +3050,7 @@ def run_tushare_update_pipeline(
                 required_columns=DIVIDEND_API_FIELDS,
                 date_column="ann_date",
                 allow_empty_success=True,
+                stage_name="dividend",
             ),
         },
         "forecast": {
@@ -2189,6 +3068,7 @@ def run_tushare_update_pipeline(
                 required_columns=FORECAST_API_FIELDS,
                 date_column="ann_date",
                 allow_empty_success=True,
+                stage_name="forecast",
             ),
         },
         "express": {
@@ -2206,12 +3086,19 @@ def run_tushare_update_pipeline(
                 required_columns=EXPRESS_API_FIELDS,
                 date_column="ann_date",
                 allow_empty_success=True,
+                stage_name="express",
             ),
         },
     }
-    stage_specs = [(name, all_stage_specs[name]) for name in selected_stage_names if name != "processed"]
+    stage_specs = [
+        (name, all_stage_specs[name])
+        for name in selected_stage_names
+        if name != "processed"
+    ]
 
-    print(f"[*] Prechecking local Tushare raw shards with {PRECHECK_WORKERS} workers...")
+    print(
+        f"[*] Prechecking local Tushare raw shards with {PRECHECK_WORKERS} workers..."
+    )
     stage_plans: dict[str, StageUpdatePlan] = {}
     for stage_name, spec in stage_specs:
         stage_dir = spec["stage_dir"]
@@ -2223,13 +3110,26 @@ def run_tushare_update_pipeline(
                 stage_dir,
                 target_end_date,
                 effective_end_dates=effective_end_dates,
-                expected_start_dates=expected_start_dates if stage_name in {"daily", "daily_basic", "adj_factor"} else None,
-                coverage_start_date=STK_LIMIT_COVERAGE_START if stage_name == "stk_limit" else None,
+                expected_start_dates=(
+                    expected_start_dates
+                    if stage_name in {"daily", "daily_basic", "adj_factor"}
+                    else None
+                ),
+                coverage_start_date=(
+                    STK_LIMIT_COVERAGE_START if stage_name == "stk_limit" else None
+                ),
                 exhaustion_lookup=exhaustion_lookup,
                 required_columns=spec["required_columns"],
                 max_workers=PRECHECK_WORKERS,
             )
         else:
+            latest_by_symbol = _preload_stage_latest_dates(
+                symbols,
+                stage_name=stage_name,
+                stage_dir=stage_dir,
+                date_column=spec["date_column"],
+                max_workers=PRECHECK_WORKERS,
+            )
             pending_symbols, ready_symbols = precheck_aux_stage_symbols(
                 symbols,
                 stage_name=stage_name,
@@ -2237,10 +3137,8 @@ def run_tushare_update_pipeline(
                 target_end_date=target_end_date,
                 date_column=spec["date_column"],
                 empty_lookup=aux_stage_lookup,
+                latest_by_symbol=latest_by_symbol,
             )
-            latest_by_symbol = {
-                symbol: infer_latest_date(stage_dir / f"{symbol}.parquet", spec["date_column"]) for symbol in symbols
-            }
             ready_outputs = {
                 symbol: UpdateResult(
                     status=f"{stage_name} checked through {target_end_date.date()}",
@@ -2258,7 +3156,9 @@ def run_tushare_update_pipeline(
             )
 
     stage_details: dict[str, list[str]] = {symbol: [] for symbol in symbols}
-    stage_outputs: dict[str, dict[str, UpdateResult]] = {name: {} for name, _ in stage_specs}
+    stage_outputs: dict[str, dict[str, UpdateResult]] = {
+        name: {} for name, _ in stage_specs
+    }
     failed_symbols: set[str] = set()
     stage_pending: dict[str, deque[str]] = {}
     stage_cooldown_until: dict[str, float] = {}
@@ -2266,6 +3166,9 @@ def run_tushare_update_pipeline(
     stage_failure: dict[str, int] = {}
     stage_done: dict[str, int] = {}
     stage_total: dict[str, int] = {}
+    stage_manifest_updates: dict[str, list[dict[str, Any]]] = {
+        name: [] for name, _ in stage_specs
+    }
     backfill_updates: list[dict[str, Any]] = []
     backfill_removals: set[tuple[str, str]] = set()
 
@@ -2308,9 +3211,11 @@ def run_tushare_update_pipeline(
                     symbol,
                     latest_by_symbol.get(symbol),
                     (effective_end_dates or {}).get(symbol, target_end_date),
-                    expected_start_dates.get(symbol)
-                    if stage_name in {"daily", "daily_basic", "adj_factor"}
-                    else None,
+                    (
+                        expected_start_dates.get(symbol)
+                        if stage_name in {"daily", "daily_basic", "adj_factor"}
+                        else None
+                    ),
                 ),
                 max_workers=max_workers,
             )
@@ -2322,16 +3227,29 @@ def run_tushare_update_pipeline(
                     stage_details[item.symbol].append(f"{stage_name}: {item.detail}")
                     if isinstance(item.payload, UpdateResult):
                         stage_outputs[stage_name][item.symbol] = item.payload
-                        if spec["completion_policy"] == "lifecycle_end_date" and item.payload.changed:
+                        if item.payload.stage_manifest_row is not None:
+                            stage_manifest_updates[stage_name].append(
+                                item.payload.stage_manifest_row
+                            )
+                        if (
+                            spec["completion_policy"] == "lifecycle_end_date"
+                            and item.payload.changed
+                        ):
                             backfill_removals.add((stage_name, item.symbol))
-                        elif spec["completion_policy"] == "lifecycle_end_date" and item.payload.backfill_exhausted:
+                        elif (
+                            spec["completion_policy"] == "lifecycle_end_date"
+                            and item.payload.backfill_exhausted
+                        ):
                             backfill_updates.append(
                                 {
                                     "stage_name": stage_name,
                                     "local_symbol": item.symbol,
-                                    "expected_start_date": expected_start_dates.get(item.symbol)
-                                    if stage_name in {"daily", "daily_basic", "adj_factor"}
-                                    else pd.NaT,
+                                    "expected_start_date": (
+                                        expected_start_dates.get(item.symbol)
+                                        if stage_name
+                                        in {"daily", "daily_basic", "adj_factor"}
+                                        else pd.NaT
+                                    ),
                                     "observed_earliest_date": item.payload.earliest,
                                     "recorded_at": pd.Timestamp.now().normalize(),
                                 }
@@ -2354,7 +3272,10 @@ def run_tushare_update_pipeline(
                         stage_outputs[stage_name][item.symbol] = UpdateResult(
                             status=item.detail,
                             changed=" saved to " in item.detail,
-                            latest=infer_latest_date(stage_dir / f"{item.symbol}.parquet", spec["date_column"]),
+                            latest=infer_latest_date(
+                                stage_dir / f"{item.symbol}.parquet",
+                                spec["date_column"],
+                            ),
                         )
                     stage_success[stage_name] += 1
                     stage_done[stage_name] += 1
@@ -2368,10 +3289,14 @@ def run_tushare_update_pipeline(
                 stage_done[stage_name] += 1
 
             if rate_limit_hit:
-                retry_symbols.extend(symbol for symbol in deferred_symbols if symbol not in retry_symbols)
+                retry_symbols.extend(
+                    symbol for symbol in deferred_symbols if symbol not in retry_symbols
+                )
                 for symbol in reversed(retry_symbols):
                     queue.appendleft(symbol)
-                stage_cooldown_until[stage_name] = time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS
+                stage_cooldown_until[stage_name] = (
+                    time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS
+                )
                 remaining = len(queue)
                 print(
                     f"[*] Stage {stage_name} cooling down for {RATE_LIMIT_COOLDOWN_SECONDS:.0f}s "
@@ -2410,6 +3335,14 @@ def run_tushare_update_pipeline(
         )
         time.sleep(wait_for)
 
+    for stage_name, manifest_rows in stage_manifest_updates.items():
+        if manifest_rows:
+            merge_stage_manifest_rows(
+                stage_name,
+                manifest_rows,
+                inspected_symbols=[row["local_symbol"] for row in manifest_rows],
+            )
+
     if backfill_updates or backfill_removals:
         exhaustion_frame = merge_backfill_exhaustion_records(
             exhaustion_frame,
@@ -2418,7 +3351,9 @@ def run_tushare_update_pipeline(
         )
         save_backfill_exhaustion(exhaustion_frame)
 
-    processed_source_stage_names = [name for name, _ in stage_specs if name in PROCESSED_DEPENDENCY_STAGE_NAMES]
+    processed_source_stage_names = [
+        name for name, _ in stage_specs if name in PROCESSED_DEPENDENCY_STAGE_NAMES
+    ]
     should_run_processed = "processed" in selected_stage_names or any(
         name in PROCESSED_DEPENDENCY_STAGE_NAMES for name in selected_stage_names
     )
@@ -2432,10 +3367,14 @@ def run_tushare_update_pipeline(
         print("[*] Raw Tushare downloads finished. Rebuilding processed parquet...")
 
         def rebuild_if_needed(symbol: str) -> str:
-            updates = [stage_outputs[name][symbol] for name in processed_source_stage_names]
+            updates = [
+                stage_outputs[name][symbol] for name in processed_source_stage_names
+            ]
             if should_rebuild_processed(symbol, updates):
                 return rebuild_processed_from_local(symbol)
-            processed_latest = infer_latest_date(PROCESSED_DIR / f"{symbol}.parquet", "date")
+            processed_latest = infer_latest_date(
+                PROCESSED_DIR / f"{symbol}.parquet", "date"
+            )
             return f"processed up-to-date at {processed_latest.date()}"
 
         processed_results = collect_stage(
@@ -2449,13 +3388,32 @@ def run_tushare_update_pipeline(
             if not item.ok:
                 failed_symbols.add(item.symbol)
 
+    should_rebuild_packed_source = any(
+        stage_name in OPTIONAL_STAGE_NAMES for stage_name in selected_stage_names
+    )
+    if should_rebuild_packed_source:
+        available_processed_symbols = sorted(
+            path.stem for path in PROCESSED_DIR.glob("*.parquet")
+        )
+        if available_processed_symbols:
+            print("[*] Rebuilding packed Tushare source buckets...")
+            rebuild_packed_source_from_local(
+                available_processed_symbols, workers=max_workers
+            )
+
     final_results: list[TaskResult] = []
     for symbol in symbols:
         if should_run_processed and processed_source_stage_names:
-            ok = symbol not in failed_symbols and any(detail.startswith("processed: ") for detail in stage_details[symbol])
+            ok = symbol not in failed_symbols and any(
+                detail.startswith("processed: ") for detail in stage_details[symbol]
+            )
         else:
-            ok = symbol not in failed_symbols and all(symbol in stage_outputs[name] for name, _ in stage_specs)
-        final_results.append(TaskResult(symbol=symbol, ok=ok, detail="; ".join(stage_details[symbol])))
+            ok = symbol not in failed_symbols and all(
+                symbol in stage_outputs[name] for name, _ in stage_specs
+            )
+        final_results.append(
+            TaskResult(symbol=symbol, ok=ok, detail="; ".join(stage_details[symbol]))
+        )
     return final_results
 
 
@@ -2464,7 +3422,9 @@ def rebuild_symbol(symbol: str) -> TaskResult:
         detail = rebuild_processed_from_local(symbol)
         return TaskResult(symbol=symbol, ok=True, detail=detail)
     except Exception as exc:
-        return TaskResult(symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}")
+        return TaskResult(
+            symbol=symbol, ok=False, detail=f"{type(exc).__name__}: {exc}"
+        )
 
 
 def collect_symbols(
@@ -2503,12 +3463,17 @@ def precheck_aux_stage_symbols(
     target_end_date: pd.Timestamp,
     date_column: str,
     empty_lookup: dict[tuple[str, str], pd.Timestamp | None] | None = None,
+    latest_by_symbol: dict[str, pd.Timestamp | None] | None = None,
 ) -> tuple[list[str], list[str]]:
     pending: list[str] = []
     ready: list[str] = []
     empty_lookup = empty_lookup or {}
     for symbol in symbols:
-        latest = infer_latest_date(stage_dir / f"{symbol}.parquet", date_column)
+        latest = (
+            latest_by_symbol.get(symbol)
+            if latest_by_symbol is not None
+            else infer_latest_date(stage_dir / f"{symbol}.parquet", date_column)
+        )
         checked_until = empty_lookup.get((stage_name, symbol))
         if latest is not None and latest >= target_end_date:
             ready.append(symbol)
@@ -2529,7 +3494,13 @@ def resolve_target_end_date(end_date: str | None = None) -> pd.Timestamp:
 def parse_symbols_arg(symbols: str | None) -> list[str]:
     if not symbols:
         return []
-    return sorted({ts_symbol_to_local(item.strip()) for item in symbols.split(",") if item.strip()})
+    return sorted(
+        {
+            ts_symbol_to_local(item.strip())
+            for item in symbols.split(",")
+            if item.strip()
+        }
+    )
 
 
 def parse_stage_names_arg(raw: str | None) -> tuple[str, ...]:
@@ -2537,7 +3508,9 @@ def parse_stage_names_arg(raw: str | None) -> tuple[str, ...]:
         return DEFAULT_STAGE_NAMES
     if str(raw).strip().lower() == "all":
         return OPTIONAL_STAGE_NAMES
-    requested = tuple(dict.fromkeys(item.strip() for item in str(raw).split(",") if item.strip()))
+    requested = tuple(
+        dict.fromkeys(item.strip() for item in str(raw).split(",") if item.strip())
+    )
     invalid = [item for item in requested if item not in OPTIONAL_STAGE_NAMES]
     if invalid:
         raise ValueError(
@@ -2551,7 +3524,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Fetch Tushare market data into raw parquet and processed hfq-adjusted combined parquet."
     )
-    parser.add_argument("--symbols", help="Comma-separated symbols, supports bare code or ts_code.")
+    parser.add_argument(
+        "--symbols", help="Comma-separated symbols, supports bare code or ts_code."
+    )
     parser.add_argument(
         "--update",
         action="store_true",
@@ -2623,7 +3598,9 @@ def main() -> None:
 
     target_end_date = resolve_target_end_date(args.end_date)
     latest_trading_date = resolve_latest_trading_date(target_end_date)
-    print(f"[*] Latest trading date on or before {target_end_date.date()}: {latest_trading_date.date()}")
+    print(
+        f"[*] Latest trading date on or before {target_end_date.date()}: {latest_trading_date.date()}"
+    )
 
     if args.refresh_benchmarks_only:
         refresh_tushare_benchmarks(latest_trading_date)
@@ -2642,6 +3619,14 @@ def main() -> None:
             f"[*] Rebuilding Tushare processed parquet for {len(symbols)} symbols from local raw files..."
         )
         results = collect_symbols(symbols, rebuild_symbol, max_workers=args.workers)
+        available_processed_symbols = sorted(
+            path.stem for path in PROCESSED_DIR.glob("*.parquet")
+        )
+        if available_processed_symbols:
+            print("[*] Rebuilding packed Tushare source buckets...")
+            rebuild_packed_source_from_local(
+                available_processed_symbols, workers=args.workers
+            )
     else:
         if args.update and not symbols:
             symbols = resolve_incremental_symbols(refresh_live=args.refresh_symbols)
@@ -2652,32 +3637,51 @@ def main() -> None:
             raise SystemExit("[!] No Tushare symbols to process.")
         effective_end_dates: dict[str, pd.Timestamp] | None = None
         lifecycle_scope_symbols: set[str] | None = None
-        lifecycle_selected = any(stage in PROCESSED_DEPENDENCY_STAGE_NAMES for stage in selected_stage_names)
-        event_stage_selected = any(stage in EVENT_STAGE_NAMES for stage in selected_stage_names)
+        lifecycle_selected = any(
+            stage in PROCESSED_DEPENDENCY_STAGE_NAMES for stage in selected_stage_names
+        )
+        event_stage_selected = any(
+            stage in EVENT_STAGE_NAMES for stage in selected_stage_names
+        )
         requested_symbols = list(symbols)
         if lifecycle_selected:
-            pending_lifecycle_symbols, completed_symbols, effective_end_dates, lifecycle_registry = precheck_pending_symbols(
-                symbols, target_end_date=latest_trading_date
-            )
+            (
+                pending_lifecycle_symbols,
+                completed_symbols,
+                effective_end_dates,
+                lifecycle_registry,
+            ) = precheck_pending_symbols(symbols, target_end_date=latest_trading_date)
             lifecycle_scope_symbols = set(pending_lifecycle_symbols)
             if not lifecycle_registry.empty:
-                lifecycle_counts = lifecycle_registry["lifecycle_status"].value_counts().to_dict()
-                counts_text = ", ".join(f"{key}={value}" for key, value in sorted(lifecycle_counts.items()))
+                lifecycle_counts = (
+                    lifecycle_registry["lifecycle_status"].value_counts().to_dict()
+                )
+                counts_text = ", ".join(
+                    f"{key}={value}" for key, value in sorted(lifecycle_counts.items())
+                )
                 print(f"[*] Tushare lifecycle snapshot: {counts_text}")
             if completed_symbols:
-                print(f"[*] Skipping {len(completed_symbols)} already-complete Tushare symbols.")
-            eligible_symbols, skipped_not_yet_listed = filter_symbols_by_lifecycle_applicability(
-                requested_symbols,
-                lifecycle_registry,
+                print(
+                    f"[*] Skipping {len(completed_symbols)} already-complete Tushare symbols."
+                )
+            eligible_symbols, skipped_not_yet_listed = (
+                filter_symbols_by_lifecycle_applicability(
+                    requested_symbols,
+                    lifecycle_registry,
+                )
             )
             if skipped_not_yet_listed:
-                print(f"[*] Skipping {len(skipped_not_yet_listed)} not-yet-listed Tushare symbols.")
+                print(
+                    f"[*] Skipping {len(skipped_not_yet_listed)} not-yet-listed Tushare symbols."
+                )
             if event_stage_selected:
                 symbols = eligible_symbols
             else:
                 symbols = pending_lifecycle_symbols
             if not symbols:
-                print("[+] All Tushare symbols are already complete. Nothing to update.")
+                print(
+                    "[+] All Tushare symbols are already complete. Nothing to update."
+                )
                 return
 
         print(

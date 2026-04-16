@@ -28,7 +28,11 @@ def load_factor_store_metadata(store_dir: str | Path) -> dict[str, Any]:
         return json.load(f)
 
 
-def _get_shards_dir(store_dir: str | Path) -> Path:
+def _get_storage_layout(meta: dict[str, Any]) -> str:
+    return str(meta.get("storage_layout") or "symbol_shards")
+
+
+def _get_symbol_shards_dir(store_dir: str | Path) -> Path:
     shards_dir = Path(store_dir) / "shards"
     if not shards_dir.exists():
         raise FileNotFoundError(
@@ -38,26 +42,61 @@ def _get_shards_dir(store_dir: str | Path) -> Path:
     return shards_dir
 
 
+def _get_bucket_shards_dir(store_dir: str | Path) -> Path:
+    bucket_dir = Path(store_dir) / "buckets"
+    if not bucket_dir.exists():
+        raise FileNotFoundError(
+            f"Parquet factor store bucket directory missing: {bucket_dir}. "
+            "Please run `uv run python -m src.gen_feature --workers 24` first."
+        )
+    return bucket_dir
+
+
+def _get_bucket_manifest_path(store_dir: str | Path) -> Path:
+    manifest_path = Path(store_dir) / "manifest.parquet"
+    if not manifest_path.exists():
+        raise FileNotFoundError(
+            f"Parquet factor store bucket manifest missing: {manifest_path}. "
+            "Please run `uv run python -m src.gen_feature --workers 24` first."
+        )
+    return manifest_path
+
+
+def _load_bucket_manifest(
+    store_dir: str | Path,
+    *,
+    columns: list[str] | None = None,
+) -> pd.DataFrame:
+    manifest_path = _get_bucket_manifest_path(store_dir)
+    return pd.read_parquet(manifest_path, columns=columns)
+
+
 def _load_dataset_frame(
     *,
-    shards_dir: Path,
+    dataset_root: Path,
     selected_columns: list[str],
     scan_filter,
     progress_desc: str | None,
+    fragment_paths: list[str] | None = None,
     allowed_symbols: set[str] | None = None,
 ) -> pd.DataFrame:
-    if allowed_symbols is not None:
-        fragment_paths = [
-            str(shards_dir / f"{symbol}.parquet")
-            for symbol in sorted(allowed_symbols)
-            if (shards_dir / f"{symbol}.parquet").exists()
-        ]
+    if fragment_paths is not None:
         if not fragment_paths:
             return pd.DataFrame(columns=selected_columns)
         scan_dataset = ds.dataset(fragment_paths, format="parquet")
         fragment_count = len(fragment_paths)
+    elif allowed_symbols is not None:
+        symbol_fragment_paths = [
+            str(dataset_root / f"{symbol}.parquet")
+            for symbol in sorted(allowed_symbols)
+            if (dataset_root / f"{symbol}.parquet").exists()
+        ]
+        if not symbol_fragment_paths:
+            return pd.DataFrame(columns=selected_columns)
+        scan_dataset = ds.dataset(symbol_fragment_paths, format="parquet")
+        fragment_count = len(symbol_fragment_paths)
     else:
-        dataset = ds.dataset(shards_dir, format="parquet")
+        dataset = ds.dataset(dataset_root, format="parquet")
         fragments = list(dataset.get_fragments(filter=scan_filter))
         if not fragments:
             return pd.DataFrame(columns=selected_columns)
@@ -133,7 +172,7 @@ def load_factor_frame(
     progress_desc: str | None = None,
 ) -> pd.DataFrame:
     meta = load_factor_store_metadata(store_dir)
-    shards_dir = _get_shards_dir(store_dir)
+    storage_layout = _get_storage_layout(meta)
     actual_label_column = _resolve_requested_label_column(meta, label_column)
     selected_columns = ["date", "symbol", actual_label_column, *columns]
     allowed_symbols = None
@@ -153,11 +192,39 @@ def load_factor_frame(
         for extra_filter in filters[1:]:
             scan_filter = scan_filter & extra_filter
 
+    dataset_root: Path
+    fragment_paths: list[str] | None = None
+    if storage_layout == "bucket_shards":
+        dataset_root = _get_bucket_shards_dir(store_dir)
+        if allowed_symbols is not None:
+            manifest = _load_bucket_manifest(store_dir, columns=["symbol", "bucket_id"])
+            manifest["symbol"] = manifest["symbol"].astype(str)
+            matched = manifest.loc[manifest["symbol"].isin(allowed_symbols), "bucket_id"]
+            if matched.empty:
+                return pd.DataFrame(columns=selected_columns)
+            bucket_ids = sorted({int(value) for value in matched.tolist()})
+            symbol_filter = ds.field("symbol").isin(sorted(allowed_symbols))
+            scan_filter = symbol_filter if scan_filter is None else scan_filter & symbol_filter
+        else:
+            bucket_ids = [int(value) for value in meta.get("bucket_ids", [])]
+            if not bucket_ids:
+                bucket_ids = sorted(
+                    int(path.stem.split("-")[-1]) for path in dataset_root.glob("part-*.parquet") if path.stem.split("-")[-1].isdigit()
+                )
+        fragment_paths = [
+            str(dataset_root / f"part-{bucket_id:04d}.parquet")
+            for bucket_id in bucket_ids
+            if (dataset_root / f"part-{bucket_id:04d}.parquet").exists()
+        ]
+    else:
+        dataset_root = _get_symbol_shards_dir(store_dir)
+
     frame = _load_dataset_frame(
-        shards_dir=shards_dir,
+        dataset_root=dataset_root,
         selected_columns=selected_columns,
         scan_filter=scan_filter,
         progress_desc=progress_desc,
+        fragment_paths=fragment_paths,
         allowed_symbols=allowed_symbols,
     )
     if frame.empty:

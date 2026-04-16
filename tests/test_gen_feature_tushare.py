@@ -32,6 +32,11 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_ret_20", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}turnover_accel_5_20", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_20", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}fi_ocf_to_eps", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}fc_surprise_fresh", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}exp_growth_fresh", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}up_down_turnover_ratio_20", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_breadth_accel_20_60", tushare_names)
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", default_names)
         self.assertNotIn("TEMP_ret_20", default_names)
         self.assertNotIn("TEMP_corr_cv_20", default_names)
@@ -87,6 +92,35 @@ class TushareFeatureTest(unittest.TestCase):
                 "ind_dispersion_5": [0.01, 0.011, 0.012],
                 "ind_dispersion_20": [0.02, 0.021, 0.022],
                 "ind_dispersion_60": [0.03, 0.031, 0.032],
+                "fi_eps": [1.0, 2.0, 3.0],
+                "fi_ocfps": [2.0, 4.0, 6.0],
+                "fi_roe": [10.0, 11.0, 12.0],
+                "fi_roe_dt": [9.0, 10.0, 11.0],
+                "fi_roa": [3.0, 4.0, 5.0],
+                "fi_grossprofit_margin": [30.0, 31.0, 32.0],
+                "fi_netprofit_margin": [10.0, 11.0, 12.0],
+                "fi_q_roe": [2.0, 3.0, 4.0],
+                "fi_q_dt_roe": [1.5, 2.5, 3.5],
+                "fi_or_yoy": [5.0, 6.0, 7.0],
+                "fi_op_yoy": [4.0, 5.0, 6.0],
+                "fi_netprofit_yoy": [3.0, 4.0, 5.0],
+                "fi_ocf_yoy": [2.0, 3.0, 4.0],
+                "fc_p_change_min": [10.0, 20.0, 30.0],
+                "fc_p_change_max": [30.0, 40.0, 50.0],
+                "fc_net_profit_min": [100.0, 200.0, 300.0],
+                "fc_net_profit_max": [300.0, 400.0, 500.0],
+                "fc_last_parent_net": [50.0, 100.0, 200.0],
+                "fc_days_since_ann": [0.0, 1.0, 2.0],
+                "exp_revenue": [1000.0, 1100.0, 1200.0],
+                "exp_operate_profit": [100.0, 121.0, 144.0],
+                "exp_n_income": [80.0, 88.0, 96.0],
+                "exp_yoy_sales": [10.0, 11.0, 12.0],
+                "exp_yoy_op": [9.0, 10.0, 11.0],
+                "exp_yoy_tp": [8.0, 9.0, 10.0],
+                "exp_yoy_dedu_np": [7.0, 8.0, 9.0],
+                "exp_yoy_eps": [6.0, 7.0, 8.0],
+                "exp_growth_assets": [5.0, 6.0, 7.0],
+                "exp_days_since_ann": [0.0, 1.0, 2.0],
             }
         )
 
@@ -118,6 +152,16 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["industry_std_20"]), 0.03, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["industry_pos_rate_20"]), 0.62, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["industry_dispersion_60"]), 0.032, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_ocf_to_eps"]), 2.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_ocf_yoy_minus_np_yoy"]), -1.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_roe_quality_gap"]), -1.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fc_p_change_mid"]), 40.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fc_net_profit_mid_ratio"]), 2.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fc_days_since_ann"]), 2.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["exp_profit_margin_proxy"]), 0.08, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["exp_asset_efficiency"]), 5.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["industry_breadth_accel_20_60"]), -0.02, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["industry_momentum_accel_20_60"]), -0.10, places=6)
         self.assertTrue(pd.isna(feat.iloc[2]["industry_rel_ret_5"]))
         self.assertAlmostEqual(float(feat.iloc[2]["turnover_accel_5_20"]), 0.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["free_turnover_accel_5_20"]), 0.0, places=6)
@@ -436,8 +480,10 @@ class TushareFeatureTest(unittest.TestCase):
 
         self.assertAlmostEqual(float(out.loc[2, "fc_p_change_max"]), 40.0, places=6)
         self.assertAlmostEqual(float(out.loc[2, "fc_net_profit_min"]), 200.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "fc_days_since_ann"]), 1.0, places=6)
         self.assertAlmostEqual(float(out.loc[2, "exp_revenue"]), 1100.0, places=6)
         self.assertAlmostEqual(float(out.loc[2, "exp_yoy_sales"]), 18.0, places=6)
+        self.assertAlmostEqual(float(out.loc[2, "exp_days_since_ann"]), 1.0, places=6)
 
     def test_augment_tushare_symbol_frame_loads_industry_context_sidecar(self):
         df = pd.DataFrame(
@@ -565,6 +611,8 @@ class TushareFeatureTest(unittest.TestCase):
 
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_fc_p_change_max", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}latest_exp_revenue", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}fc_p_change_mid", tushare_feat.columns)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}exp_growth_combo", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_member_count", tushare_feat.columns)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_rel_ret_20", tushare_feat.columns)
         self.assertAlmostEqual(float(tushare_feat.iloc[1][f"{TUSHARE_FACTOR_PREFIX}latest_fc_p_change_max"]), 40.0, places=6)

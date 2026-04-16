@@ -12,7 +12,7 @@ SUPPORTED_DATA_SOURCES = ("akshare", "gm", "tushare")
 SOURCE_PARQUET_DIRS = {
     "akshare": "data/processed/combined",
     "gm": "data/gm/processed/combined",
-    "tushare": "data/tushare/processed/combined",
+    "tushare": "data/tushare/source",
 }
 
 

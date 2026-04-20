@@ -58,6 +58,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--date-start", help="Optional explicit start date (overrides --period)")
     parser.add_argument("--date-end", help="Optional explicit end date (overrides --period)")
     parser.add_argument(
+        "--all-features",
+        action="store_true",
+        help="Diagnose all cached features instead of each case's feature-profile subset.",
+    )
+    parser.add_argument(
         "--quantile-bins",
         type=int,
         default=5,
@@ -225,11 +230,14 @@ def main() -> None:
     union_features: list[str] = []
     seen_union: set[str] = set()
     for case in cases:
-        case_cfg = deepcopy(cfg)
-        case_cfg.setdefault("features", {})
-        case_cfg["features"]["profile"] = case.feature_profile
-        _, source_columns = resolve_selected_feature_columns(factor_store_meta, case_cfg)
-        feature_names = list(dict.fromkeys(source_columns))
+        if bool(getattr(args, "all_features", False)):
+            feature_names = list(factor_store_meta.get("feature_names", []))
+        else:
+            case_cfg = deepcopy(cfg)
+            case_cfg.setdefault("features", {})
+            case_cfg["features"]["profile"] = case.feature_profile
+            _, source_columns = resolve_selected_feature_columns(factor_store_meta, case_cfg)
+            feature_names = list(dict.fromkeys(source_columns))
         if not feature_names:
             raise ValueError(f"Case '{case.name}' resolved no features")
         case_feature_map[case.name] = feature_names

@@ -14,6 +14,7 @@ from src.gen_feature import (
     TUSHARE_SYMBOL_CACHE_PATH,
     _clear_tushare_context_caches,
     _augment_tushare_symbol_frame,
+    _build_tushare_industry_context_cache,
     compute_all_factor_features,
     compute_tushare_factor_features,
     get_all_factor_feature_names,
@@ -37,6 +38,8 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}exp_growth_fresh", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}up_down_turnover_ratio_20", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_breadth_accel_20_60", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_turnover_ratio_20", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_amihud_ratio_60", tushare_names)
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", default_names)
         self.assertNotIn("TEMP_ret_20", default_names)
         self.assertNotIn("TEMP_corr_cv_20", default_names)
@@ -92,6 +95,14 @@ class TushareFeatureTest(unittest.TestCase):
                 "ind_dispersion_5": [0.01, 0.011, 0.012],
                 "ind_dispersion_20": [0.02, 0.021, 0.022],
                 "ind_dispersion_60": [0.03, 0.031, 0.032],
+                "ind_turnover_mean_20": [1.0, 1.5, 2.0],
+                "ind_free_turnover_mean_20": [1.2, 1.6, 2.0],
+                "ind_volume_ratio_mean_20": [1.0, 1.05, 1.1],
+                "ind_amihud_mean_20": [0.00003, 0.00003, 0.00003],
+                "ind_downside_amihud_mean_20": [0.00004, 0.00004, 0.00004],
+                "ind_amplitude_mean_20": [4.0, 4.0, 4.0],
+                "ind_hit_up_limit_rate_20": [0.2, 0.2, 0.2],
+                "ind_hit_down_limit_rate_20": [0.1, 0.1, 0.1],
                 "fi_eps": [1.0, 2.0, 3.0],
                 "fi_ocfps": [2.0, 4.0, 6.0],
                 "fi_roe": [10.0, 11.0, 12.0],
@@ -168,6 +179,14 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["amihud_term_5_20"]), 0.0, places=6)
         self.assertTrue(pd.isna(feat.iloc[2]["downside_amihud_20"]))
         self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_std_ratio_20"]), 0.214275, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_turnover_ratio_20"]), (7.0 / 3.0) / 2.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_free_turnover_ratio_20"]), 3.5 / 2.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_volume_ratio_gap_20"]), 0.2, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_amihud_ratio_20"]), 2.032227, places=6)
+        self.assertTrue(pd.isna(feat.iloc[2]["stock_vs_industry_downside_amihud_ratio_20"]))
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_amplitude_ratio_20"]), 2.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_hit_up_limit_gap_20"]), -0.2, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_hit_down_limit_gap_20"]), -0.1, places=6)
         self.assertTrue(pd.notna(feat.iloc[2]["amplitude_zscore_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["pct_chg_zscore_20"]))
         self.assertTrue(pd.isna(feat.iloc[0]["free_float_ratio_change_20"]))
@@ -550,6 +569,67 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(out.loc[2, "ind_excess_ret_60"]), 0.045, places=6)
         self.assertAlmostEqual(float(out.loc[2, "ind_pos_rate_20"]), 0.60, places=6)
         self.assertAlmostEqual(float(out.loc[2, "ind_dispersion_60"]), 0.031, places=6)
+
+    def test_build_tushare_industry_context_cache_adds_relative_context_columns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parquet_dir = root / "processed"
+            meta_dir = root / "meta"
+            parquet_dir.mkdir()
+            meta_dir.mkdir()
+            symbol_cache = pd.DataFrame(
+                {
+                    "local_symbol": ["000001", "000002"],
+                    "industry": ["银行", "银行"],
+                }
+            )
+            symbol_cache_path = meta_dir / "symbol_cache.parquet"
+            industry_context_path = meta_dir / "industry_context.parquet"
+            symbol_cache.to_parquet(symbol_cache_path, index=False)
+
+            for symbol, close_offset in [("000001", 0.0), ("000002", 1.0)]:
+                pd.DataFrame(
+                    {
+                        "date": pd.to_datetime(["2026-03-30", "2026-03-31", "2026-04-01"]),
+                        "symbol": [symbol] * 3,
+                        "open": [10.0, 10.5, 11.0],
+                        "high": [10.5, 11.0, 11.5],
+                        "low": [9.5, 10.0, 10.5],
+                        "close": [10.0 + close_offset, 11.0 + close_offset, 12.0 + close_offset],
+                        "volume": [100.0, 120.0, 140.0],
+                        "amount": [1000.0, 1400.0, 1800.0],
+                        "turnover": [1.0, 2.0, 4.0],
+                        "turnover_free": [1.5, 3.0, 6.0],
+                        "volume_ratio": [1.2, 1.3, 1.4],
+                        "amplitude": [7.0, 8.0, 9.0],
+                        "up_limit": [11.0 + close_offset, 12.1 + close_offset, 13.2 + close_offset],
+                        "down_limit": [9.0 + close_offset, 9.9 + close_offset, 10.8 + close_offset],
+                    }
+                ).to_parquet(parquet_dir / f"{symbol}.parquet", index=False)
+
+            from src import gen_feature as gen_feature_module
+
+            original_symbol_cache_path = gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH
+            original_industry_context_path = gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH
+            gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = symbol_cache_path
+            gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = industry_context_path
+            gen_feature_module._clear_tushare_context_caches()
+            try:
+                _build_tushare_industry_context_cache(parquet_dir)
+            finally:
+                gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = original_symbol_cache_path
+                gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = original_industry_context_path
+                gen_feature_module._clear_tushare_context_caches()
+
+            context = pd.read_parquet(industry_context_path)
+
+        self.assertIn("ind_turnover_mean_20", context.columns)
+        self.assertIn("ind_free_turnover_mean_60", context.columns)
+        self.assertIn("ind_amihud_mean_20", context.columns)
+        self.assertIn("ind_hit_up_limit_rate_20", context.columns)
+        latest = context.sort_values("date").iloc[-1]
+        self.assertAlmostEqual(float(latest["ind_turnover_mean_20"]), (2.0 + 4.0) / 2.0, places=6)
+        self.assertAlmostEqual(float(latest["ind_free_turnover_mean_20"]), (3.0 + 6.0) / 2.0, places=6)
 
     def test_compute_all_factor_features_uses_side_loaded_forecast_and_express_columns(self):
         df = pd.DataFrame(

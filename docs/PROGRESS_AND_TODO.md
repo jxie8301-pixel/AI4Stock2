@@ -33,9 +33,15 @@ What is true now:
 - The Tushare path currently stores symbol cache, trade calendar, raw market tables, and a first-pass normalized `hfq` combined parquet under `data/tushare/`
 - The Tushare collector now supports symbol-level incremental updates, lifecycle-aware completion checks, segmented long-history backfill, and stage cooldown after rate-limit errors
 - The native training/feature pipeline now accepts `data.source: tushare` and stores its factor cache under `data/factor_store/tushare_*`
+- The latest diagnosed Tushare full-factor store contains `432` factors, including `173` `TS_*` factors across flow/event, industry, dividend, valuation, quality, forecast, and express themes
+- The first stock-vs-industry relative factor batch expands generated Tushare full-factor space to `448` factors, including `189` `TS_*` factors, after the factor store is rebuilt
 - A first Tushare-specific feature family now exists, covering涨跌停结构, 自由流通占比, 自由换手, 市销率倒数, and股息率
 - Tushare side-input raw stages now include `fina_indicator`, `dividend`, `forecast`, and `express`
 - Tushare side-input features now include latest announced snapshots from `fina_indicator`, `dividend`, `forecast`, and `express`
+- Single-factor diagnostics now support yearly regime slices, optional industry neutralization, and detailed artifact exports for bucket returns, top-bottom spreads, monthly RankIC, and missingness by year
+- Latest full-space diagnostics show that `TS_dividend_*` and `TS_stock_vs_industry_*` retain signal best after industry neutralization
+- Latest full-space diagnostics also show that most pure `TS_industry_*` features and several absolute flow/event and valuation signals are largely industry / style exposure rather than clean within-industry stock alpha
+- Several `TS_exp_*` / `TS_latest_exp_*` features still have zero effective coverage in the current diagnostics range and should not be treated as validated alpha candidates yet
 - `src/probe_tushare.py` can be used to inspect real Tushare endpoint columns and latency before integrating new tables into the formal pipeline
 
 ## Current Recommended Workflow
@@ -120,6 +126,25 @@ system baseline for feature research.
   - did the learned ordering improve?
   - did the selected positive-rate improve?
   - did the improvement survive regime slices?
+
+### 0A. Factor Research Focus
+
+- [ ] Treat full-space single-factor diagnostics plus industry-neutral diagnostics as the default gate before promoting new feature families
+- [ ] Stop using "raw single-factor looks strong" as sufficient evidence; require at least:
+  - acceptable coverage
+  - non-trivial yearly stability
+  - a readable top-bottom spread
+  - a clear answer for whether the signal survives industry neutralization
+- [ ] Promote three feature themes as the current primary factor-engineering track:
+  - dividend and dividend-quality factors
+  - stock-vs-industry relative factors
+  - relative crowding / relative-liquidity factors
+- [ ] Deprioritize broad expansion of:
+  - pure `TS_industry_*` features
+  - additional absolute valuation-level features
+  - more same-family temporal / technical window variants
+- [ ] Repair or quarantine zero-coverage `TS_exp_*` / `TS_latest_exp_*` fields before drawing further conclusions from the express family
+- [ ] Keep feature research aimed at "what stock can make money inside its current context", not at adding more proxies for the same price-state signal
 
 ### 1. Relative-Opportunity Research Track
 
@@ -225,11 +250,120 @@ system baseline for feature research.
 - [ ] Expand Tushare-only factors from already-landed market columns: limit-band width/position dynamics, free-float turnover shocks, share-structure drift, and valuation/dividend change factors
 - [ ] Evaluate whether the newly added Tushare event-side features (`fina_indicator`, `dividend`, `forecast`, `express`) actually improve the rolling baseline before expanding to more statement tables
 - [x] Add a rolling single-factor diagnostics report: IC, RankIC, coverage, monotonicity, stability
+- [x] Extend single-factor diagnostics with yearly slices, industry-neutral mode, and detailed daily / monthly artifacts
 - [~] Add automated prefiltering by minimum coverage plus minimum rolling IC / RankIC threshold
   Current state: standalone diagnostics-based prefilter tooling now exists; it still needs promotion into a repeatable experiment workflow and selection policy.
 - [~] Add redundancy pruning on the selected feature set using correlation clustering before model training
   Current state: standalone greedy correlation-pruning tooling now exists for diagnostics-selected candidates; it is not yet integrated into the training path.
 - [ ] Separate factor research into three layers: raw factor generation, stable profile curation, optional training-time auto-filter
+- [ ] Add a formal promotion policy for new factors based on:
+  - raw diagnostics
+  - industry-neutral diagnostics
+  - yearly stability
+  - coverage / missingness
+  - redundancy against already-promoted factors
+- [~] Build the next priority factor batch around stock-vs-industry relative structure instead of adding more absolute state features
+  Current state: first code batch is implemented for `20` / `60` day relative turnover, free-turnover, volume-ratio, Amihud, downside-Amihud, amplitude, and limit-hit deviation; packed source and factor store still need to be rebuilt and diagnosed.
+  First batch should target:
+  - stock-vs-industry turnover ratio
+  - stock-vs-industry free-turnover ratio
+  - stock-vs-industry amihud ratio
+  - stock-vs-industry volume-ratio deviation
+  - stock-vs-industry limit-hit / crowding deviation
+  Implementation design:
+  - extend the Tushare industry-context cache first; the current cache only has industry return, volatility, positive-rate, and dispersion fields
+  - add industry-context columns for each selected window, initially `20` and `60`:
+    - `ind_turnover_mean_{w}`
+    - `ind_free_turnover_mean_{w}`
+    - `ind_volume_ratio_mean_{w}`
+    - `ind_amihud_mean_{w}`
+    - `ind_downside_amihud_mean_{w}`
+    - `ind_amplitude_mean_{w}`
+    - `ind_hit_up_limit_rate_{w}`
+    - `ind_hit_down_limit_rate_{w}`
+  - then add stock-level relative factor outputs:
+    - `stock_vs_industry_turnover_ratio_{w}`
+    - `stock_vs_industry_free_turnover_ratio_{w}`
+    - `stock_vs_industry_volume_ratio_gap_{w}`
+    - `stock_vs_industry_amihud_ratio_{w}`
+    - `stock_vs_industry_downside_amihud_ratio_{w}`
+    - `stock_vs_industry_amplitude_ratio_{w}`
+    - `stock_vs_industry_hit_up_limit_gap_{w}`
+    - `stock_vs_industry_hit_down_limit_gap_{w}`
+  - use ratio form for strictly positive intensity variables and gap form for rate / bounded variables
+  - after changing industry-context columns, rebuild packed Tushare source buckets before rebuilding the factor store; otherwise the bucket-source path will keep old `ind_*` columns
+  - validate this batch using full-space raw diagnostics and full-space industry-neutral diagnostics before adding any model sweep
+- [ ] Build the next priority dividend-quality batch instead of only using dividend yield level
+  First batch should target:
+  - dividend-to-OCF
+  - dividend-to-net-profit
+  - dividend consistency / stability
+  - dividend cut / resume flags
+  - multi-year dividend growth
+  Implementation design:
+  - current sidecar data has `dividend` plus latest `fina_indicator`, but it does not yet preserve enough multi-year dividend history in factor values
+  - first add only factors that are feasible from latest snapshot fields:
+    - `dividend_cash_to_eps`
+    - `dividend_cash_to_ocfps`
+    - `dividend_cash_yield_proxy`
+    - `dividend_yield_minus_industry_20`
+  - defer true multi-year consistency / cut / resume factors until dividend event history is carried as an event-series feature instead of only a latest snapshot
+- [ ] Replace absolute valuation emphasis with industry-relative valuation factors
+  First batch should target:
+  - `ep - industry_ep`
+  - `sp - industry_sp`
+  - `bp - industry_bp`
+  - valuation change minus industry valuation change
+  - dividend yield minus industry dividend yield
+  Implementation design:
+  - extend industry context with industry cross-sectional means / medians for valuation variables:
+    - `ind_ep_mean`
+    - `ind_sp_mean`
+    - `ind_sp_ttm_mean`
+    - `ind_bp_mean`
+    - `ind_dividend_yield_mean`
+    - `ind_dividend_yield_ttm_mean`
+  - add relative valuation outputs:
+    - `ep_minus_industry_ep`
+    - `sp_minus_industry_sp`
+    - `sp_ttm_minus_industry_sp_ttm`
+    - `bp_minus_industry_bp`
+    - `dividend_yield_minus_industry`
+    - `dividend_yield_ttm_minus_industry`
+  - add change-relative variants only after the level-relative variants pass diagnostics
+- [ ] Expand financial-quality factors beyond simple first-order ratios
+  First batch should target:
+  - accrual ratio
+  - receivable growth minus revenue growth
+  - inventory growth minus revenue growth
+  - cash-conversion quality
+  - margin / ROE stability
+  Implementation design:
+  - this requires statement tables beyond the currently wired `fina_indicator` snapshot
+  - do not implement accrual / receivable / inventory features until `income`, `balancesheet`, and `cashflow` are part of the formal Tushare source path
+  - near-term feasible additions from current fields are limited to:
+    - `ocfps_minus_eps`
+    - `roe_dt_minus_roe`
+    - `gross_margin_minus_net_margin`
+    - industry-relative versions of those three
+- [ ] Rework forecast / express factors around surprise structure rather than raw latest snapshots
+  First batch should target:
+  - forecast midpoint vs last actual
+  - forecast width / confidence
+  - forecast revision acceleration
+  - forecast / express surprise relative to industry
+  - post-event drift features
+  Implementation design:
+  - first fix `TS_exp_*` coverage gaps; several express-derived fields currently have zero effective coverage
+  - add diagnostic coverage checks before adding more express formulas
+  - first feasible forecast additions from current fields:
+    - `forecast_mid_vs_last_parent_net`
+    - `forecast_width_to_abs_mid`
+    - `forecast_positive_confidence_decay`
+    - `forecast_days_since_ann_decay`
+  - defer revision acceleration and post-event drift until event history is available, not just latest as-of snapshots
+- [ ] Fix the current `TS_exp_*` coverage failures before expanding the express family further
+- [ ] Avoid broad new `TEMP_*` / `TECH_*` feature expansion until the relative / dividend / quality themes above are tested
 - [ ] Add market / universe / industry opportunity features rather than only stock-level predictors
   First batch should target:
   - universe positive-rate / breadth proxies

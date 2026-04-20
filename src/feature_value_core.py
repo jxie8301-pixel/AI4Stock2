@@ -783,6 +783,7 @@ def compute_tushare_factor_features(
     long_flow_window = int(flow_windows[-1])
     valuation_windows = sorted({int(window) for window in cfg["valuation_change_windows"]})
     industry_windows = sorted({int(window) for window in cfg["industry_windows"]})
+    relative_industry_windows = sorted({int(window) for window in cfg.get("relative_industry_windows", [20, 60])})
 
     out: dict[str, pd.Series | np.ndarray] = {}
     out["gap_up_limit"] = up_limit / close - 1.0
@@ -978,6 +979,43 @@ def compute_tushare_factor_features(
     out[f"stock_industry_ret_gap_{mid_industry_window}_{long_industry_window}"] = rel_ret_mid - rel_ret_long
     out[f"stock_relative_strength_quality_{mid_industry_window}"] = rel_ret_mid / (_series(f"ind_std_{mid_industry_window}") + EPS)
     out[f"stock_relative_strength_quality_{long_industry_window}"] = rel_ret_long / (_series(f"ind_std_{long_industry_window}") + EPS)
+    for window in relative_industry_windows:
+        window = int(window)
+        own_turnover_mean = turnover.rolling(window, min_periods=1).mean()
+        own_free_turnover_mean = turnover_free.rolling(window, min_periods=1).mean()
+        own_volume_ratio_mean = volume_ratio.rolling(window, min_periods=1).mean()
+        own_amihud_mean = (daily_ret_abs / (amount_abs + EPS)).rolling(window, min_periods=1).mean()
+        own_downside_amihud_mean = (daily_ret_abs.where(daily_ret < 0) / (amount_abs + EPS)).rolling(
+            window,
+            min_periods=1,
+        ).mean()
+        own_amplitude_mean = amplitude.rolling(window, min_periods=1).mean()
+        own_hit_up_limit_rate = hit_up_limit.rolling(window, min_periods=1).mean()
+        own_hit_down_limit_rate = hit_down_limit.rolling(window, min_periods=1).mean()
+        out[f"stock_vs_industry_turnover_ratio_{window}"] = own_turnover_mean / (
+            _series(f"ind_turnover_mean_{window}") + EPS
+        )
+        out[f"stock_vs_industry_free_turnover_ratio_{window}"] = own_free_turnover_mean / (
+            _series(f"ind_free_turnover_mean_{window}") + EPS
+        )
+        out[f"stock_vs_industry_volume_ratio_gap_{window}"] = own_volume_ratio_mean - _series(
+            f"ind_volume_ratio_mean_{window}"
+        )
+        out[f"stock_vs_industry_amihud_ratio_{window}"] = own_amihud_mean / (
+            _series(f"ind_amihud_mean_{window}") + EPS
+        )
+        out[f"stock_vs_industry_downside_amihud_ratio_{window}"] = own_downside_amihud_mean / (
+            _series(f"ind_downside_amihud_mean_{window}") + EPS
+        )
+        out[f"stock_vs_industry_amplitude_ratio_{window}"] = own_amplitude_mean / (
+            _series(f"ind_amplitude_mean_{window}") + EPS
+        )
+        out[f"stock_vs_industry_hit_up_limit_gap_{window}"] = own_hit_up_limit_rate - _series(
+            f"ind_hit_up_limit_rate_{window}"
+        )
+        out[f"stock_vs_industry_hit_down_limit_gap_{window}"] = own_hit_down_limit_rate - _series(
+            f"ind_hit_down_limit_rate_{window}"
+        )
     out["latest_eps"] = fi_eps
     out["latest_dt_eps"] = fi_dt_eps
     out["latest_bps"] = fi_bps

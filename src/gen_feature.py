@@ -183,6 +183,18 @@ def _get_tushare_industry_context_feature_cols() -> list[str]:
             f"ind_pos_rate_{window}",
             f"ind_dispersion_{window}",
         ]
+    for raw_window in DEFAULT_TUSHARE_FACTOR_CONFIG.get("relative_industry_windows", [20, 60]):
+        window = int(raw_window)
+        cols += [
+            f"ind_turnover_mean_{window}",
+            f"ind_free_turnover_mean_{window}",
+            f"ind_volume_ratio_mean_{window}",
+            f"ind_amihud_mean_{window}",
+            f"ind_downside_amihud_mean_{window}",
+            f"ind_amplitude_mean_{window}",
+            f"ind_hit_up_limit_rate_{window}",
+            f"ind_hit_down_limit_rate_{window}",
+        ]
     return cols
 
 
@@ -235,8 +247,21 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
     rows: list[pd.DataFrame] = []
     for file_path in sorted(parquet_dir.glob("*.parquet")):
         symbol = file_path.stem
+        required_columns = [
+            "date",
+            "close",
+            "amount",
+            "turnover",
+            "turnover_free",
+            "volume_ratio",
+            "amplitude",
+            "up_limit",
+            "down_limit",
+        ]
         try:
-            frame = pd.read_parquet(file_path, columns=["date", "close"])
+            schema_names = set(pq.read_schema(file_path).names)
+            read_columns = [col for col in required_columns if col in schema_names]
+            frame = pd.read_parquet(file_path, columns=read_columns)
         except Exception:
             frame = pd.read_parquet(file_path)
         if frame.empty or "date" not in frame.columns or "close" not in frame.columns:
@@ -247,12 +272,39 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
         frame = frame.dropna(subset=["date", "close"]).sort_values("date")
         if frame.empty:
             continue
+        for col in required_columns:
+            if col not in frame.columns:
+                frame[col] = np.nan
+            elif col != "date":
+                frame[col] = pd.to_numeric(frame[col], errors="coerce")
+        ret = frame["close"].pct_change(fill_method=None)
+        amount_abs = frame["amount"].abs()
+        amihud = ret.abs() / (amount_abs + EPS)
+        downside_amihud = ret.abs().where(ret < 0) / (amount_abs + EPS)
+        hit_up_limit = np.where(
+            np.isfinite(frame["close"]) & np.isfinite(frame["up_limit"]),
+            (frame["close"] >= frame["up_limit"] * (1.0 - 1e-6)).astype(float),
+            np.nan,
+        )
+        hit_down_limit = np.where(
+            np.isfinite(frame["close"]) & np.isfinite(frame["down_limit"]),
+            (frame["close"] <= frame["down_limit"] * (1.0 + 1e-6)).astype(float),
+            np.nan,
+        )
         rows.append(
             pd.DataFrame(
                 {
                     "date": frame["date"].to_numpy(copy=False),
                     "industry": symbol_to_industry.get(symbol, "UNKNOWN"),
-                    "ret": frame["close"].pct_change(fill_method=None).to_numpy(copy=False),
+                    "ret": ret.to_numpy(copy=False),
+                    "turnover": frame["turnover"].to_numpy(copy=False),
+                    "turnover_free": frame["turnover_free"].to_numpy(copy=False),
+                    "volume_ratio": frame["volume_ratio"].to_numpy(copy=False),
+                    "amplitude": frame["amplitude"].to_numpy(copy=False),
+                    "amihud": amihud.to_numpy(copy=False),
+                    "downside_amihud": downside_amihud.to_numpy(copy=False),
+                    "hit_up_limit": hit_up_limit,
+                    "hit_down_limit": hit_down_limit,
                 }
             )
         )
@@ -267,6 +319,14 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
                 ind_daily_ret=("ret", "mean"),
                 ind_daily_pos_rate=("ret", lambda values: (pd.to_numeric(values, errors="coerce") > 0).mean()),
                 ind_daily_dispersion=("ret", "std"),
+                ind_daily_turnover=("turnover", "mean"),
+                ind_daily_free_turnover=("turnover_free", "mean"),
+                ind_daily_volume_ratio=("volume_ratio", "mean"),
+                ind_daily_amihud=("amihud", "mean"),
+                ind_daily_downside_amihud=("downside_amihud", "mean"),
+                ind_daily_amplitude=("amplitude", "mean"),
+                ind_daily_hit_up_limit_rate=("hit_up_limit", "mean"),
+                ind_daily_hit_down_limit_rate=("hit_down_limit", "mean"),
             )
             .reset_index()
         )
@@ -284,6 +344,16 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
         grouped_daily_ret = industry_daily.groupby("industry", observed=True, sort=False)["ind_daily_ret"]
         grouped_daily_pos_rate = industry_daily.groupby("industry", observed=True, sort=False)["ind_daily_pos_rate"]
         grouped_daily_dispersion = industry_daily.groupby("industry", observed=True, sort=False)["ind_daily_dispersion"]
+        relative_context_sources = {
+            "turnover_mean": "ind_daily_turnover",
+            "free_turnover_mean": "ind_daily_free_turnover",
+            "volume_ratio_mean": "ind_daily_volume_ratio",
+            "amihud_mean": "ind_daily_amihud",
+            "downside_amihud_mean": "ind_daily_downside_amihud",
+            "amplitude_mean": "ind_daily_amplitude",
+            "hit_up_limit_rate": "ind_daily_hit_up_limit_rate",
+            "hit_down_limit_rate": "ind_daily_hit_down_limit_rate",
+        }
         for raw_window in DEFAULT_TUSHARE_FACTOR_CONFIG["industry_windows"]:
             window = int(raw_window)
             industry_daily[f"ind_ret_{window}"] = grouped_daily_ret.transform(
@@ -301,6 +371,13 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
             industry_daily[f"ind_dispersion_{window}"] = grouped_daily_dispersion.transform(
                 lambda series, w=window: series.rolling(w, min_periods=1).mean()
             )
+        for raw_window in DEFAULT_TUSHARE_FACTOR_CONFIG.get("relative_industry_windows", [20, 60]):
+            window = int(raw_window)
+            for output_suffix, source_col in relative_context_sources.items():
+                grouped_source = industry_daily.groupby("industry", observed=True, sort=False)[source_col]
+                industry_daily[f"ind_{output_suffix}_{window}"] = grouped_source.transform(
+                    lambda series, w=window: series.rolling(w, min_periods=1).mean()
+                )
         output = industry_daily[["date", "industry", *_get_tushare_industry_context_feature_cols()]].copy()
     else:
         output = pd.DataFrame(columns=["date", "industry", *_get_tushare_industry_context_feature_cols()])

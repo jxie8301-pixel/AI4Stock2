@@ -77,6 +77,7 @@ DEFAULT_TUSHARE_FACTOR_CONFIG: dict[str, Any] = {
     "ratio_change_windows": [20, 60],
     "valuation_change_windows": [20, 60],
     "industry_windows": [5, 20, 60],
+    "relative_industry_windows": [20, 60],
     "zscore_window": 20,
 }
 
@@ -392,6 +393,7 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     long_flow_window = int(flow_windows[-1])
     valuation_windows = sorted({int(window) for window in cfg["valuation_change_windows"]})
     industry_windows = sorted({int(window) for window in cfg["industry_windows"]})
+    relative_industry_windows = sorted({int(window) for window in cfg.get("relative_industry_windows", [20, 60])})
     zscore_window = int(cfg["zscore_window"])
 
     names = [
@@ -493,6 +495,18 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         f"stock_relative_strength_quality_{int(industry_windows[-2])}",
         f"stock_relative_strength_quality_{int(industry_windows[-1])}",
     ]
+    for window in relative_industry_windows:
+        window = int(window)
+        names += [
+            f"stock_vs_industry_turnover_ratio_{window}",
+            f"stock_vs_industry_free_turnover_ratio_{window}",
+            f"stock_vs_industry_volume_ratio_gap_{window}",
+            f"stock_vs_industry_amihud_ratio_{window}",
+            f"stock_vs_industry_downside_amihud_ratio_{window}",
+            f"stock_vs_industry_amplitude_ratio_{window}",
+            f"stock_vs_industry_hit_up_limit_gap_{window}",
+            f"stock_vs_industry_hit_down_limit_gap_{window}",
+        ]
     names += [
         "latest_eps",
         "latest_dt_eps",

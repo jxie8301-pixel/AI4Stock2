@@ -2632,7 +2632,7 @@ def rebuild_packed_source_from_local(
     workers: int = 8,
     incremental: bool = True,
 ) -> dict[str, Any]:
-    from src.gen_feature import _ensure_tushare_industry_context_cache
+    from src.gen_feature import _ensure_tushare_industry_context_cache, _get_tushare_industry_context_feature_cols
 
     all_symbols = sorted(
         {str(symbol) for symbol in (symbols or []) if str(symbol).strip()}
@@ -2658,6 +2658,8 @@ def rebuild_packed_source_from_local(
     if PACKED_SOURCE_META_PATH.exists():
         with open(PACKED_SOURCE_META_PATH, "r", encoding="utf-8") as f:
             existing_meta = json.load(f)
+    required_schema_columns = {"date", "symbol", *_get_tushare_industry_context_feature_cols()}
+    existing_schema_columns = {str(col) for col in existing_meta.get("schema_columns") or []}
     existing_manifest = pd.DataFrame()
     existing_manifest_lookup: dict[str, dict[str, Any]] = {}
     can_reuse_manifest = (
@@ -2665,6 +2667,7 @@ def rebuild_packed_source_from_local(
         and PACKED_SOURCE_MANIFEST_PATH.exists()
         and existing_meta.get("storage_layout") == "bucket_shards"
         and int(existing_meta.get("bucket_count") or 0) == bucket_count
+        and required_schema_columns.issubset(existing_schema_columns)
     )
     if can_reuse_manifest:
         existing_manifest = _load_packed_source_manifest()

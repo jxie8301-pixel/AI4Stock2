@@ -1087,6 +1087,7 @@ def test_rebuild_packed_source_from_local_writes_bucket_store(monkeypatch: pytes
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
     monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
+    monkeypatch.setattr("src.gen_feature._get_tushare_industry_context_feature_cols", lambda: ["ind_member_count"])
     monkeypatch.setattr(
         "src.gen_feature._augment_tushare_symbol_frame",
         lambda df, symbol: df.assign(ind_member_count=24.0),
@@ -1142,6 +1143,7 @@ def test_rebuild_packed_source_from_local_reuses_unchanged_buckets(
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
     monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
+    monkeypatch.setattr("src.gen_feature._get_tushare_industry_context_feature_cols", lambda: ["ind_member_count"])
     monkeypatch.setattr(
         "src.gen_feature._augment_tushare_symbol_frame",
         lambda df, symbol: df.assign(ind_member_count=float(int(symbol[-1]))),

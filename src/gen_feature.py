@@ -195,6 +195,18 @@ def _get_tushare_industry_context_feature_cols() -> list[str]:
             f"ind_hit_up_limit_rate_{window}",
             f"ind_hit_down_limit_rate_{window}",
         ]
+    cols += [
+        "ind_ep_mean",
+        "ind_sp_mean",
+        "ind_sp_ttm_mean",
+        "ind_bp_mean",
+        "ind_dividend_yield_mean",
+        "ind_dividend_yield_ttm_mean",
+        "ind_fi_ocf_to_eps_mean",
+        "ind_fi_ocfps_minus_eps_mean",
+        "ind_fi_roe_quality_gap_mean",
+        "ind_fi_margin_quality_mean",
+    ]
     return cols
 
 
@@ -257,6 +269,12 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
             "amplitude",
             "up_limit",
             "down_limit",
+            "pe",
+            "pb",
+            "ps",
+            "ps_ttm",
+            "dv_ratio",
+            "dv_ttm",
         ]
         try:
             schema_names = set(pq.read_schema(file_path).names)
@@ -291,6 +309,22 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
             (frame["close"] <= frame["down_limit"] * (1.0 + 1e-6)).astype(float),
             np.nan,
         )
+        ep = np.where(frame["pe"] > 0, 1.0 / frame["pe"], -1.0)
+        sp = np.where(frame["ps"] > 0, 1.0 / frame["ps"], -1.0)
+        sp_ttm = np.where(frame["ps_ttm"] > 0, 1.0 / frame["ps_ttm"], -1.0)
+        bp = np.where(frame["pb"] > 0, 1.0 / frame["pb"], -1.0)
+        fina_indicator = _load_tushare_fina_indicator_features(symbol, pd.DatetimeIndex(frame["date"]))
+        if fina_indicator is None or fina_indicator.empty:
+            fi_frame = pd.DataFrame(index=frame.index)
+        else:
+            fi_frame = fina_indicator.reindex(pd.DatetimeIndex(frame["date"])).reset_index(drop=True)
+        for col in TUSHARE_FINA_INDICATOR_FEATURE_COLS:
+            if col not in fi_frame.columns:
+                fi_frame[col] = np.nan
+        fi_ocf_to_eps = fi_frame["fi_ocfps"] / (fi_frame["fi_eps"].abs() + EPS)
+        fi_ocfps_minus_eps = fi_frame["fi_ocfps"] - fi_frame["fi_eps"]
+        fi_roe_quality_gap = fi_frame["fi_roe_dt"] - fi_frame["fi_roe"]
+        fi_margin_quality = fi_frame["fi_grossprofit_margin"] - fi_frame["fi_netprofit_margin"]
         rows.append(
             pd.DataFrame(
                 {
@@ -305,6 +339,16 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
                     "downside_amihud": downside_amihud.to_numpy(copy=False),
                     "hit_up_limit": hit_up_limit,
                     "hit_down_limit": hit_down_limit,
+                    "ep": ep,
+                    "sp": sp,
+                    "sp_ttm": sp_ttm,
+                    "bp": bp,
+                    "dividend_yield": frame["dv_ratio"].to_numpy(copy=False),
+                    "dividend_yield_ttm": frame["dv_ttm"].to_numpy(copy=False),
+                    "fi_ocf_to_eps": fi_ocf_to_eps.to_numpy(copy=False),
+                    "fi_ocfps_minus_eps": fi_ocfps_minus_eps.to_numpy(copy=False),
+                    "fi_roe_quality_gap": fi_roe_quality_gap.to_numpy(copy=False),
+                    "fi_margin_quality": fi_margin_quality.to_numpy(copy=False),
                 }
             )
         )
@@ -327,6 +371,16 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
                 ind_daily_amplitude=("amplitude", "mean"),
                 ind_daily_hit_up_limit_rate=("hit_up_limit", "mean"),
                 ind_daily_hit_down_limit_rate=("hit_down_limit", "mean"),
+                ind_ep_mean=("ep", "mean"),
+                ind_sp_mean=("sp", "mean"),
+                ind_sp_ttm_mean=("sp_ttm", "mean"),
+                ind_bp_mean=("bp", "mean"),
+                ind_dividend_yield_mean=("dividend_yield", "mean"),
+                ind_dividend_yield_ttm_mean=("dividend_yield_ttm", "mean"),
+                ind_fi_ocf_to_eps_mean=("fi_ocf_to_eps", "mean"),
+                ind_fi_ocfps_minus_eps_mean=("fi_ocfps_minus_eps", "mean"),
+                ind_fi_roe_quality_gap_mean=("fi_roe_quality_gap", "mean"),
+                ind_fi_margin_quality_mean=("fi_margin_quality", "mean"),
             )
             .reset_index()
         )

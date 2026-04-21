@@ -103,6 +103,16 @@ class TushareFeatureTest(unittest.TestCase):
                 "ind_amplitude_mean_20": [4.0, 4.0, 4.0],
                 "ind_hit_up_limit_rate_20": [0.2, 0.2, 0.2],
                 "ind_hit_down_limit_rate_20": [0.1, 0.1, 0.1],
+                "ind_ep_mean": [0.10, 0.10, 0.10],
+                "ind_sp_mean": [0.15, 0.15, 0.15],
+                "ind_sp_ttm_mean": [0.08, 0.08, 0.08],
+                "ind_bp_mean": [0.70, 0.70, 0.70],
+                "ind_dividend_yield_mean": [0.10, 0.10, 0.10],
+                "ind_dividend_yield_ttm_mean": [0.20, 0.20, 0.20],
+                "ind_fi_ocf_to_eps_mean": [1.5, 1.5, 1.5],
+                "ind_fi_ocfps_minus_eps_mean": [2.0, 2.0, 2.0],
+                "ind_fi_roe_quality_gap_mean": [-0.5, -0.5, -0.5],
+                "ind_fi_margin_quality_mean": [15.0, 15.0, 15.0],
                 "fi_eps": [1.0, 2.0, 3.0],
                 "fi_ocfps": [2.0, 4.0, 6.0],
                 "fi_roe": [10.0, 11.0, 12.0],
@@ -164,6 +174,7 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["industry_pos_rate_20"]), 0.62, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["industry_dispersion_60"]), 0.032, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fi_ocf_to_eps"]), 2.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_ocfps_minus_eps"]), 3.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fi_ocf_yoy_minus_np_yoy"]), -1.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fi_roe_quality_gap"]), -1.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fc_p_change_mid"]), 40.0, places=6)
@@ -187,6 +198,16 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_amplitude_ratio_20"]), 2.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_hit_up_limit_gap_20"]), -0.2, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_hit_down_limit_gap_20"]), -0.1, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["ep_minus_industry_ep"]), -1.1, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["sp_minus_industry_sp"]), 0.05, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["sp_ttm_minus_industry_sp_ttm"]), 0.02, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["bp_minus_industry_bp"]), 1.0 / 1.2 - 0.7, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_minus_industry"]), 0.1, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_ttm_minus_industry"]), 0.2, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_ocf_to_eps_minus_industry"]), 0.5, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_ocfps_minus_eps_minus_industry"]), 1.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_roe_quality_gap_minus_industry"]), -0.5, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["fi_margin_quality_minus_industry"]), 5.0, places=6)
         self.assertTrue(pd.notna(feat.iloc[2]["amplitude_zscore_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["pct_chg_zscore_20"]))
         self.assertTrue(pd.isna(feat.iloc[0]["free_float_ratio_change_20"]))
@@ -575,8 +596,10 @@ class TushareFeatureTest(unittest.TestCase):
             root = Path(tmpdir)
             parquet_dir = root / "processed"
             meta_dir = root / "meta"
+            fina_dir = root / "fina_indicator"
             parquet_dir.mkdir()
             meta_dir.mkdir()
+            fina_dir.mkdir()
             symbol_cache = pd.DataFrame(
                 {
                     "local_symbol": ["000001", "000002"],
@@ -604,21 +627,41 @@ class TushareFeatureTest(unittest.TestCase):
                         "amplitude": [7.0, 8.0, 9.0],
                         "up_limit": [11.0 + close_offset, 12.1 + close_offset, 13.2 + close_offset],
                         "down_limit": [9.0 + close_offset, 9.9 + close_offset, 10.8 + close_offset],
+                        "pe": [10.0, 20.0, 25.0],
+                        "pb": [1.0, 2.0, 4.0],
+                        "ps": [2.0, 4.0, 5.0],
+                        "ps_ttm": [2.5, 5.0, 10.0],
+                        "dv_ratio": [0.5, 0.0, 0.2],
+                        "dv_ttm": [0.8, 0.0, 0.4],
                     }
                 ).to_parquet(parquet_dir / f"{symbol}.parquet", index=False)
+                pd.DataFrame(
+                    {
+                        "ann_date": ["20260329"],
+                        "eps": [1.0 + close_offset],
+                        "ocfps": [2.0 + close_offset],
+                        "roe": [10.0 + close_offset],
+                        "roe_dt": [9.0 + close_offset],
+                        "grossprofit_margin": [30.0 + close_offset],
+                        "netprofit_margin": [10.0 + close_offset],
+                    }
+                ).to_parquet(fina_dir / f"{symbol}.parquet", index=False)
 
             from src import gen_feature as gen_feature_module
 
             original_symbol_cache_path = gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH
             original_industry_context_path = gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH
+            original_fina_dir = gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR
             gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = symbol_cache_path
             gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = industry_context_path
+            gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR = fina_dir
             gen_feature_module._clear_tushare_context_caches()
             try:
                 _build_tushare_industry_context_cache(parquet_dir)
             finally:
                 gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = original_symbol_cache_path
                 gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = original_industry_context_path
+                gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR = original_fina_dir
                 gen_feature_module._clear_tushare_context_caches()
 
             context = pd.read_parquet(industry_context_path)
@@ -627,9 +670,21 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn("ind_free_turnover_mean_60", context.columns)
         self.assertIn("ind_amihud_mean_20", context.columns)
         self.assertIn("ind_hit_up_limit_rate_20", context.columns)
+        self.assertIn("ind_ep_mean", context.columns)
+        self.assertIn("ind_fi_ocf_to_eps_mean", context.columns)
         latest = context.sort_values("date").iloc[-1]
         self.assertAlmostEqual(float(latest["ind_turnover_mean_20"]), (2.0 + 4.0) / 2.0, places=6)
         self.assertAlmostEqual(float(latest["ind_free_turnover_mean_20"]), (3.0 + 6.0) / 2.0, places=6)
+        self.assertAlmostEqual(float(latest["ind_ep_mean"]), 0.04, places=6)
+        self.assertAlmostEqual(float(latest["ind_sp_mean"]), 0.2, places=6)
+        self.assertAlmostEqual(float(latest["ind_sp_ttm_mean"]), 0.1, places=6)
+        self.assertAlmostEqual(float(latest["ind_bp_mean"]), 0.25, places=6)
+        self.assertAlmostEqual(float(latest["ind_dividend_yield_mean"]), 0.2, places=6)
+        self.assertAlmostEqual(float(latest["ind_dividend_yield_ttm_mean"]), 0.4, places=6)
+        self.assertAlmostEqual(float(latest["ind_fi_ocf_to_eps_mean"]), 1.75, places=6)
+        self.assertAlmostEqual(float(latest["ind_fi_ocfps_minus_eps_mean"]), 1.0, places=6)
+        self.assertAlmostEqual(float(latest["ind_fi_roe_quality_gap_mean"]), -1.0, places=6)
+        self.assertAlmostEqual(float(latest["ind_fi_margin_quality_mean"]), 20.0, places=6)
 
     def test_compute_all_factor_features_uses_side_loaded_forecast_and_express_columns(self):
         df = pd.DataFrame(

@@ -908,6 +908,7 @@ def compute_tushare_factor_features(
     out[f"downside_amihud_{long_flow_window}"] = downside_amihud
     out[f"dividend_yield_ttm_surprise_{zscore_window}"] = dividend_yield_ttm_series - dividend_yield_ttm_baseline
     out["fi_ocf_to_eps"] = _safe_ratio(fi_ocfps, fi_eps)
+    out["fi_ocfps_minus_eps"] = fi_ocfps - fi_eps
     out["fi_ocf_yoy_minus_np_yoy"] = fi_ocf_yoy - fi_netprofit_yoy
     out["fi_roe_quality_gap"] = fi_roe_dt - fi_roe
     out["fi_q_roe_quality_gap"] = fi_q_dt_roe - fi_q_roe
@@ -1016,6 +1017,30 @@ def compute_tushare_factor_features(
         out[f"stock_vs_industry_hit_down_limit_gap_{window}"] = own_hit_down_limit_rate - _series(
             f"ind_hit_down_limit_rate_{window}"
         )
+    out["ep_minus_industry_ep"] = pd.Series(out["ep"], index=base.index, dtype=float) - _series("ind_ep_mean")
+    out["sp_minus_industry_sp"] = pd.Series(out["sp"], index=base.index, dtype=float) - _series("ind_sp_mean")
+    out["sp_ttm_minus_industry_sp_ttm"] = pd.Series(out["sp_ttm"], index=base.index, dtype=float) - _series(
+        "ind_sp_ttm_mean"
+    )
+    out["bp_minus_industry_bp"] = bp_series - _series("ind_bp_mean")
+    out["dividend_yield_minus_industry"] = pd.Series(out["dividend_yield"], index=base.index, dtype=float) - _series(
+        "ind_dividend_yield_mean"
+    )
+    out["dividend_yield_ttm_minus_industry"] = dividend_yield_ttm_series - _series(
+        "ind_dividend_yield_ttm_mean"
+    )
+    out["fi_ocf_to_eps_minus_industry"] = pd.Series(out["fi_ocf_to_eps"], index=base.index, dtype=float) - _series(
+        "ind_fi_ocf_to_eps_mean"
+    )
+    out["fi_ocfps_minus_eps_minus_industry"] = pd.Series(out["fi_ocfps_minus_eps"], index=base.index, dtype=float) - _series(
+        "ind_fi_ocfps_minus_eps_mean"
+    )
+    out["fi_roe_quality_gap_minus_industry"] = pd.Series(out["fi_roe_quality_gap"], index=base.index, dtype=float) - _series(
+        "ind_fi_roe_quality_gap_mean"
+    )
+    out["fi_margin_quality_minus_industry"] = pd.Series(out["fi_margin_quality"], index=base.index, dtype=float) - _series(
+        "ind_fi_margin_quality_mean"
+    )
     out["latest_eps"] = fi_eps
     out["latest_dt_eps"] = fi_dt_eps
     out["latest_bps"] = fi_bps

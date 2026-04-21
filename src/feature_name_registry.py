@@ -456,6 +456,7 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         ]
     names += [
         "fi_ocf_to_eps",
+        "fi_ocfps_minus_eps",
         "fi_ocf_yoy_minus_np_yoy",
         "fi_roe_quality_gap",
         "fi_q_roe_quality_gap",
@@ -507,6 +508,18 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
             f"stock_vs_industry_hit_up_limit_gap_{window}",
             f"stock_vs_industry_hit_down_limit_gap_{window}",
         ]
+    names += [
+        "ep_minus_industry_ep",
+        "sp_minus_industry_sp",
+        "sp_ttm_minus_industry_sp_ttm",
+        "bp_minus_industry_bp",
+        "dividend_yield_minus_industry",
+        "dividend_yield_ttm_minus_industry",
+        "fi_ocf_to_eps_minus_industry",
+        "fi_ocfps_minus_eps_minus_industry",
+        "fi_roe_quality_gap_minus_industry",
+        "fi_margin_quality_minus_industry",
+    ]
     names += [
         "latest_eps",
         "latest_dt_eps",

@@ -34,7 +34,7 @@ What is true now:
 - The Tushare collector now supports symbol-level incremental updates, lifecycle-aware completion checks, segmented long-history backfill, and stage cooldown after rate-limit errors
 - The native training/feature pipeline now accepts `data.source: tushare` and stores its factor cache under `data/factor_store/tushare_*`
 - The latest diagnosed Tushare full-factor store contains `432` factors, including `173` `TS_*` factors across flow/event, industry, dividend, valuation, quality, forecast, and express themes
-- The first stock-vs-industry relative factor batch expands generated Tushare full-factor space to `448` factors, including `189` `TS_*` factors, after the factor store is rebuilt
+- The first two relative-factor batches expand generated Tushare full-factor space to `459` factors, including `200` `TS_*` factors, after the factor store is rebuilt
 - A first Tushare-specific feature family now exists, covering涨跌停结构, 自由流通占比, 自由换手, 市销率倒数, and股息率
 - Tushare side-input raw stages now include `fina_indicator`, `dividend`, `forecast`, and `express`
 - Tushare side-input features now include latest announced snapshots from `fina_indicator`, `dividend`, `forecast`, and `express`
@@ -308,7 +308,8 @@ system baseline for feature research.
     - `dividend_cash_yield_proxy`
     - `dividend_yield_minus_industry_20`
   - defer true multi-year consistency / cut / resume factors until dividend event history is carried as an event-series feature instead of only a latest snapshot
-- [ ] Replace absolute valuation emphasis with industry-relative valuation factors
+- [~] Replace absolute valuation emphasis with industry-relative valuation factors
+  Current state: first code batch is implemented for industry-relative `ep`, `sp`, `sp_ttm`, `bp`, `dividend_yield`, and `dividend_yield_ttm`; packed source and factor store still need to be rebuilt and diagnosed.
   First batch should target:
   - `ep - industry_ep`
   - `sp - industry_sp`
@@ -331,7 +332,8 @@ system baseline for feature research.
     - `dividend_yield_minus_industry`
     - `dividend_yield_ttm_minus_industry`
   - add change-relative variants only after the level-relative variants pass diagnostics
-- [ ] Expand financial-quality factors beyond simple first-order ratios
+- [~] Expand financial-quality factors beyond simple first-order ratios
+  Current state: first feasible code batch is implemented for `fi_ocfps_minus_eps` and industry-relative `fi_ocf_to_eps`, `fi_ocfps_minus_eps`, `fi_roe_quality_gap`, and `fi_margin_quality`; statement-table-dependent factors are still deferred.
   First batch should target:
   - accrual ratio
   - receivable growth minus revenue growth

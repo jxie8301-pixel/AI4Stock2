@@ -1,0 +1,25 @@
+model:
+  name: lgbm
+  batch_size: 4096
+  n_jobs: 24
+
+lgbm:
+  loss: rank_xendcg
+  ranking_num_bins: 5
+  validation_topk: 15
+  early_stopping_metric: valid_topk_excess_mean
+  learning_rate: 0.05
+  num_boost_round: 1000
+  early_stop: 10
+  early_stopping_min_delta: 0.0
+  log_evaluation_period: 50
+  colsample_bytree: 0.8879
+  subsample: 0.8789
+  subsample_freq: 1
+  lambda_l1: 1.0
+  lambda_l2: 1.0
+  max_depth: 8
+  num_leaves: 63
+  min_data_in_leaf: 100
+  num_threads: 24
+  seed: 42

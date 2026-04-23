@@ -341,6 +341,36 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}ep_ttm_change_20", slim_b_support["selected_columns"])
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}industry_pos_rate_20", slim_b_support["selected_columns"])
 
+    def test_core_v4_slim_b_plus_relative_alpha_profile_is_registered(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {
+                    "profile": (
+                        "core_v4_techlite_tushare_plus_industry_excess_flow_value_"
+                        "slim_b_plus_relative_alpha_v1"
+                    )
+                },
+            }
+        )
+
+        self.assertTrue(
+            str(profile["profile_path"]).endswith(
+                "configs/feature_profiles.yaml::"
+                "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_relative_alpha_v1"
+            )
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_dispersion_60", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_std_ratio_60", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_minus_industry", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}bp_minus_industry_bp", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_amplitude_ratio_20", profile["selected_columns"])
+        self.assertIn(
+            f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_downside_amihud_ratio_60",
+            profile["selected_columns"],
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_std_60", profile["cross_sectional_rank_exclude_columns"])
+
     def test_core_v5_diag_prefilter_profile_is_registered(self):
         profile = resolve_feature_profile(
             {

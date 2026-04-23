@@ -19,6 +19,9 @@ profiles:
   lgbm_ranker_default:
     path: configs/models/lgbm_ranker_default.yaml
 
+  lgbm_ranker_topk15_excess:
+    path: configs/models/lgbm_ranker_topk15_excess.yaml
+
   lgbm_ranker_rankic:
     path: configs/models/lgbm_ranker_rankic.yaml
 

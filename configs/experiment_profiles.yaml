@@ -30,6 +30,16 @@ profiles:
     model:
       profile: lgbm_ranker_default
 
+  core_v4_lgbm_ranker_topk15_excess_10x20x10:
+    extends: core_v4_lgbm_default_10x20x10
+    model:
+      profile: lgbm_ranker_topk15_excess
+
+  core_v4_slim_b_ranker_topk15_excess_10x20x10:
+    extends: core_v4_lgbm_ranker_topk15_excess_10x20x10
+    features:
+      profile: core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1
+
   core_v4_lgbm_binary_default_10x20x10:
     extends: core_v4_lgbm_default_10x20x10
     model:

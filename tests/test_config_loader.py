@@ -62,12 +62,32 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(profile["config"]["lgbm"]["loss"], "rank_xendcg")
         self.assertEqual(profile["config"]["lgbm"]["early_stopping_metric"], "daily_rank_ic")
 
+    def test_resolve_topk15_excess_ranker_model_profile(self):
+        profile = resolve_model_profile({"model": {"profile": "lgbm_ranker_topk15_excess"}})
+
+        self.assertEqual(profile["name"], "lgbm_ranker_topk15_excess")
+        self.assertTrue(profile["path"].endswith("configs/models/lgbm_ranker_topk15_excess.yaml"))
+        self.assertEqual(profile["config"]["lgbm"]["loss"], "rank_xendcg")
+        self.assertEqual(profile["config"]["lgbm"]["validation_topk"], 15)
+        self.assertEqual(profile["config"]["lgbm"]["early_stopping_metric"], "valid_topk_excess_mean")
+
     def test_load_config_supports_rankic_experiment_profiles(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_ranker_rankic_10x20x10")
 
         self.assertEqual(cfg["model"]["profile"], "lgbm_ranker_rankic")
         self.assertEqual(cfg["lgbm"]["loss"], "rank_xendcg")
         self.assertEqual(cfg["lgbm"]["early_stopping_metric"], "daily_rank_ic")
+
+    def test_load_config_supports_slim_b_topk15_excess_experiment_profile(self):
+        cfg = load_config(
+            "configs/config.yaml",
+            experiment_profile_name="core_v4_slim_b_ranker_topk15_excess_10x20x10",
+        )
+
+        self.assertEqual(cfg["model"]["profile"], "lgbm_ranker_topk15_excess")
+        self.assertEqual(cfg["features"]["profile"], "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1")
+        self.assertEqual(cfg["lgbm"]["validation_topk"], 15)
+        self.assertEqual(cfg["lgbm"]["early_stopping_metric"], "valid_topk_excess_mean")
 
     def test_load_config_requires_explicit_experiment_profile(self):
         with self.assertRaises(ValueError):

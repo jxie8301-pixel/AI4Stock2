@@ -38,6 +38,203 @@ def load_diagnostics_summary(
     return summary
 
 
+def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(np.nan, index=frame.index, dtype=float)
+    return pd.to_numeric(frame[column], errors="coerce")
+
+
+def _bool_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame.columns:
+        return pd.Series(False, index=frame.index, dtype=bool)
+    return frame[column].fillna(False).astype(bool)
+
+
+def build_robust_feature_summary(
+    raw_summary: pd.DataFrame,
+    neutral_summary: pd.DataFrame,
+    *,
+    raw_name: str = "raw",
+    neutral_name: str = "neutral",
+) -> pd.DataFrame:
+    """Combine raw and neutral diagnostics into one conservative, direction-aware summary."""
+    if "feature" not in raw_summary.columns or "feature" not in neutral_summary.columns:
+        raise ValueError("Both summaries must contain a 'feature' column.")
+
+    merged = raw_summary.merge(
+        neutral_summary,
+        on="feature",
+        how="inner",
+        suffixes=(f"_{raw_name}", f"_{neutral_name}"),
+    )
+    if merged.empty:
+        raise ValueError("Raw and neutral summaries have no overlapping features.")
+
+    raw_rank_ic = _numeric_series(merged, f"rank_ic_mean_{raw_name}")
+    neutral_rank_ic = _numeric_series(merged, f"rank_ic_mean_{neutral_name}")
+    raw_rank_ic_ir = _numeric_series(merged, f"rank_ic_ir_{raw_name}")
+    neutral_rank_ic_ir = _numeric_series(merged, f"rank_ic_ir_{neutral_name}")
+
+    raw_direction = np.sign(raw_rank_ic)
+    neutral_direction = np.sign(neutral_rank_ic)
+    direction_consistent = (raw_direction == neutral_direction) & (raw_direction != 0.0)
+    robust_direction = pd.Series(
+        np.where(direction_consistent, raw_direction, 0.0),
+        index=merged.index,
+        dtype=float,
+    )
+
+    def signed_min_abs(raw_col: str, neutral_col: str) -> pd.Series:
+        raw_values = _numeric_series(merged, raw_col).abs()
+        neutral_values = _numeric_series(merged, neutral_col).abs()
+        return robust_direction * np.fmin(raw_values, neutral_values)
+
+    def shared_min(raw_col: str, neutral_col: str) -> pd.Series:
+        return pd.Series(
+            np.fmin(_numeric_series(merged, raw_col), _numeric_series(merged, neutral_col)),
+            index=merged.index,
+            dtype=float,
+        )
+
+    def shared_max(raw_col: str, neutral_col: str) -> pd.Series:
+        return pd.Series(
+            np.fmax(_numeric_series(merged, raw_col), _numeric_series(merged, neutral_col)),
+            index=merged.index,
+            dtype=float,
+        )
+
+    out = merged.copy()
+    out["feature_group"] = out.get(f"feature_group_{raw_name}", out.get(f"feature_group_{neutral_name}"))
+    out["direction_consistent"] = direction_consistent
+    out["direction_flip"] = (
+        _bool_series(merged, f"direction_flip_{raw_name}")
+        | _bool_series(merged, f"direction_flip_{neutral_name}")
+        | ~direction_consistent
+    )
+    out["raw_direction"] = raw_direction
+    out["neutral_direction"] = neutral_direction
+    out["suggested_direction"] = robust_direction.astype(int)
+
+    out["observation_count"] = shared_min(
+        f"observation_count_{raw_name}",
+        f"observation_count_{neutral_name}",
+    )
+    out["valid_observation_count"] = shared_min(
+        f"valid_observation_count_{raw_name}",
+        f"valid_observation_count_{neutral_name}",
+    )
+    out["coverage_pct"] = shared_min(f"coverage_pct_{raw_name}", f"coverage_pct_{neutral_name}")
+    out["avg_daily_coverage_pct"] = shared_min(
+        f"avg_daily_coverage_pct_{raw_name}",
+        f"avg_daily_coverage_pct_{neutral_name}",
+    )
+    out["date_count"] = shared_min(f"date_count_{raw_name}", f"date_count_{neutral_name}")
+    out["effective_date_count"] = shared_min(
+        f"effective_date_count_{raw_name}",
+        f"effective_date_count_{neutral_name}",
+    )
+    out["monotonic_date_count"] = shared_min(
+        f"monotonic_date_count_{raw_name}",
+        f"monotonic_date_count_{neutral_name}",
+    )
+    out["ic_mean"] = signed_min_abs(f"ic_mean_{raw_name}", f"ic_mean_{neutral_name}")
+    out["ic_std"] = shared_max(f"ic_std_{raw_name}", f"ic_std_{neutral_name}")
+    out["ic_ir"] = signed_min_abs(f"ic_ir_{raw_name}", f"ic_ir_{neutral_name}")
+    out["ic_positive_rate"] = shared_min(
+        f"ic_positive_rate_{raw_name}",
+        f"ic_positive_rate_{neutral_name}",
+    )
+    out["rank_ic_mean"] = signed_min_abs(f"rank_ic_mean_{raw_name}", f"rank_ic_mean_{neutral_name}")
+    out["rank_ic_std"] = shared_max(f"rank_ic_std_{raw_name}", f"rank_ic_std_{neutral_name}")
+    out["rank_ic_ir"] = signed_min_abs(f"rank_ic_ir_{raw_name}", f"rank_ic_ir_{neutral_name}")
+    out["rank_ic_positive_rate"] = shared_min(
+        f"rank_ic_positive_rate_{raw_name}",
+        f"rank_ic_positive_rate_{neutral_name}",
+    )
+    out["rank_ic_directional_hit_rate"] = shared_min(
+        f"rank_ic_directional_hit_rate_{raw_name}",
+        f"rank_ic_directional_hit_rate_{neutral_name}",
+    )
+    out["rank_ic_abs_mean"] = out["rank_ic_mean"].abs()
+    out["monthly_rank_ic_mean"] = signed_min_abs(
+        f"monthly_rank_ic_mean_{raw_name}",
+        f"monthly_rank_ic_mean_{neutral_name}",
+    )
+    out["monthly_rank_ic_positive_rate"] = shared_min(
+        f"monthly_rank_ic_positive_rate_{raw_name}",
+        f"monthly_rank_ic_positive_rate_{neutral_name}",
+    )
+    out["monthly_rank_ic_directional_hit_rate"] = shared_min(
+        f"monthly_rank_ic_directional_hit_rate_{raw_name}",
+        f"monthly_rank_ic_directional_hit_rate_{neutral_name}",
+    )
+    out["monthly_rank_ic_months"] = shared_min(
+        f"monthly_rank_ic_months_{raw_name}",
+        f"monthly_rank_ic_months_{neutral_name}",
+    )
+    out["monotonicity_mean"] = signed_min_abs(
+        f"monotonicity_mean_{raw_name}",
+        f"monotonicity_mean_{neutral_name}",
+    )
+    out["monotonicity_positive_rate"] = shared_min(
+        f"monotonicity_positive_rate_{raw_name}",
+        f"monotonicity_positive_rate_{neutral_name}",
+    )
+    out["top_bottom_spread_mean"] = signed_min_abs(
+        f"top_bottom_spread_mean_{raw_name}",
+        f"top_bottom_spread_mean_{neutral_name}",
+    )
+    out["top_bottom_spread_positive_rate"] = shared_min(
+        f"top_bottom_spread_positive_rate_{raw_name}",
+        f"top_bottom_spread_positive_rate_{neutral_name}",
+    )
+    out["rank_ic_ir_abs"] = out["rank_ic_ir"].abs()
+    out["ic_ir_abs"] = out["ic_ir"].abs()
+    out["segment_monthly_directional_hit_mean"] = shared_min(
+        f"segment_monthly_directional_hit_mean_{raw_name}",
+        f"segment_monthly_directional_hit_mean_{neutral_name}",
+    )
+    out["segment_monthly_directional_hit_min"] = shared_min(
+        f"segment_monthly_directional_hit_min_{raw_name}",
+        f"segment_monthly_directional_hit_min_{neutral_name}",
+    )
+    out["segment_rank_ic_mean_range"] = shared_max(
+        f"segment_rank_ic_mean_range_{raw_name}",
+        f"segment_rank_ic_mean_range_{neutral_name}",
+    )
+    out["segment_rank_ic_abs_max"] = shared_min(
+        f"segment_rank_ic_abs_max_{raw_name}",
+        f"segment_rank_ic_abs_max_{neutral_name}",
+    )
+    out["segment_rank_ic_abs_min"] = shared_min(
+        f"segment_rank_ic_abs_min_{raw_name}",
+        f"segment_rank_ic_abs_min_{neutral_name}",
+    )
+    out["neutral_retention_rank_ic_abs"] = np.where(
+        raw_rank_ic.abs() > 0.0,
+        neutral_rank_ic.abs() / raw_rank_ic.abs(),
+        np.nan,
+    )
+    out["neutral_retention_rank_ic_ir_abs"] = np.where(
+        raw_rank_ic_ir.abs() > 0.0,
+        neutral_rank_ic_ir.abs() / raw_rank_ic_ir.abs(),
+        np.nan,
+    )
+    out["robust_rank_ic_abs_ratio"] = np.where(
+        np.fmax(raw_rank_ic.abs(), neutral_rank_ic.abs()) > 0.0,
+        np.fmin(raw_rank_ic.abs(), neutral_rank_ic.abs())
+        / np.fmax(raw_rank_ic.abs(), neutral_rank_ic.abs()),
+        np.nan,
+    )
+    out["robust_rank_ic_ir_abs_ratio"] = np.where(
+        np.fmax(raw_rank_ic_ir.abs(), neutral_rank_ic_ir.abs()) > 0.0,
+        np.fmin(raw_rank_ic_ir.abs(), neutral_rank_ic_ir.abs())
+        / np.fmax(raw_rank_ic_ir.abs(), neutral_rank_ic_ir.abs()),
+        np.nan,
+    )
+    return out
+
+
 def _feature_prefix_priority(feature_name: str) -> int:
     if feature_name.startswith("TS_"):
         return 0

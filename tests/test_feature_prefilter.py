@@ -3,6 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.feature_prefilter import (
+    build_robust_feature_summary,
     prefilter_feature_summary,
     prune_correlated_features,
     prune_exact_duplicate_features,
@@ -184,3 +185,77 @@ def test_prune_exact_duplicate_features_keeps_higher_priority_representative() -
     assert kept["feature"].tolist() == ["CORR20"]
     assert dropped.iloc[0]["feature"] == "TEMP_corr_cv_20"
     assert dropped.iloc[0]["dropped_by"] == "CORR20"
+
+
+def test_build_robust_feature_summary_is_conservative_and_direction_aware() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "feature": "stable_pos",
+                "feature_group": "g",
+                "coverage_pct": 0.99,
+                "rank_ic_mean": 0.06,
+                "rank_ic_ir": 0.30,
+                "monthly_rank_ic_positive_rate": 0.70,
+                "monthly_rank_ic_directional_hit_rate": 0.70,
+                "monotonicity_mean": 0.20,
+                "segment_monthly_directional_hit_mean": 0.65,
+                "segment_rank_ic_mean_range": 0.08,
+            },
+            {
+                "feature": "flip_sign",
+                "feature_group": "g",
+                "coverage_pct": 0.98,
+                "rank_ic_mean": 0.05,
+                "rank_ic_ir": 0.25,
+                "monthly_rank_ic_positive_rate": 0.60,
+                "monthly_rank_ic_directional_hit_rate": 0.60,
+                "monotonicity_mean": 0.10,
+                "segment_monthly_directional_hit_mean": 0.60,
+                "segment_rank_ic_mean_range": 0.06,
+            },
+        ]
+    )
+    neutral = pd.DataFrame(
+        [
+            {
+                "feature": "stable_pos",
+                "feature_group": "g",
+                "coverage_pct": 0.95,
+                "rank_ic_mean": 0.03,
+                "rank_ic_ir": 0.18,
+                "monthly_rank_ic_positive_rate": 0.62,
+                "monthly_rank_ic_directional_hit_rate": 0.62,
+                "monotonicity_mean": 0.09,
+                "segment_monthly_directional_hit_mean": 0.58,
+                "segment_rank_ic_mean_range": 0.11,
+            },
+            {
+                "feature": "flip_sign",
+                "feature_group": "g",
+                "coverage_pct": 0.96,
+                "rank_ic_mean": -0.02,
+                "rank_ic_ir": -0.10,
+                "monthly_rank_ic_positive_rate": 0.40,
+                "monthly_rank_ic_directional_hit_rate": 0.60,
+                "monotonicity_mean": -0.03,
+                "segment_monthly_directional_hit_mean": 0.55,
+                "segment_rank_ic_mean_range": 0.07,
+            },
+        ]
+    )
+
+    robust = build_robust_feature_summary(raw, neutral).set_index("feature")
+
+    assert robust.at["stable_pos", "coverage_pct"] == 0.95
+    assert robust.at["stable_pos", "rank_ic_mean"] == 0.03
+    assert robust.at["stable_pos", "rank_ic_ir"] == 0.18
+    assert robust.at["stable_pos", "monthly_rank_ic_directional_hit_rate"] == 0.62
+    assert robust.at["stable_pos", "segment_rank_ic_mean_range"] == 0.11
+    assert bool(robust.at["stable_pos", "direction_consistent"]) is True
+    assert abs(float(robust.at["stable_pos", "neutral_retention_rank_ic_abs"]) - 0.5) < 1e-12
+
+    assert robust.at["flip_sign", "rank_ic_mean"] == 0.0
+    assert robust.at["flip_sign", "rank_ic_ir"] == 0.0
+    assert bool(robust.at["flip_sign", "direction_flip"]) is True
+    assert bool(robust.at["flip_sign", "direction_consistent"]) is False

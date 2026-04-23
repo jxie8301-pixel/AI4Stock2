@@ -1,0 +1,16 @@
+alpha: all_factors
+generation_space: full_factor_space
+factor_store_name: full_factor_space
+selected_columns:
+- TS_dividend_yield_minus_industry
+- TS_dividend_yield_ttm_minus_industry
+- TS_bp_minus_industry_bp
+- TS_stock_vs_industry_amplitude_ratio_20
+- TS_stock_vs_industry_amplitude_ratio_60
+- TS_stock_vs_industry_std_ratio_60
+- TS_stock_vs_industry_std_ratio_20
+- TS_downside_amihud_20
+- TS_stock_vs_industry_downside_amihud_ratio_60
+- TS_stock_vs_industry_amihud_ratio_20
+- TS_days_since_last_up_limit
+- TS_fi_ocfps_minus_eps_minus_industry

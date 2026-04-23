@@ -370,6 +370,23 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn("LGBM_amihud_20", profile["selected_columns"])
         self.assertNotIn("TEMP_corr_cv_20", profile["selected_columns"])
 
+    def test_core_v6_relative_alpha_profile_is_registered(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v6_relative_alpha_v1"},
+            }
+        )
+
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v6_relative_alpha_v1.yaml"))
+        self.assertEqual(profile["data_source"], "tushare")
+        self.assertEqual(len(profile["selected_columns"]), 12)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_minus_industry", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}bp_minus_industry_bp", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_amplitude_ratio_20", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_std_ratio_60", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}fi_ocfps_minus_eps_minus_industry", profile["selected_columns"])
+
     def test_known_exact_duplicate_groups_cover_core_overlaps(self):
         duplicate_groups = get_known_exact_duplicate_feature_groups()
 

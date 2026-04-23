@@ -29,6 +29,9 @@ profiles:
   core_v5_diag_prefilter_v2:
     path: configs/features/core_v5_diag_prefilter_v2.yaml
 
+  core_v6_relative_alpha_v1:
+    path: configs/features/core_v6_relative_alpha_v1.yaml
+
   core_v4_techlite_tushare_plus:
     extends: core_v4_techlite
     add_columns:

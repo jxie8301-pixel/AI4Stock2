@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
@@ -38,6 +39,7 @@ from src.single_factor_diagnostics import (
 class DiagnosticsBatchCase:
     name: str
     feature_profile: str
+    baseline_feature_profile: str | None
     diagnostic_label_space: str
     diagnostic_threshold: float
     output_dir: str | None
@@ -106,7 +108,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Case overrides in key=value form. "
             "Required keys: name, feature_profile. "
-            "Optional keys: diagnostic_label_space, diagnostic_threshold, output_dir, run_tag."
+            "Optional keys: baseline_feature_profile, diagnostic_label_space, "
+            "diagnostic_threshold, output_dir, run_tag."
         ),
     )
     parser.add_argument(
@@ -138,11 +141,21 @@ def _parse_cases(raw_cases: list[list[str]] | None) -> list[DiagnosticsBatchCase
         name = str(payload.get("name") or feature_profile).strip()
         if not name:
             raise ValueError("Each --case must resolve to a non-empty name")
+        baseline_feature_profile = (
+            payload.get("baseline_feature_profile")
+            or payload.get("compare_to_feature_profile")
+            or payload.get("baseline_profile")
+        )
         diagnostic_label_space = str(payload.get("diagnostic_label_space") or "raw_return").strip().lower()
         cases.append(
             DiagnosticsBatchCase(
                 name=name,
                 feature_profile=feature_profile,
+                baseline_feature_profile=(
+                    str(baseline_feature_profile).strip()
+                    if baseline_feature_profile and str(baseline_feature_profile).strip()
+                    else None
+                ),
                 diagnostic_label_space=diagnostic_label_space,
                 diagnostic_threshold=float(payload.get("diagnostic_threshold", 0.0)),
                 output_dir=(str(payload["output_dir"]).strip() if payload.get("output_dir") else None),
@@ -176,6 +189,111 @@ def _append_tsv_row(path: Path, row: list[Any]) -> None:
         writer.writerow(row)
 
 
+def _resolve_feature_profile_source_columns(
+    factor_store_meta: dict[str, Any],
+    cfg: dict[str, Any],
+    feature_profile: str,
+) -> list[str]:
+    case_cfg = deepcopy(cfg)
+    case_cfg.setdefault("features", {})
+    case_cfg["features"]["profile"] = feature_profile
+    _, source_columns = resolve_selected_feature_columns(factor_store_meta, case_cfg)
+    return list(dict.fromkeys(source_columns))
+
+
+def _resolve_incremental_feature_names(
+    feature_names: list[str],
+    baseline_feature_names: list[str] | None,
+) -> list[str]:
+    baseline_feature_set = set(baseline_feature_names or [])
+    return [feature_name for feature_name in feature_names if feature_name not in baseline_feature_set]
+
+
+def _filter_summary_for_features(summary: pd.DataFrame, feature_names: list[str]) -> pd.DataFrame:
+    if summary.empty:
+        return summary.copy()
+    if not feature_names:
+        return summary.iloc[0:0].copy()
+    feature_set = set(feature_names)
+    return summary.loc[summary["feature"].astype(str).isin(feature_set)].copy().reset_index(drop=True)
+
+
+def _count_abs_metric_ge(summary: pd.DataFrame, column: str, threshold: float) -> int:
+    if summary.empty or column not in summary.columns:
+        return 0
+    values = pd.to_numeric(summary[column], errors="coerce").abs()
+    return int((values >= threshold).sum())
+
+
+def _sort_top_factors(summary: pd.DataFrame, columns: list[str], ascending: list[bool], top_n: int) -> pd.DataFrame:
+    if summary.empty:
+        return summary.copy()
+    missing_columns = [column for column in columns if column not in summary.columns]
+    if missing_columns:
+        return summary.head(top_n).copy()
+    return summary.sort_values(columns, ascending=ascending, na_position="last").head(top_n)
+
+
+def _write_single_factor_subset_artifacts(
+    summary: pd.DataFrame,
+    *,
+    output_dir: str | Path,
+    prefix: str,
+    top_n: int,
+    segment_comparison: pd.DataFrame | None = None,
+    feature_names: list[str] | None = None,
+) -> dict[str, str]:
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    summary_path = output_path / f"single_factor_{prefix}_summary.csv"
+    top_abs_rankic_path = output_path / f"single_factor_{prefix}_top_abs_rankic.csv"
+    top_rankic_path = output_path / f"single_factor_{prefix}_top_rankic.csv"
+    top_icir_path = output_path / f"single_factor_{prefix}_top_rankic_ir.csv"
+
+    summary.to_csv(summary_path, index=False)
+    _sort_top_factors(summary, ["rank_ic_abs_mean", "coverage_pct"], [False, False], top_n).to_csv(
+        top_abs_rankic_path,
+        index=False,
+    )
+    _sort_top_factors(summary, ["rank_ic_mean", "coverage_pct"], [False, False], top_n).to_csv(
+        top_rankic_path,
+        index=False,
+    )
+    _sort_top_factors(summary, ["rank_ic_ir", "coverage_pct"], [False, False], top_n).to_csv(
+        top_icir_path,
+        index=False,
+    )
+
+    artifacts = {
+        f"{prefix}_summary_csv": str(summary_path),
+        f"{prefix}_top_abs_rankic_csv": str(top_abs_rankic_path),
+        f"{prefix}_top_rankic_csv": str(top_rankic_path),
+        f"{prefix}_top_rankic_ir_csv": str(top_icir_path),
+    }
+
+    if segment_comparison is not None and "feature" in segment_comparison.columns:
+        subset_segment_comparison = _filter_summary_for_features(segment_comparison, feature_names or [])
+        segment_comparison_path = output_path / f"single_factor_{prefix}_segment_comparison.csv"
+        subset_segment_comparison.to_csv(segment_comparison_path, index=False)
+        artifacts[f"{prefix}_segment_comparison_csv"] = str(segment_comparison_path)
+
+    return artifacts
+
+
+def _merge_artifacts_into_manifest(output_dir: str | Path, artifacts: dict[str, str]) -> None:
+    if not artifacts:
+        return
+    manifest_path = Path(output_dir) / "manifest.json"
+    if not manifest_path.exists():
+        return
+    with open(manifest_path, encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    manifest.setdefault("artifacts", {}).update(artifacts)
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2, ensure_ascii=False, default=str)
+
+
 def main() -> None:
     overall_started = perf_counter()
     parser = build_parser()
@@ -198,15 +316,26 @@ def main() -> None:
         [
             "case_name",
             "feature_profile",
+            "baseline_feature_profile",
             "diagnostic_label_space",
             "diagnostic_threshold",
             "feature_count",
+            "incremental_feature_count",
             "row_count",
             "top_feature",
             "top_rank_ic_mean",
+            "top_rank_ic_abs_mean",
             "top_rank_ic_ir",
             "top_monotonicity_mean",
             "top_monthly_directional_hit",
+            "incremental_top_feature",
+            "incremental_top_rank_ic_mean",
+            "incremental_top_rank_ic_abs_mean",
+            "incremental_top_rank_ic_ir",
+            "incremental_top_monotonicity_mean",
+            "incremental_top_monthly_directional_hit",
+            "incremental_n_abs_rankic_ge_0p03",
+            "incremental_n_abs_rankic_ge_0p05",
             "output_dir",
         ],
     )
@@ -215,32 +344,39 @@ def main() -> None:
         [
             "case_name",
             "feature_profile",
+            "baseline_feature_profile",
             "diagnostic_label_space",
             "diagnostic_threshold",
             "output_dir",
             "readme_path",
             "summary_csv",
+            "incremental_summary_csv",
             "segment_comparison_csv",
+            "incremental_segment_comparison_csv",
         ],
     )
 
     factor_store_dir = get_native_factor_store_dir(cfg)
     factor_store_meta = load_factor_store_metadata(factor_store_dir)
     case_feature_map: dict[str, list[str]] = {}
+    case_incremental_feature_map: dict[str, list[str]] = {}
     union_features: list[str] = []
     seen_union: set[str] = set()
     for case in cases:
         if bool(getattr(args, "all_features", False)):
             feature_names = list(factor_store_meta.get("feature_names", []))
         else:
-            case_cfg = deepcopy(cfg)
-            case_cfg.setdefault("features", {})
-            case_cfg["features"]["profile"] = case.feature_profile
-            _, source_columns = resolve_selected_feature_columns(factor_store_meta, case_cfg)
-            feature_names = list(dict.fromkeys(source_columns))
+            feature_names = _resolve_feature_profile_source_columns(factor_store_meta, cfg, case.feature_profile)
         if not feature_names:
             raise ValueError(f"Case '{case.name}' resolved no features")
+        baseline_feature_names = (
+            _resolve_feature_profile_source_columns(factor_store_meta, cfg, case.baseline_feature_profile)
+            if case.baseline_feature_profile
+            else []
+        )
+        incremental_feature_names = _resolve_incremental_feature_names(feature_names, baseline_feature_names)
         case_feature_map[case.name] = feature_names
+        case_incremental_feature_map[case.name] = incremental_feature_names
         for feature_name in feature_names:
             if feature_name not in seen_union:
                 union_features.append(feature_name)
@@ -287,6 +423,7 @@ def main() -> None:
     for idx, case in enumerate(cases, start=1):
         case_started = perf_counter()
         feature_names = case_feature_map[case.name]
+        incremental_feature_names = case_incremental_feature_map[case.name]
         label_values, valid_mask = label_cache[(case.diagnostic_label_space, float(case.diagnostic_threshold))]
         selected_columns = ["date", "symbol", *feature_names]
         case_frame = base_frame.loc[valid_mask, selected_columns].copy()
@@ -323,15 +460,14 @@ def main() -> None:
             label_column="label",
             quantile_bins=max(int(args.quantile_bins), 2),
         )
+        incremental_summary = _filter_summary_for_features(summary, incremental_feature_names)
 
-        case_args = deepcopy(args)
-        case_args.run_tag = case.run_tag or case.name
-        case_args.diagnostic_label_space = case.diagnostic_label_space
         output_dir = _resolve_case_output_dir(base_output_dir, case)
         metadata = {
             "data_source": cfg.get("data", {}).get("source", ""),
             "universe": cfg.get("universe", ""),
             "feature_profile": case.feature_profile,
+            "baseline_feature_profile": case.baseline_feature_profile or "",
             "factor_store_dir": factor_store_dir,
             "signal_horizon": signal_horizon,
             "period": args.period,
@@ -342,6 +478,8 @@ def main() -> None:
             "industry_neutral": bool(getattr(args, "industry_neutral", False)),
             "neutralized_feature_count": neutralized_feature_count,
             "feature_count": len(feature_names),
+            "incremental_feature_count": len(incremental_feature_names),
+            "incremental_features": incremental_feature_names,
             "row_count": len(case_frame),
             "quantile_bins": max(int(args.quantile_bins), 2),
             "segment_scheme": args.segment_scheme,
@@ -363,22 +501,44 @@ def main() -> None:
             segment_summaries=segment_summaries,
             detail_frames=detail_frames,
         )
+        incremental_artifacts = _write_single_factor_subset_artifacts(
+            incremental_summary,
+            output_dir=output_dir,
+            prefix="incremental",
+            top_n=max(int(args.top_n), 1),
+            segment_comparison=segment_comparison,
+            feature_names=incremental_feature_names,
+        )
+        artifacts.update(incremental_artifacts)
+        _merge_artifacts_into_manifest(output_dir, incremental_artifacts)
 
         top = summary.iloc[0] if not summary.empty else pd.Series(dtype=object)
+        incremental_top = incremental_summary.iloc[0] if not incremental_summary.empty else pd.Series(dtype=object)
         _append_tsv_row(
             summary_path,
             [
                 case.name,
                 case.feature_profile,
+                case.baseline_feature_profile or "",
                 case.diagnostic_label_space,
                 case.diagnostic_threshold,
                 len(feature_names),
+                len(incremental_feature_names),
                 len(case_frame),
                 top.get("feature", ""),
                 top.get("rank_ic_mean", ""),
+                top.get("rank_ic_abs_mean", ""),
                 top.get("rank_ic_ir", ""),
                 top.get("monotonicity_mean", ""),
                 top.get("monthly_rank_ic_directional_hit_rate", ""),
+                incremental_top.get("feature", ""),
+                incremental_top.get("rank_ic_mean", ""),
+                incremental_top.get("rank_ic_abs_mean", ""),
+                incremental_top.get("rank_ic_ir", ""),
+                incremental_top.get("monotonicity_mean", ""),
+                incremental_top.get("monthly_rank_ic_directional_hit_rate", ""),
+                _count_abs_metric_ge(incremental_summary, "rank_ic_mean", 0.03),
+                _count_abs_metric_ge(incremental_summary, "rank_ic_mean", 0.05),
                 str(output_dir),
             ],
         )
@@ -387,17 +547,21 @@ def main() -> None:
             [
                 case.name,
                 case.feature_profile,
+                case.baseline_feature_profile or "",
                 case.diagnostic_label_space,
                 case.diagnostic_threshold,
                 str(output_dir),
                 artifacts.get("readme_path", ""),
                 artifacts.get("summary_csv", ""),
+                artifacts.get("incremental_summary_csv", ""),
                 artifacts.get("segment_comparison_csv", ""),
+                artifacts.get("incremental_segment_comparison_csv", ""),
             ],
         )
         print(
             f"[{idx}/{len(cases)}] {case.name}: "
             f"rows={len(case_frame)}, features={len(feature_names)}, "
+            f"incremental_features={len(incremental_feature_names)}, "
             f"label_space={case.diagnostic_label_space}, "
             f"elapsed={perf_counter() - case_started:.2f}s"
         )

@@ -7,6 +7,8 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 
+from src.reference_baselines import REFERENCE_BASELINE_SPECS
+
 DEFAULT_BENCHMARK_MODE = "cross_section_mean"
 SUPPORTED_BENCHMARK_MODES = ("cross_section_mean", "file")
 SUPPORTED_BENCHMARK_VALUE_TYPES = ("return", "close")
@@ -150,7 +152,11 @@ def _attach_reference_metrics(
 
     monthly_reference = _resample_compound_returns(reference_returns, "ME")
     aligned_monthly_strategy, aligned_monthly_reference = monthly_ret.align(monthly_reference, join="inner")
-    monthly_beats = int((aligned_monthly_strategy > aligned_monthly_reference).sum()) if not aligned_monthly_strategy.empty else 0
+    monthly_beats = (
+        int((aligned_monthly_strategy > aligned_monthly_reference).sum())
+        if not aligned_monthly_strategy.empty
+        else 0
+    )
     monthly_total = int(len(aligned_monthly_strategy))
     result[f"months_beating_{prefix}_count"] = monthly_beats
     result[f"months_beating_{prefix}_total_count"] = monthly_total
@@ -481,32 +487,18 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         result["top_1_positive_rebalance_share"] = {"risk": rebalance_concentration["top_1_positive_share"]}
         result["top_3_positive_rebalance_share"] = {"risk": rebalance_concentration["top_3_positive_share"]}
         result["top_5_positive_rebalance_share"] = {"risk": rebalance_concentration["top_5_positive_share"]}
-    _attach_reference_metrics(
-        result,
-        report,
-        reference_column="avg_factor_baseline_return",
-        prefix="avg_factor_baseline",
-        display_name=str(report.attrs.get("avg_factor_baseline_name") or "Avg Unique Factor Baseline").strip()
-        or "Avg Unique Factor Baseline",
-        strategy_returns=returns,
-        ann_factor=ann_factor,
-        monthly_ret=monthly_ret,
-        rebalance_freq=rebalance_freq,
-    )
-    _attach_reference_metrics(
-        result,
-        report,
-        reference_column="sign_aligned_factor_baseline_return",
-        prefix="sign_aligned_factor_baseline",
-        display_name=str(
-            report.attrs.get("sign_aligned_factor_baseline_name") or "Sign-Aligned Factor Baseline"
-        ).strip()
-        or "Sign-Aligned Factor Baseline",
-        strategy_returns=returns,
-        ann_factor=ann_factor,
-        monthly_ret=monthly_ret,
-        rebalance_freq=rebalance_freq,
-    )
+    for prefix, default_name in REFERENCE_BASELINE_SPECS:
+        _attach_reference_metrics(
+            result,
+            report,
+            reference_column=f"{prefix}_return",
+            prefix=prefix,
+            display_name=str(report.attrs.get(f"{prefix}_name") or default_name).strip() or default_name,
+            strategy_returns=returns,
+            ann_factor=ann_factor,
+            monthly_ret=monthly_ret,
+            rebalance_freq=rebalance_freq,
+        )
     if "turnover" in report.columns:
         result["turnover_mean"] = {"risk": float(report["turnover"].astype(float).mean())}
     
@@ -560,28 +552,19 @@ def plot_cumulative_return(report: pd.DataFrame, save_path: str = None):
         cum_bench = (1 + report["bench"]).cumprod()
         bench_label = str(report.attrs.get("benchmark_name") or "Benchmark").strip() or "Benchmark"
         ax.plot(cum_bench.index, cum_bench.values, label=bench_label, linewidth=1.5, alpha=0.7)
-    if "avg_factor_baseline_return" in report.columns:
-        cum_avg_factor = (1 + report["avg_factor_baseline_return"]).cumprod()
-        avg_factor_label = str(report.attrs.get("avg_factor_baseline_name") or "Avg Unique Factor Baseline").strip()
+    baseline_styles = ("--", ":", "-.", (0, (3, 1, 1, 1)))
+    for style_idx, (prefix, default_name) in enumerate(REFERENCE_BASELINE_SPECS):
+        return_column = f"{prefix}_return"
+        if return_column not in report.columns:
+            continue
+        baseline_cum_return = (1 + report[return_column]).cumprod()
+        baseline_label = str(report.attrs.get(f"{prefix}_name") or default_name).strip() or default_name
         ax.plot(
-            cum_avg_factor.index,
-            cum_avg_factor.values,
-            label=avg_factor_label or "Avg Factor Baseline",
+            baseline_cum_return.index,
+            baseline_cum_return.values,
+            label=baseline_label,
             linewidth=1.5,
-            linestyle="--",
-            alpha=0.9,
-        )
-    if "sign_aligned_factor_baseline_return" in report.columns:
-        cum_sign_aligned = (1 + report["sign_aligned_factor_baseline_return"]).cumprod()
-        sign_aligned_label = str(
-            report.attrs.get("sign_aligned_factor_baseline_name") or "Sign-Aligned Factor Baseline"
-        ).strip()
-        ax.plot(
-            cum_sign_aligned.index,
-            cum_sign_aligned.values,
-            label=sign_aligned_label or "Sign-Aligned Factor Baseline",
-            linewidth=1.5,
-            linestyle=":",
+            linestyle=baseline_styles[style_idx % len(baseline_styles)],
             alpha=0.9,
         )
     ax.set_title("Cumulative Return")
@@ -651,17 +634,15 @@ def save_monthly_report(report: pd.DataFrame, save_path: str = None):
         df_monthly["monthly_excess_vs_benchmark"] = (
             df_monthly["monthly_return"] - df_monthly["benchmark_monthly_return"]
         )
-    if "avg_factor_baseline_return" in report.columns:
-        avg_factor_monthly = _resample_compound_returns(report["avg_factor_baseline_return"], "ME")
-        df_monthly["avg_factor_baseline_monthly_return"] = avg_factor_monthly.reindex(df_monthly.index)
-        df_monthly["monthly_excess_vs_avg_factor_baseline"] = (
-            df_monthly["monthly_return"] - df_monthly["avg_factor_baseline_monthly_return"]
-        )
-    if "sign_aligned_factor_baseline_return" in report.columns:
-        sign_aligned_monthly = _resample_compound_returns(report["sign_aligned_factor_baseline_return"], "ME")
-        df_monthly["sign_aligned_factor_baseline_monthly_return"] = sign_aligned_monthly.reindex(df_monthly.index)
-        df_monthly["monthly_excess_vs_sign_aligned_factor_baseline"] = (
-            df_monthly["monthly_return"] - df_monthly["sign_aligned_factor_baseline_monthly_return"]
+    for prefix, _ in REFERENCE_BASELINE_SPECS:
+        return_column = f"{prefix}_return"
+        if return_column not in report.columns:
+            continue
+        baseline_monthly = _resample_compound_returns(report[return_column], "ME")
+        monthly_column = f"{prefix}_monthly_return"
+        df_monthly[monthly_column] = baseline_monthly.reindex(df_monthly.index)
+        df_monthly[f"monthly_excess_vs_{prefix}"] = (
+            df_monthly["monthly_return"] - df_monthly[monthly_column]
         )
     df_monthly.index.name = "date"
 
@@ -688,6 +669,25 @@ def _format_period_label(index: pd.DatetimeIndex, freq: str) -> str:
     return f"{start.strftime('%Y-%m-%d')}~{end.strftime('%Y-%m-%d')}"
 
 
+def _build_reference_period_metrics(period_frame: pd.DataFrame, period_return: float) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    for prefix, _ in REFERENCE_BASELINE_SPECS:
+        return_column = f"{prefix}_return"
+        baseline_returns = (
+            period_frame[return_column].astype(float).dropna()
+            if return_column in period_frame.columns
+            else pd.Series(dtype=float)
+        )
+        baseline_return = (
+            float((1.0 + baseline_returns).prod() - 1.0)
+            if not baseline_returns.empty
+            else np.nan
+        )
+        metrics[return_column] = baseline_return
+        metrics[f"excess_vs_{prefix}"] = period_return - baseline_return if pd.notna(baseline_return) else np.nan
+    return metrics
+
+
 def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame:
     """Aggregate daily backtest report into period-level summary rows."""
     period_rows: list[dict[str, float | int | str]] = []
@@ -705,29 +705,9 @@ def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame
             if "bench" in period_frame.columns
             else pd.Series(dtype=float)
         )
-        avg_factor_baseline_returns = (
-            period_frame["avg_factor_baseline_return"].astype(float).dropna()
-            if "avg_factor_baseline_return" in period_frame.columns
-            else pd.Series(dtype=float)
-        )
-        sign_aligned_factor_baseline_returns = (
-            period_frame["sign_aligned_factor_baseline_return"].astype(float).dropna()
-            if "sign_aligned_factor_baseline_return" in period_frame.columns
-            else pd.Series(dtype=float)
-        )
         distribution_metrics = _compute_return_distribution_metrics(returns)
         period_return = float((1.0 + returns).prod() - 1.0)
         bench_return = float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan
-        avg_factor_baseline_return = (
-            float((1.0 + avg_factor_baseline_returns).prod() - 1.0)
-            if not avg_factor_baseline_returns.empty
-            else np.nan
-        )
-        sign_aligned_factor_baseline_return = (
-            float((1.0 + sign_aligned_factor_baseline_returns).prod() - 1.0)
-            if not sign_aligned_factor_baseline_returns.empty
-            else np.nan
-        )
         period_rows.append(
             {
                 "period": _format_period_label(pd.DatetimeIndex(period_frame.index), freq),
@@ -744,16 +724,7 @@ def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame
                 else np.nan,
                 "bench_return": bench_return,
                 "excess_vs_benchmark": period_return - bench_return if pd.notna(bench_return) else np.nan,
-                "avg_factor_baseline_return": avg_factor_baseline_return,
-                "excess_vs_avg_factor_baseline": (
-                    period_return - avg_factor_baseline_return if pd.notna(avg_factor_baseline_return) else np.nan
-                ),
-                "sign_aligned_factor_baseline_return": sign_aligned_factor_baseline_return,
-                "excess_vs_sign_aligned_factor_baseline": (
-                    period_return - sign_aligned_factor_baseline_return
-                    if pd.notna(sign_aligned_factor_baseline_return)
-                    else np.nan
-                ),
+                **_build_reference_period_metrics(period_frame, period_return),
                 "win_days": int(distribution_metrics["win_days"]),
                 "loss_days": int(distribution_metrics["loss_days"]),
                 "flat_days": int(distribution_metrics["flat_days"]),
@@ -786,29 +757,9 @@ def build_rebalance_period_summary(report: pd.DataFrame, rebalance_freq: int) ->
             if "bench" in period_frame.columns
             else pd.Series(dtype=float)
         )
-        avg_factor_baseline_returns = (
-            period_frame["avg_factor_baseline_return"].astype(float).dropna()
-            if "avg_factor_baseline_return" in period_frame.columns
-            else pd.Series(dtype=float)
-        )
-        sign_aligned_factor_baseline_returns = (
-            period_frame["sign_aligned_factor_baseline_return"].astype(float).dropna()
-            if "sign_aligned_factor_baseline_return" in period_frame.columns
-            else pd.Series(dtype=float)
-        )
         distribution_metrics = _compute_return_distribution_metrics(returns)
         period_return = float((1.0 + returns).prod() - 1.0)
         bench_return = float((1.0 + bench_returns).prod() - 1.0) if not bench_returns.empty else np.nan
-        avg_factor_baseline_return = (
-            float((1.0 + avg_factor_baseline_returns).prod() - 1.0)
-            if not avg_factor_baseline_returns.empty
-            else np.nan
-        )
-        sign_aligned_factor_baseline_return = (
-            float((1.0 + sign_aligned_factor_baseline_returns).prod() - 1.0)
-            if not sign_aligned_factor_baseline_returns.empty
-            else np.nan
-        )
         period_rows.append(
             {
                 "period": f"rebalance_{idx:03d}",
@@ -825,16 +776,7 @@ def build_rebalance_period_summary(report: pd.DataFrame, rebalance_freq: int) ->
                 else np.nan,
                 "bench_return": bench_return,
                 "excess_vs_benchmark": period_return - bench_return if pd.notna(bench_return) else np.nan,
-                "avg_factor_baseline_return": avg_factor_baseline_return,
-                "excess_vs_avg_factor_baseline": (
-                    period_return - avg_factor_baseline_return if pd.notna(avg_factor_baseline_return) else np.nan
-                ),
-                "sign_aligned_factor_baseline_return": sign_aligned_factor_baseline_return,
-                "excess_vs_sign_aligned_factor_baseline": (
-                    period_return - sign_aligned_factor_baseline_return
-                    if pd.notna(sign_aligned_factor_baseline_return)
-                    else np.nan
-                ),
+                **_build_reference_period_metrics(period_frame, period_return),
                 "win_days": int(distribution_metrics["win_days"]),
                 "loss_days": int(distribution_metrics["loss_days"]),
                 "flat_days": int(distribution_metrics["flat_days"]),
@@ -976,24 +918,27 @@ def print_metrics(
                 "Excess IR",
                 _format_number(_extract_metric(portfolio_metrics, "excess_information_ratio")),
             )
-        avg_factor_baseline_name = portfolio_metrics.get("avg_factor_baseline_name")
-        if avg_factor_baseline_name:
-            _print_metric_line("Avg baseline", str(avg_factor_baseline_name))
+        for prefix, default_name in REFERENCE_BASELINE_SPECS:
+            baseline_name = portfolio_metrics.get(f"{prefix}_name")
+            if not baseline_name:
+                continue
+            display_name = str(baseline_name or default_name)
+            _print_metric_line("Baseline", display_name)
             _print_metric_line(
-                "Months > avg base",
-                str(portfolio_metrics.get("months_beating_avg_factor_baseline_summary") or "n/a"),
+                "Months > base",
+                str(portfolio_metrics.get(f"months_beating_{prefix}_summary") or "n/a"),
             )
             _print_metric_line(
-                "Rebal > avg base",
-                str(portfolio_metrics.get("rebalances_beating_avg_factor_baseline_summary") or "n/a"),
+                "Rebal > base",
+                str(portfolio_metrics.get(f"rebalances_beating_{prefix}_summary") or "n/a"),
             )
             _print_metric_line(
-                "Excess vs avg",
-                _format_pct(_extract_metric(portfolio_metrics, "avg_factor_baseline_excess_annualized_return")),
+                "Excess vs base",
+                _format_pct(_extract_metric(portfolio_metrics, f"{prefix}_excess_annualized_return")),
             )
             _print_metric_line(
-                "Excess IR vs avg",
-                _format_number(_extract_metric(portfolio_metrics, "avg_factor_baseline_excess_information_ratio")),
+                "Excess IR base",
+                _format_number(_extract_metric(portfolio_metrics, f"{prefix}_excess_information_ratio")),
             )
         print()
         _print_metric_line("Avg win", _format_pct(_extract_metric(portfolio_metrics, "avg_win")))

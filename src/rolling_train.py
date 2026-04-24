@@ -25,6 +25,8 @@ from src.model_config import get_lgbm_config
 from src.evaluate import build_benchmark_series
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
+    build_rank_average_factor_baseline_predictions,
+    build_rank_ic_weighted_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
 )
 from src.rolling_runtime import build_label_series, build_prediction_metadata
@@ -653,6 +655,8 @@ def generate_prediction_bundle(
     label_series, backtest_label_series = build_label_series(runtime_data)
     avg_factor_baseline_predictions = build_average_factor_baseline_predictions(runtime_data)
     sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(runtime_data)
+    rank_avg_factor_baseline_predictions = build_rank_average_factor_baseline_predictions(runtime_data)
+    rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(runtime_data)
     return PredictionBundle(
         final_predictions=final_predictions,
         label_series=label_series,
@@ -671,4 +675,6 @@ def generate_prediction_bundle(
         ),
         feature_importance_frames=feature_importance_frames,
         training_summary_records=training_summary_records,
+        rank_avg_factor_baseline_predictions=rank_avg_factor_baseline_predictions,
+        rank_ic_weighted_factor_baseline_predictions=rank_ic_weighted_factor_baseline_predictions,
     )

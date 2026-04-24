@@ -20,6 +20,8 @@ from src.rolling_artifacts import (
 )
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions as _build_average_factor_baseline_predictions,
+    build_rank_average_factor_baseline_predictions as _build_rank_average_factor_baseline_predictions,
+    build_rank_ic_weighted_factor_baseline_predictions as _build_rank_ic_weighted_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions as _build_sign_aligned_factor_baseline_predictions,
 )
 from src.rolling_evaluate import evaluate_prediction_bundle

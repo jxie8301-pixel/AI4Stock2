@@ -13,6 +13,8 @@ from src.rolling_types import (
     PREDICTION_METADATA_FILENAME,
     PREDICTIONS_FILENAME,
     BACKTEST_LABELS_FILENAME,
+    RANK_AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME,
+    RANK_IC_WEIGHTED_FACTOR_BASELINE_PREDICTIONS_FILENAME,
     SIGNAL_LABELS_FILENAME,
     SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME,
     TRAINING_SUMMARY_FILENAME,
@@ -89,6 +91,16 @@ def write_prediction_bundle(bundle: PredictionBundle, artifact_dir: Path) -> Non
             artifact_dir / SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME,
             index=False,
         )
+    if bundle.rank_avg_factor_baseline_predictions is not None:
+        _series_to_frame(bundle.rank_avg_factor_baseline_predictions, "prediction").to_parquet(
+            artifact_dir / RANK_AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME,
+            index=False,
+        )
+    if bundle.rank_ic_weighted_factor_baseline_predictions is not None:
+        _series_to_frame(bundle.rank_ic_weighted_factor_baseline_predictions, "prediction").to_parquet(
+            artifact_dir / RANK_IC_WEIGHTED_FACTOR_BASELINE_PREDICTIONS_FILENAME,
+            index=False,
+        )
     if bundle.training_summary_records:
         pd.DataFrame(bundle.training_summary_records).to_csv(
             artifact_dir / TRAINING_SUMMARY_FILENAME,
@@ -124,6 +136,8 @@ def load_prediction_bundle(raw_path: str | Path) -> PredictionBundle:
     backtest_label_series = _frame_to_series(pd.read_parquet(artifact_dir / BACKTEST_LABELS_FILENAME), "label")
     avg_factor_path = artifact_dir / AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME
     sign_aligned_factor_path = artifact_dir / SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME
+    rank_avg_factor_path = artifact_dir / RANK_AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME
+    rank_ic_weighted_factor_path = artifact_dir / RANK_IC_WEIGHTED_FACTOR_BASELINE_PREDICTIONS_FILENAME
     avg_factor_baseline_predictions = (
         _frame_to_series(pd.read_parquet(avg_factor_path), "prediction")
         if avg_factor_path.exists()
@@ -132,6 +146,16 @@ def load_prediction_bundle(raw_path: str | Path) -> PredictionBundle:
     sign_aligned_factor_baseline_predictions = (
         _frame_to_series(pd.read_parquet(sign_aligned_factor_path), "prediction")
         if sign_aligned_factor_path.exists()
+        else None
+    )
+    rank_avg_factor_baseline_predictions = (
+        _frame_to_series(pd.read_parquet(rank_avg_factor_path), "prediction")
+        if rank_avg_factor_path.exists()
+        else None
+    )
+    rank_ic_weighted_factor_baseline_predictions = (
+        _frame_to_series(pd.read_parquet(rank_ic_weighted_factor_path), "prediction")
+        if rank_ic_weighted_factor_path.exists()
         else None
     )
     training_summary_path = artifact_dir / TRAINING_SUMMARY_FILENAME
@@ -150,4 +174,6 @@ def load_prediction_bundle(raw_path: str | Path) -> PredictionBundle:
         metadata=metadata,
         feature_importance_frames=[],
         training_summary_records=training_summary_records,
+        rank_avg_factor_baseline_predictions=rank_avg_factor_baseline_predictions,
+        rank_ic_weighted_factor_baseline_predictions=rank_ic_weighted_factor_baseline_predictions,
     )

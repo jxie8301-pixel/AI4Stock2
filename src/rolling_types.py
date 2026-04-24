@@ -16,6 +16,8 @@ SIGNAL_LABELS_FILENAME = "signal_labels.parquet"
 BACKTEST_LABELS_FILENAME = "backtest_labels.parquet"
 AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME = "avg_factor_baseline_predictions.parquet"
 SIGN_ALIGNED_FACTOR_BASELINE_PREDICTIONS_FILENAME = "sign_aligned_factor_baseline_predictions.parquet"
+RANK_AVG_FACTOR_BASELINE_PREDICTIONS_FILENAME = "rank_avg_factor_baseline_predictions.parquet"
+RANK_IC_WEIGHTED_FACTOR_BASELINE_PREDICTIONS_FILENAME = "rank_ic_weighted_factor_baseline_predictions.parquet"
 PREDICTION_METADATA_FILENAME = "metadata.json"
 TRAINING_SUMMARY_FILENAME = "training_summary.csv"
 
@@ -57,3 +59,5 @@ class PredictionBundle:
     metadata: dict[str, Any]
     feature_importance_frames: list[pd.DataFrame]
     training_summary_records: list[dict[str, Any]]
+    rank_avg_factor_baseline_predictions: pd.Series | None = None
+    rank_ic_weighted_factor_baseline_predictions: pd.Series | None = None

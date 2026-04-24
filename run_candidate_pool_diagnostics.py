@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 
 from src.candidate_profiles import build_candidate_profiles, flatten_candidate_profiles, to_jsonable
+from src.reference_baselines import CORE_REFERENCE_BASELINE_PREFIXES, reference_baseline_summary_fields
 
 
 PORTFOLIO_KEYS = [
@@ -26,6 +27,11 @@ PORTFOLIO_KEYS = [
     "top_1_positive_month_share",
     "top_3_positive_month_share",
     "top_5_positive_month_share",
+    *[
+        field
+        for prefix in CORE_REFERENCE_BASELINE_PREFIXES
+        for field in reference_baseline_summary_fields(prefix)
+    ],
 ]
 
 TRAINING_SIGNAL_COLUMNS = [
@@ -436,6 +442,19 @@ def write_readme(
                 "excess_annualized_return",
                 "excess_information_ratio",
                 "monthly_win_rate",
+            ],
+        ),
+        "",
+        "## Reference Baseline Edges",
+        "",
+        *_markdown_table(
+            portfolio,
+            [
+                "run",
+                "rank_avg_factor_baseline_excess_annualized_return",
+                "rebalances_beating_rank_avg_factor_baseline_pct",
+                "rank_ic_weighted_factor_baseline_excess_annualized_return",
+                "rebalances_beating_rank_ic_weighted_factor_baseline_pct",
             ],
         ),
         "",

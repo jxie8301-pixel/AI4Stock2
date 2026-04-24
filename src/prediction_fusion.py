@@ -129,4 +129,6 @@ def fuse_prediction_bundle(
         metadata=metadata,
         feature_importance_frames=primary_bundle.feature_importance_frames,
         training_summary_records=primary_bundle.training_summary_records,
+        rank_avg_factor_baseline_predictions=primary_bundle.rank_avg_factor_baseline_predictions,
+        rank_ic_weighted_factor_baseline_predictions=primary_bundle.rank_ic_weighted_factor_baseline_predictions,
     )

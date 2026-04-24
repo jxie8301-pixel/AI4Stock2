@@ -15,6 +15,7 @@ import yaml
 
 from src.data_source import resolve_data_source_name
 from src.label_utils import DEFAULT_SIGNAL_HORIZON, resolve_signal_horizon
+from src.reference_baselines import REFERENCE_BASELINE_PREFIXES, reference_baseline_summary_fields
 
 
 SUMMARY_FIELDS = [
@@ -76,12 +77,11 @@ SUMMARY_FIELDS = [
     "top_5_positive_rebalance_share",
     "payoff_ratio",
     "profit_factor",
-    "avg_factor_baseline_excess_annualized_return",
-    "avg_factor_baseline_excess_information_ratio",
-    "months_beating_avg_factor_baseline_pct",
-    "months_beating_avg_factor_baseline_summary",
-    "rebalances_beating_avg_factor_baseline_pct",
-    "rebalances_beating_avg_factor_baseline_summary",
+    *[
+        field
+        for prefix in REFERENCE_BASELINE_PREFIXES
+        for field in reference_baseline_summary_fields(prefix)
+    ],
     "portfolio_annualized_return",
     "portfolio_sharpe_ratio",
     "portfolio_information_ratio",
@@ -143,6 +143,30 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _flatten_reference_baseline_metrics(portfolio_metrics: dict) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for prefix in REFERENCE_BASELINE_PREFIXES:
+        flattened[f"{prefix}_excess_annualized_return"] = _safe_float(
+            portfolio_metrics.get(f"{prefix}_excess_annualized_return", {}).get("risk")
+        )
+        flattened[f"{prefix}_excess_information_ratio"] = _safe_float(
+            portfolio_metrics.get(f"{prefix}_excess_information_ratio", {}).get("risk")
+        )
+        flattened[f"months_beating_{prefix}_pct"] = _safe_float(
+            portfolio_metrics.get(f"months_beating_{prefix}_pct", {}).get("risk")
+        )
+        flattened[f"months_beating_{prefix}_summary"] = str(
+            portfolio_metrics.get(f"months_beating_{prefix}_summary") or ""
+        )
+        flattened[f"rebalances_beating_{prefix}_pct"] = _safe_float(
+            portfolio_metrics.get(f"rebalances_beating_{prefix}_pct", {}).get("risk")
+        )
+        flattened[f"rebalances_beating_{prefix}_summary"] = str(
+            portfolio_metrics.get(f"rebalances_beating_{prefix}_summary") or ""
+        )
+    return flattened
 
 
 def resolve_rebalance_freq(cfg: dict, args) -> int:
@@ -403,24 +427,7 @@ def flatten_metrics(signal_metrics: dict | None, portfolio_metrics: dict | None)
         "profit_factor": _safe_float(
             portfolio_metrics.get("profit_factor", {}).get("risk")
         ),
-        "avg_factor_baseline_excess_annualized_return": _safe_float(
-            portfolio_metrics.get("avg_factor_baseline_excess_annualized_return", {}).get("risk")
-        ),
-        "avg_factor_baseline_excess_information_ratio": _safe_float(
-            portfolio_metrics.get("avg_factor_baseline_excess_information_ratio", {}).get("risk")
-        ),
-        "months_beating_avg_factor_baseline_pct": _safe_float(
-            portfolio_metrics.get("months_beating_avg_factor_baseline_pct", {}).get("risk")
-        ),
-        "months_beating_avg_factor_baseline_summary": str(
-            portfolio_metrics.get("months_beating_avg_factor_baseline_summary") or ""
-        ),
-        "rebalances_beating_avg_factor_baseline_pct": _safe_float(
-            portfolio_metrics.get("rebalances_beating_avg_factor_baseline_pct", {}).get("risk")
-        ),
-        "rebalances_beating_avg_factor_baseline_summary": str(
-            portfolio_metrics.get("rebalances_beating_avg_factor_baseline_summary") or ""
-        ),
+        **_flatten_reference_baseline_metrics(portfolio_metrics),
         "portfolio_annualized_return": _safe_float(
             portfolio_metrics.get("annualized_return", {}).get("risk")
         ),

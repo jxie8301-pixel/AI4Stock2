@@ -36,6 +36,8 @@ class RunNativeRollingTest(unittest.TestCase):
                     "best_valid_daily_rank_ic": 0.34,
                 }
             ],
+            rank_avg_factor_baseline_predictions=pd.Series([0.7, 0.6], index=index, name="prediction"),
+            rank_ic_weighted_factor_baseline_predictions=pd.Series([0.5, 0.4], index=index, name="prediction"),
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -54,6 +56,16 @@ class RunNativeRollingTest(unittest.TestCase):
         pd.testing.assert_series_equal(
             loaded.sign_aligned_factor_baseline_predictions,
             bundle.sign_aligned_factor_baseline_predictions,
+            check_names=False,
+        )
+        pd.testing.assert_series_equal(
+            loaded.rank_avg_factor_baseline_predictions,
+            bundle.rank_avg_factor_baseline_predictions,
+            check_names=False,
+        )
+        pd.testing.assert_series_equal(
+            loaded.rank_ic_weighted_factor_baseline_predictions,
+            bundle.rank_ic_weighted_factor_baseline_predictions,
             check_names=False,
         )
         self.assertEqual(loaded.selected_feature_names, ["f1", "f2"])
@@ -126,6 +138,79 @@ class RunNativeRollingTest(unittest.TestCase):
         preds = run_native_rolling._build_sign_aligned_factor_baseline_predictions(runtime_data)
         values = preds.to_numpy(dtype=float)
         self.assertGreater(values[0], values[1])
+
+    def test_rank_average_factor_baseline_uses_cross_sectional_rank_zscores(self):
+        dates = pd.to_datetime(["2024-01-02"] * 3)
+        runtime_data = run_native_rolling.RollingRuntimeData(
+            factor_frame=pd.DataFrame(
+                {
+                    "date": dates,
+                    "symbol": ["A", "B", "C"],
+                    "f1": [1.0, 2.0, 3.0],
+                    "f1__rep2": [1.0, 2.0, 3.0],
+                    "f2": [10.0, 20.0, 30.0],
+                }
+            ),
+            dt_index=pd.Series(dates),
+            y=np.array([0.1, 0.2, 0.3], dtype=np.float32),
+            backtest_y=np.array([0.01, 0.02, 0.03], dtype=np.float32),
+            full_calendar=pd.Series(pd.to_datetime(["2024-01-02"])),
+            test_start=pd.Timestamp("2024-01-02"),
+            test_end=pd.Timestamp("2024-01-02"),
+            test_calendar=pd.Series(pd.to_datetime(["2024-01-02"])),
+            selected_feature_names=["f1", "f1__rep2", "f2"],
+            selected_feature_sources=["f1", "f1", "f2"],
+            finite_feature_mask=np.array([True] * 3),
+            lookback=20,
+            batch_size=3,
+        )
+
+        preds = run_native_rolling._build_rank_average_factor_baseline_predictions(runtime_data)
+
+        expected = pd.Series(
+            [-1.0, 0.0, 1.0],
+            index=pd.MultiIndex.from_tuples(
+                [
+                    (pd.Timestamp("2024-01-02"), "A"),
+                    (pd.Timestamp("2024-01-02"), "B"),
+                    (pd.Timestamp("2024-01-02"), "C"),
+                ],
+                names=["datetime", "instrument"],
+            ),
+            name="prediction",
+        )
+        pd.testing.assert_series_equal(preds, expected)
+
+    def test_rank_ic_weighted_factor_baseline_uses_train_rank_ic_signs(self):
+        dates = pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3 + ["2024-01-03"] * 3)
+        runtime_data = run_native_rolling.RollingRuntimeData(
+            factor_frame=pd.DataFrame(
+                {
+                    "date": dates,
+                    "symbol": ["A", "B", "C"] * 3,
+                    "good": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
+                    "bad": [3.0, 2.0, 1.0, 3.0, 2.0, 1.0, 1.0, 2.0, 3.0],
+                }
+            ),
+            dt_index=pd.Series(dates),
+            y=np.array([0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            backtest_y=np.zeros(9, dtype=np.float32),
+            full_calendar=pd.Series(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])),
+            test_start=pd.Timestamp("2024-01-03"),
+            test_end=pd.Timestamp("2024-01-03"),
+            test_calendar=pd.Series(pd.to_datetime(["2024-01-03"])),
+            selected_feature_names=["good", "bad"],
+            selected_feature_sources=["good", "bad"],
+            finite_feature_mask=np.array([True] * 9),
+            lookback=20,
+            batch_size=3,
+        )
+
+        preds = run_native_rolling._build_rank_ic_weighted_factor_baseline_predictions(runtime_data)
+
+        values = preds.to_numpy(dtype=float)
+        self.assertGreater(values[0], values[1])
+        self.assertGreater(values[1], values[2])
 
     def test_resolve_prediction_artifact_dir_accepts_parent_run_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -39,6 +39,18 @@ def _make_run_dir(tmp_path: Path) -> Path:
             "monthly_win_rate": {"risk": 0.75},
             "rebalance_win_rate": {"risk": 0.67},
             "turnover_mean": {"risk": 0.04},
+            "rank_avg_factor_baseline_excess_annualized_return": {"risk": 0.12},
+            "rank_avg_factor_baseline_excess_information_ratio": {"risk": 1.1},
+            "months_beating_rank_avg_factor_baseline_pct": {"risk": 0.62},
+            "months_beating_rank_avg_factor_baseline_summary": "8 / 12 (66.67%)",
+            "rebalances_beating_rank_avg_factor_baseline_pct": {"risk": 0.58},
+            "rebalances_beating_rank_avg_factor_baseline_summary": "7 / 12 (58.33%)",
+            "rank_ic_weighted_factor_baseline_excess_annualized_return": {"risk": 0.20},
+            "rank_ic_weighted_factor_baseline_excess_information_ratio": {"risk": 1.4},
+            "months_beating_rank_ic_weighted_factor_baseline_pct": {"risk": 0.75},
+            "months_beating_rank_ic_weighted_factor_baseline_summary": "9 / 12 (75.00%)",
+            "rebalances_beating_rank_ic_weighted_factor_baseline_pct": {"risk": 0.67},
+            "rebalances_beating_rank_ic_weighted_factor_baseline_summary": "8 / 12 (66.67%)",
         },
     )
     monthly_rows = []
@@ -115,6 +127,10 @@ def test_build_candidate_profile_marks_calibrated_ranker(tmp_path: Path) -> None
     assert profile["gate_summary"]["failed_gates"] == []
     assert flat["best_bucket"] == 1
     assert flat["top_bucket_label_rank"] == 1
+    assert profile["promotion_gates"]["beats_rank_avg_factor_baseline"]["passed"]
+    assert profile["promotion_gates"]["beats_rank_ic_weighted_factor_baseline"]["passed"]
+    assert flat["rank_avg_factor_baseline_rebalances_beating_pct"] == 0.58
+    assert flat["rank_ic_weighted_factor_baseline_excess_annualized_return"] == 0.20
     assert flat["validation_high_low_return_spread"] > 0.05
     assert flat["strong_years"] == "2024"
     json.dumps(to_jsonable(profile))

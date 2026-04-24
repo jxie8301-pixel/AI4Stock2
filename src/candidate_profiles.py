@@ -10,6 +10,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from src.reference_baselines import CORE_REFERENCE_BASELINE_PREFIXES, REFERENCE_BASELINE_PREFIXES
+
 
 PORTFOLIO_PROFILE_KEYS = [
     "annualized_return",
@@ -22,6 +24,15 @@ PORTFOLIO_PROFILE_KEYS = [
     "monthly_win_rate",
     "rebalance_win_rate",
     "turnover_mean",
+]
+
+REFERENCE_BASELINE_PROFILE_FIELDS = [
+    "excess_annualized_return",
+    "excess_information_ratio",
+    "months_beating_pct",
+    "months_beating_summary",
+    "rebalances_beating_pct",
+    "rebalances_beating_summary",
 ]
 
 VALIDATION_SIGNAL_METRICS = [
@@ -45,6 +56,10 @@ class CandidateProfileThresholds:
     max_calibrated_top_bucket_rank: int = 2
     min_validation_high_low_return_spread: float = 0.01
     min_validation_high_bin_win_rate: float = 0.60
+    min_excess_annualized_vs_rank_avg_baseline: float = 0.0
+    min_rebalance_win_vs_rank_avg_baseline: float = 0.55
+    min_excess_annualized_vs_rank_ic_baseline: float = 0.0
+    min_rebalance_win_vs_rank_ic_baseline: float = 0.55
 
 
 def read_csv_artifact(run_dir: Path, filename: str) -> pd.DataFrame:
@@ -68,6 +83,29 @@ def metric_value(metrics: dict[str, Any], key: str) -> float | None:
     if value is None or pd.isna(value):
         return None
     return float(value)
+
+
+def metric_text(metrics: dict[str, Any], key: str) -> str | None:
+    value = metrics.get(key)
+    if value is None:
+        return None
+    return str(value)
+
+
+def summarize_reference_baselines(metrics: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for prefix in REFERENCE_BASELINE_PREFIXES:
+        baseline = {
+            "excess_annualized_return": metric_value(metrics, f"{prefix}_excess_annualized_return"),
+            "excess_information_ratio": metric_value(metrics, f"{prefix}_excess_information_ratio"),
+            "months_beating_pct": metric_value(metrics, f"months_beating_{prefix}_pct"),
+            "months_beating_summary": metric_text(metrics, f"months_beating_{prefix}_summary"),
+            "rebalances_beating_pct": metric_value(metrics, f"rebalances_beating_{prefix}_pct"),
+            "rebalances_beating_summary": metric_text(metrics, f"rebalances_beating_{prefix}_summary"),
+        }
+        if any(value is not None for value in baseline.values()):
+            out[prefix] = baseline
+    return out
 
 
 def feature_family(feature: str) -> str:
@@ -325,6 +363,7 @@ def summarize_validation_edges(validation_bins: list[dict[str, Any]]) -> dict[st
 def build_promotion_gates(
     *,
     portfolio: dict[str, Any],
+    reference_baselines: dict[str, dict[str, Any]],
     concentration: dict[str, Any],
     overall_bucket: dict[str, Any],
     yearly_buckets: list[dict[str, Any]],
@@ -389,12 +428,49 @@ def build_promotion_gates(
             "high_positive_rebalance_rate": valid_edge.get("high_positive_rebalance_rate"),
         },
     }
+    core_baseline_thresholds = {
+        "rank_avg_factor_baseline": {
+            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_rank_avg_baseline,
+            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_rank_avg_baseline,
+        },
+        "rank_ic_weighted_factor_baseline": {
+            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_rank_ic_baseline,
+            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_rank_ic_baseline,
+        },
+    }
+    for prefix in CORE_REFERENCE_BASELINE_PREFIXES:
+        baseline = reference_baselines.get(prefix)
+        if not baseline:
+            continue
+        threshold = core_baseline_thresholds[prefix]
+        excess_annualized_return = baseline.get("excess_annualized_return")
+        rebalances_beating_pct = baseline.get("rebalances_beating_pct")
+        gates[f"beats_{prefix}"] = {
+            "passed": bool(
+                excess_annualized_return is not None
+                and rebalances_beating_pct is not None
+                and float(excess_annualized_return) >= threshold["min_excess_annualized_return"]
+                and float(rebalances_beating_pct) >= threshold["min_rebalances_beating_pct"]
+            ),
+            "excess_annualized_return": excess_annualized_return,
+            "minimum_excess_annualized_return": threshold["min_excess_annualized_return"],
+            "rebalances_beating_pct": rebalances_beating_pct,
+            "minimum_rebalances_beating_pct": threshold["min_rebalances_beating_pct"],
+            "rebalances_beating_summary": baseline.get("rebalances_beating_summary"),
+        }
     return gates
 
 
 def infer_candidate_role(gates: dict[str, dict[str, Any]]) -> str:
     if not gates["return_quality"]["passed"]:
         return "research_archive"
+    baseline_gates = [
+        gate
+        for name, gate in gates.items()
+        if name.startswith("beats_") and name.endswith("_factor_baseline")
+    ]
+    if baseline_gates and not all(gate["passed"] for gate in baseline_gates):
+        return "portfolio_candidate_requires_router"
     if gates["bucket_calibrated_for_sizing"]["passed"] and gates["validation_metric_supports_risk_gate"]["passed"]:
         return "ranker_and_sizer"
     if gates["bucket_separates_bad_tail"]["passed"] and gates["validation_metric_supports_risk_gate"]["passed"]:
@@ -420,6 +496,7 @@ def build_candidate_profile(
     yearly_bucket = read_csv_artifact(run_dir, "native_score_bucket_yearly_report.csv")
 
     portfolio = {key: metric_value(metrics, key) for key in PORTFOLIO_PROFILE_KEYS}
+    reference_baselines = summarize_reference_baselines(metrics)
     yearly_path = summarize_yearly_path(monthly)
     concentration = summarize_concentration(monthly)
     overall_bucket = bucket_shape(bucket, top_bucket=top_bucket, middle_buckets=middle_buckets)
@@ -431,6 +508,7 @@ def build_candidate_profile(
     validation_edges = summarize_validation_edges(validation_bins)
     promotion_gates = build_promotion_gates(
         portfolio=portfolio,
+        reference_baselines=reference_baselines,
         concentration=concentration,
         overall_bucket=overall_bucket,
         yearly_buckets=yearly_buckets,
@@ -454,6 +532,7 @@ def build_candidate_profile(
         "run_dir": str(run_dir),
         "candidate_role": infer_candidate_role(promotion_gates),
         "portfolio": portfolio,
+        "reference_baselines": reference_baselines,
         "regime_profile": {
             "strong_years": strong_years,
             "weak_years": weak_years,
@@ -490,8 +569,18 @@ def build_candidate_profile(
     }
 
 
+def _flatten_reference_baselines(reference_baselines: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for prefix in REFERENCE_BASELINE_PREFIXES:
+        baseline = reference_baselines.get(prefix, {})
+        for field in REFERENCE_BASELINE_PROFILE_FIELDS:
+            flattened[f"{prefix}_{field}"] = baseline.get(field)
+    return flattened
+
+
 def flatten_candidate_profile(profile: dict[str, Any]) -> dict[str, Any]:
     portfolio = profile["portfolio"]
+    reference_baselines = profile.get("reference_baselines", {})
     overall_bucket = profile["calibration_profile"]["overall_bucket"]
     concentration = profile["concentration_profile"]
     validation_edge = profile["validation_profile"]["edges"].get("valid_topk_excess_mean", {})
@@ -505,6 +594,7 @@ def flatten_candidate_profile(profile: dict[str, Any]) -> dict[str, Any]:
         "excess_information_ratio": portfolio.get("excess_information_ratio"),
         "monthly_win_rate": portfolio.get("monthly_win_rate"),
         "rebalance_win_rate": portfolio.get("rebalance_win_rate"),
+        **_flatten_reference_baselines(reference_baselines),
         "top5_positive_share": concentration.get("top5_positive_share"),
         "best_bucket": overall_bucket.get("best_bucket"),
         "top_bucket_label_rank": overall_bucket.get("top_bucket_label_rank"),

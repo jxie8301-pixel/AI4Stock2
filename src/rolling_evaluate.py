@@ -22,6 +22,8 @@ from src.label_utils import (
 from src.opportunity_diagnostics import save_opportunity_diagnostics
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
+    build_rank_average_factor_baseline_predictions,
+    build_rank_ic_weighted_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
 )
 from src.rolling_runtime import load_rolling_runtime_data, load_source_market_data_frame
@@ -172,6 +174,8 @@ def evaluate_prediction_bundle(
 
     avg_factor_baseline_predictions = bundle.avg_factor_baseline_predictions
     sign_aligned_factor_baseline_predictions = bundle.sign_aligned_factor_baseline_predictions
+    rank_avg_factor_baseline_predictions = bundle.rank_avg_factor_baseline_predictions
+    rank_ic_weighted_factor_baseline_predictions = bundle.rank_ic_weighted_factor_baseline_predictions
     if avg_factor_baseline_predictions is None:
         try:
             runtime_data = _ensure_runtime_data()
@@ -184,6 +188,20 @@ def evaluate_prediction_bundle(
             sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(runtime_data)
         except Exception as exc:
             print(f"[!] Skipping sign-aligned baseline reconstruction: {exc}")
+    if rank_avg_factor_baseline_predictions is None:
+        try:
+            runtime_data = _ensure_runtime_data()
+            rank_avg_factor_baseline_predictions = build_rank_average_factor_baseline_predictions(runtime_data)
+        except Exception as exc:
+            print(f"[!] Skipping rank-average baseline reconstruction: {exc}")
+    if rank_ic_weighted_factor_baseline_predictions is None:
+        try:
+            runtime_data = _ensure_runtime_data()
+            rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(
+                runtime_data,
+            )
+        except Exception as exc:
+            print(f"[!] Skipping rank-IC-weighted baseline reconstruction: {exc}")
     market_data = None
     intraperiod_exit_cfg = cfg.get("backtest", {}).get("intraperiod_exit") or {}
     price_confirm_cfg = intraperiod_exit_cfg.get("price_confirm") if isinstance(intraperiod_exit_cfg, dict) else None
@@ -343,6 +361,21 @@ def evaluate_prediction_bundle(
             preds=sign_aligned_factor_baseline_predictions,
             **backtest_kwargs,
         )
+    rank_avg_factor_baseline_report = None
+    if rank_avg_factor_baseline_predictions is not None and not rank_avg_factor_baseline_predictions.empty:
+        rank_avg_factor_baseline_report = run_native_backtest(
+            preds=rank_avg_factor_baseline_predictions,
+            **backtest_kwargs,
+        )
+    rank_ic_weighted_factor_baseline_report = None
+    if (
+        rank_ic_weighted_factor_baseline_predictions is not None
+        and not rank_ic_weighted_factor_baseline_predictions.empty
+    ):
+        rank_ic_weighted_factor_baseline_report = run_native_backtest(
+            preds=rank_ic_weighted_factor_baseline_predictions,
+            **backtest_kwargs,
+        )
     plot_report = backtest_report.rename(columns={"net_return": "return"})
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,
@@ -361,6 +394,16 @@ def evaluate_prediction_bundle(
             sign_aligned_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
         )
         plot_report.attrs["sign_aligned_factor_baseline_name"] = "Sign-Aligned Factor Baseline"
+    if rank_avg_factor_baseline_report is not None:
+        plot_report["rank_avg_factor_baseline_return"] = (
+            rank_avg_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
+        )
+        plot_report.attrs["rank_avg_factor_baseline_name"] = "Rank-ZScore Average Factor Baseline"
+    if rank_ic_weighted_factor_baseline_report is not None:
+        plot_report["rank_ic_weighted_factor_baseline_return"] = (
+            rank_ic_weighted_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
+        )
+        plot_report.attrs["rank_ic_weighted_factor_baseline_name"] = "RankIC-Weighted Factor Baseline"
 
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     monthly_summary = build_period_summary(metric_report, freq="ME")

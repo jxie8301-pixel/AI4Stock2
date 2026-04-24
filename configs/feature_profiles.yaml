@@ -295,6 +295,22 @@ profiles:
       - TS_industry_dispersion_20
       - TS_industry_dispersion_60
 
+  core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_drop_rel_midlong_v1:
+    extends: core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1
+    drop_columns:
+      - TS_industry_rel_ret_20
+      - TS_industry_rel_ret_60
+    cross_sectional_rank_exclude_columns:
+      - TS_industry_ret_20
+      - TS_industry_ret_60
+      - TS_industry_excess_ret_20
+      - TS_industry_excess_ret_60
+      - TS_industry_member_count
+      - TS_industry_std_20
+      - TS_industry_std_60
+      - TS_industry_dispersion_20
+      - TS_industry_dispersion_60
+
   core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_relative_alpha_v1:
     extends: core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1
     add_columns:

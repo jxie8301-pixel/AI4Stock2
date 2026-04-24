@@ -302,6 +302,17 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_std_20", slim_b["cross_sectional_rank_exclude_columns"])
 
     def test_core_v4_tushare_plus_industry_excess_flow_value_slim_b_family_profiles_are_registered(self):
+        slim_b_drop_rel = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {
+                    "profile": (
+                        "core_v4_techlite_tushare_plus_industry_excess_flow_value_"
+                        "slim_b_drop_rel_midlong_v1"
+                    )
+                },
+            }
+        )
         slim_b_breadth = resolve_feature_profile(
             {
                 "data": {"source": "tushare"},
@@ -316,6 +327,22 @@ class FeatureProfilesTest(unittest.TestCase):
                 },
             }
         )
+
+        self.assertTrue(
+            str(slim_b_drop_rel["profile_path"]).endswith(
+                "configs/feature_profiles.yaml::"
+                "core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_drop_rel_midlong_v1"
+            )
+        )
+        self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}industry_rel_ret_20", slim_b_drop_rel["selected_columns"])
+        self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}industry_rel_ret_60", slim_b_drop_rel["selected_columns"])
+        self.assertNotIn(
+            f"{TUSHARE_FACTOR_PREFIX}industry_rel_ret_20",
+            slim_b_drop_rel["cross_sectional_rank_exclude_columns"],
+        )
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_ret_60", slim_b_drop_rel["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_excess_ret_60", slim_b_drop_rel["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_dispersion_60", slim_b_drop_rel["selected_columns"])
 
         self.assertTrue(
             str(slim_b_breadth["profile_path"]).endswith(

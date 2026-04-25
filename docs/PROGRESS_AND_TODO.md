@@ -220,7 +220,8 @@ Current status:
 - [x] Backtest wrapper/report boundaries use shared native-to-legacy return helpers while keeping engine `net_return` canonical
 - [x] `run_native_rolling.py` no longer re-exports underscored artifact/baseline helpers only for tests
 - [ ] Hidden legacy CLI flag cleanup is deferred until compatibility aliases are no longer needed
-- [ ] Unused import cleanup is the next reliability target
+- [x] Low-risk unused imports are removed without adding a lint dependency
+- [ ] Lint gate remains deferred until code movement stabilizes
 
 Detailed implementation plan:
 

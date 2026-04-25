@@ -119,6 +119,12 @@ class ExperimentStoreTest(unittest.TestCase):
                     "months_beating_avg_factor_baseline_summary": "30 / 48 = 62.50%",
                     "rebalances_beating_avg_factor_baseline_pct": {"risk": 0.58},
                     "rebalances_beating_avg_factor_baseline_summary": "56 / 97 = 57.73%",
+                    "fixed_risk_rank_avg_factor_baseline_excess_annualized_return": {"risk": 0.19},
+                    "fixed_risk_rank_avg_factor_baseline_excess_information_ratio": {"risk": 0.7},
+                    "months_beating_fixed_risk_rank_avg_factor_baseline_pct": {"risk": 0.72},
+                    "months_beating_fixed_risk_rank_avg_factor_baseline_summary": "35 / 48 = 72.92%",
+                    "rebalances_beating_fixed_risk_rank_avg_factor_baseline_pct": {"risk": 0.61},
+                    "rebalances_beating_fixed_risk_rank_avg_factor_baseline_summary": "59 / 97 = 60.82%",
                     "annualized_return": {"risk": 0.25},
                     "sharpe_ratio": {"risk": 1.1},
                     "information_ratio": {"risk": 1.1},
@@ -160,6 +166,18 @@ class ExperimentStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["months_beating_avg_factor_baseline_summary"], "30 / 48 = 62.50%")
             self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_pct"], "0.58")
             self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_summary"], "56 / 97 = 57.73%")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_excess_annualized_return"], "0.19")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_excess_information_ratio"], "0.7")
+            self.assertEqual(rows[0]["months_beating_fixed_risk_rank_avg_factor_baseline_pct"], "0.72")
+            self.assertEqual(
+                rows[0]["months_beating_fixed_risk_rank_avg_factor_baseline_summary"],
+                "35 / 48 = 72.92%",
+            )
+            self.assertEqual(rows[0]["rebalances_beating_fixed_risk_rank_avg_factor_baseline_pct"], "0.61")
+            self.assertEqual(
+                rows[0]["rebalances_beating_fixed_risk_rank_avg_factor_baseline_summary"],
+                "59 / 97 = 60.82%",
+            )
             self.assertEqual(rows[0]["portfolio_annualized_return"], "0.25")
             self.assertEqual(rows[0]["portfolio_sharpe_ratio"], "1.1")
             self.assertEqual(rows[0]["weighting"], "rank")

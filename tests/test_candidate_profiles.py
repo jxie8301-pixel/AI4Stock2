@@ -51,6 +51,18 @@ def _make_run_dir(tmp_path: Path) -> Path:
             "months_beating_rank_ic_weighted_factor_baseline_summary": "9 / 12 (75.00%)",
             "rebalances_beating_rank_ic_weighted_factor_baseline_pct": {"risk": 0.67},
             "rebalances_beating_rank_ic_weighted_factor_baseline_summary": "8 / 12 (66.67%)",
+            "fixed_risk_rank_avg_factor_baseline_excess_annualized_return": {"risk": 0.18},
+            "fixed_risk_rank_avg_factor_baseline_excess_information_ratio": {"risk": 1.5},
+            "months_beating_fixed_risk_rank_avg_factor_baseline_pct": {"risk": 0.70},
+            "months_beating_fixed_risk_rank_avg_factor_baseline_summary": "8 / 12 (66.67%)",
+            "rebalances_beating_fixed_risk_rank_avg_factor_baseline_pct": {"risk": 0.60},
+            "rebalances_beating_fixed_risk_rank_avg_factor_baseline_summary": "7 / 12 (58.33%)",
+            "fixed_risk_rank_ic_weighted_factor_baseline_excess_annualized_return": {"risk": 0.22},
+            "fixed_risk_rank_ic_weighted_factor_baseline_excess_information_ratio": {"risk": 1.6},
+            "months_beating_fixed_risk_rank_ic_weighted_factor_baseline_pct": {"risk": 0.78},
+            "months_beating_fixed_risk_rank_ic_weighted_factor_baseline_summary": "9 / 12 (75.00%)",
+            "rebalances_beating_fixed_risk_rank_ic_weighted_factor_baseline_pct": {"risk": 0.68},
+            "rebalances_beating_fixed_risk_rank_ic_weighted_factor_baseline_summary": "8 / 12 (66.67%)",
         },
     )
     monthly_rows = []
@@ -127,10 +139,12 @@ def test_build_candidate_profile_marks_calibrated_ranker(tmp_path: Path) -> None
     assert profile["gate_summary"]["failed_gates"] == []
     assert flat["best_bucket"] == 1
     assert flat["top_bucket_label_rank"] == 1
-    assert profile["promotion_gates"]["beats_rank_avg_factor_baseline"]["passed"]
-    assert profile["promotion_gates"]["beats_rank_ic_weighted_factor_baseline"]["passed"]
+    assert profile["promotion_gates"]["beats_fixed_risk_rank_avg_factor_baseline"]["passed"]
+    assert profile["promotion_gates"]["beats_fixed_risk_rank_ic_weighted_factor_baseline"]["passed"]
     assert flat["rank_avg_factor_baseline_rebalances_beating_pct"] == 0.58
     assert flat["rank_ic_weighted_factor_baseline_excess_annualized_return"] == 0.20
+    assert flat["fixed_risk_rank_avg_factor_baseline_rebalances_beating_pct"] == 0.60
+    assert flat["fixed_risk_rank_ic_weighted_factor_baseline_excess_annualized_return"] == 0.22
     assert flat["validation_high_low_return_spread"] > 0.05
     assert flat["strong_years"] == "2024"
     json.dumps(to_jsonable(profile))

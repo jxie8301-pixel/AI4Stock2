@@ -12,7 +12,17 @@ from typing import Any
 import pandas as pd
 
 from src.candidate_profiles import build_candidate_profiles, flatten_candidate_profiles, to_jsonable
-from src.reference_baselines import CORE_REFERENCE_BASELINE_PREFIXES, reference_baseline_summary_fields
+from src.reference_baselines import (
+    CANDIDATE_GATE_REFERENCE_BASELINE_PREFIXES,
+    CORE_REFERENCE_BASELINE_PREFIXES,
+    reference_baseline_summary_fields,
+)
+
+
+CORE_AND_FIXED_RISK_BASELINE_PREFIXES = (
+    *CORE_REFERENCE_BASELINE_PREFIXES,
+    *CANDIDATE_GATE_REFERENCE_BASELINE_PREFIXES,
+)
 
 
 PORTFOLIO_KEYS = [
@@ -29,7 +39,7 @@ PORTFOLIO_KEYS = [
     "top_5_positive_month_share",
     *[
         field
-        for prefix in CORE_REFERENCE_BASELINE_PREFIXES
+        for prefix in CORE_AND_FIXED_RISK_BASELINE_PREFIXES
         for field in reference_baseline_summary_fields(prefix)
     ],
 ]
@@ -445,7 +455,7 @@ def write_readme(
             ],
         ),
         "",
-        "## Reference Baseline Edges",
+        "## Same-Gate Reference Baseline Edges",
         "",
         *_markdown_table(
             portfolio,
@@ -455,6 +465,19 @@ def write_readme(
                 "rebalances_beating_rank_avg_factor_baseline_pct",
                 "rank_ic_weighted_factor_baseline_excess_annualized_return",
                 "rebalances_beating_rank_ic_weighted_factor_baseline_pct",
+            ],
+        ),
+        "",
+        "## Fixed-Risk Pure Reference Baseline Edges",
+        "",
+        *_markdown_table(
+            portfolio,
+            [
+                "run",
+                "fixed_risk_rank_avg_factor_baseline_excess_annualized_return",
+                "rebalances_beating_fixed_risk_rank_avg_factor_baseline_pct",
+                "fixed_risk_rank_ic_weighted_factor_baseline_excess_annualized_return",
+                "rebalances_beating_fixed_risk_rank_ic_weighted_factor_baseline_pct",
             ],
         ),
         "",

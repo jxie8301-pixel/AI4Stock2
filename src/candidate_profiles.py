@@ -10,7 +10,11 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from src.reference_baselines import CORE_REFERENCE_BASELINE_PREFIXES, REFERENCE_BASELINE_PREFIXES
+from src.reference_baselines import (
+    CANDIDATE_GATE_REFERENCE_BASELINE_PREFIXES,
+    CORE_REFERENCE_BASELINE_PREFIXES,
+    REFERENCE_BASELINE_PREFIXES,
+)
 
 
 PORTFOLIO_PROFILE_KEYS = [
@@ -60,6 +64,10 @@ class CandidateProfileThresholds:
     min_rebalance_win_vs_rank_avg_baseline: float = 0.55
     min_excess_annualized_vs_rank_ic_baseline: float = 0.0
     min_rebalance_win_vs_rank_ic_baseline: float = 0.55
+    min_excess_annualized_vs_fixed_risk_rank_avg_baseline: float = 0.0
+    min_rebalance_win_vs_fixed_risk_rank_avg_baseline: float = 0.55
+    min_excess_annualized_vs_fixed_risk_rank_ic_baseline: float = 0.0
+    min_rebalance_win_vs_fixed_risk_rank_ic_baseline: float = 0.55
 
 
 def read_csv_artifact(run_dir: Path, filename: str) -> pd.DataFrame:
@@ -360,6 +368,38 @@ def summarize_validation_edges(validation_bins: list[dict[str, Any]]) -> dict[st
     return out
 
 
+def _candidate_gate_baseline_prefixes(reference_baselines: dict[str, dict[str, Any]]) -> tuple[str, ...]:
+    pure_prefixes = tuple(
+        prefix
+        for prefix in CANDIDATE_GATE_REFERENCE_BASELINE_PREFIXES
+        if prefix in reference_baselines
+    )
+    if pure_prefixes:
+        return pure_prefixes
+    return tuple(prefix for prefix in CORE_REFERENCE_BASELINE_PREFIXES if prefix in reference_baselines)
+
+
+def _candidate_gate_baseline_thresholds(thresholds: CandidateProfileThresholds) -> dict[str, dict[str, float]]:
+    return {
+        "rank_avg_factor_baseline": {
+            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_rank_avg_baseline,
+            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_rank_avg_baseline,
+        },
+        "rank_ic_weighted_factor_baseline": {
+            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_rank_ic_baseline,
+            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_rank_ic_baseline,
+        },
+        "fixed_risk_rank_avg_factor_baseline": {
+            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_fixed_risk_rank_avg_baseline,
+            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_fixed_risk_rank_avg_baseline,
+        },
+        "fixed_risk_rank_ic_weighted_factor_baseline": {
+            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_fixed_risk_rank_ic_baseline,
+            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_fixed_risk_rank_ic_baseline,
+        },
+    }
+
+
 def build_promotion_gates(
     *,
     portfolio: dict[str, Any],
@@ -428,17 +468,8 @@ def build_promotion_gates(
             "high_positive_rebalance_rate": valid_edge.get("high_positive_rebalance_rate"),
         },
     }
-    core_baseline_thresholds = {
-        "rank_avg_factor_baseline": {
-            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_rank_avg_baseline,
-            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_rank_avg_baseline,
-        },
-        "rank_ic_weighted_factor_baseline": {
-            "min_excess_annualized_return": thresholds.min_excess_annualized_vs_rank_ic_baseline,
-            "min_rebalances_beating_pct": thresholds.min_rebalance_win_vs_rank_ic_baseline,
-        },
-    }
-    for prefix in CORE_REFERENCE_BASELINE_PREFIXES:
+    core_baseline_thresholds = _candidate_gate_baseline_thresholds(thresholds)
+    for prefix in _candidate_gate_baseline_prefixes(reference_baselines):
         baseline = reference_baselines.get(prefix)
         if not baseline:
             continue

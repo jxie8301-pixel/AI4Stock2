@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 
-from src.reference_baselines import REFERENCE_BASELINE_SPECS
+from src.reference_baselines import ALL_REFERENCE_BASELINE_SPECS
 
 DEFAULT_BENCHMARK_MODE = "cross_section_mean"
 SUPPORTED_BENCHMARK_MODES = ("cross_section_mean", "file")
@@ -487,7 +487,7 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         result["top_1_positive_rebalance_share"] = {"risk": rebalance_concentration["top_1_positive_share"]}
         result["top_3_positive_rebalance_share"] = {"risk": rebalance_concentration["top_3_positive_share"]}
         result["top_5_positive_rebalance_share"] = {"risk": rebalance_concentration["top_5_positive_share"]}
-    for prefix, default_name in REFERENCE_BASELINE_SPECS:
+    for prefix, default_name in ALL_REFERENCE_BASELINE_SPECS:
         _attach_reference_metrics(
             result,
             report,
@@ -553,7 +553,7 @@ def plot_cumulative_return(report: pd.DataFrame, save_path: str = None):
         bench_label = str(report.attrs.get("benchmark_name") or "Benchmark").strip() or "Benchmark"
         ax.plot(cum_bench.index, cum_bench.values, label=bench_label, linewidth=1.5, alpha=0.7)
     baseline_styles = ("--", ":", "-.", (0, (3, 1, 1, 1)))
-    for style_idx, (prefix, default_name) in enumerate(REFERENCE_BASELINE_SPECS):
+    for style_idx, (prefix, default_name) in enumerate(ALL_REFERENCE_BASELINE_SPECS):
         return_column = f"{prefix}_return"
         if return_column not in report.columns:
             continue
@@ -634,7 +634,7 @@ def save_monthly_report(report: pd.DataFrame, save_path: str = None):
         df_monthly["monthly_excess_vs_benchmark"] = (
             df_monthly["monthly_return"] - df_monthly["benchmark_monthly_return"]
         )
-    for prefix, _ in REFERENCE_BASELINE_SPECS:
+    for prefix, _ in ALL_REFERENCE_BASELINE_SPECS:
         return_column = f"{prefix}_return"
         if return_column not in report.columns:
             continue
@@ -671,7 +671,7 @@ def _format_period_label(index: pd.DatetimeIndex, freq: str) -> str:
 
 def _build_reference_period_metrics(period_frame: pd.DataFrame, period_return: float) -> dict[str, float]:
     metrics: dict[str, float] = {}
-    for prefix, _ in REFERENCE_BASELINE_SPECS:
+    for prefix, _ in ALL_REFERENCE_BASELINE_SPECS:
         return_column = f"{prefix}_return"
         baseline_returns = (
             period_frame[return_column].astype(float).dropna()
@@ -918,7 +918,7 @@ def print_metrics(
                 "Excess IR",
                 _format_number(_extract_metric(portfolio_metrics, "excess_information_ratio")),
             )
-        for prefix, default_name in REFERENCE_BASELINE_SPECS:
+        for prefix, default_name in ALL_REFERENCE_BASELINE_SPECS:
             baseline_name = portfolio_metrics.get(f"{prefix}_name")
             if not baseline_name:
                 continue

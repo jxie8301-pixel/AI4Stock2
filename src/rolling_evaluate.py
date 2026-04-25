@@ -19,7 +19,9 @@ from src.label_utils import (
     resolve_opportunity_label_cfg,
     resolve_signal_horizon,
 )
+from src.native_backtest import run_native_backtest
 from src.opportunity_diagnostics import save_opportunity_diagnostics
+from src.reference_baselines import REFERENCE_BASELINE_SPECS
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
     build_rank_average_factor_baseline_predictions,
@@ -28,6 +30,36 @@ from src.rolling_baselines import (
 )
 from src.rolling_runtime import load_rolling_runtime_data, load_source_market_data_frame
 from src.rolling_types import PredictionBundle, RollingPaths
+
+
+def _run_baseline_backtests(
+    baseline_predictions: list[tuple[str, str, pd.Series | None]],
+    *,
+    backtest_kwargs: dict[str, Any],
+) -> dict[str, tuple[str, pd.DataFrame]]:
+    reports: dict[str, tuple[str, pd.DataFrame]] = {}
+    for prefix, display_name, predictions in baseline_predictions:
+        if predictions is None or predictions.empty:
+            continue
+        reports[prefix] = (
+            display_name,
+            run_native_backtest(
+                preds=predictions,
+                **backtest_kwargs,
+            ),
+        )
+    return reports
+
+
+def _attach_baseline_reports_to_plot(
+    plot_report: pd.DataFrame,
+    baseline_reports: dict[str, tuple[str, pd.DataFrame]],
+) -> None:
+    for prefix, (display_name, baseline_report) in baseline_reports.items():
+        plot_report[f"{prefix}_return"] = (
+            baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
+        )
+        plot_report.attrs[f"{prefix}_name"] = display_name
 
 
 def _sanitize_dict_keys(data: Any) -> Any:
@@ -141,8 +173,6 @@ def evaluate_prediction_bundle(
         save_monthly_report,
         save_period_summary,
     )
-    from src.native_backtest import run_native_backtest
-
     signal_horizon = int(bundle.metadata.get("signal_horizon", resolve_signal_horizon(cfg)))
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
     runtime_data_cache = None
@@ -349,33 +379,36 @@ def evaluate_prediction_bundle(
                 trace_dates.update(
                     pd.to_datetime(exit_rows["intraperiod_exit_missed_return"].abs().nlargest(exit_focus_n).index).tolist()
                 )
-    avg_factor_baseline_report = None
-    if avg_factor_baseline_predictions is not None and not avg_factor_baseline_predictions.empty:
-        avg_factor_baseline_report = run_native_backtest(
-            preds=avg_factor_baseline_predictions,
-            **backtest_kwargs,
+    baseline_prediction_series = [
+        avg_factor_baseline_predictions,
+        sign_aligned_factor_baseline_predictions,
+        rank_avg_factor_baseline_predictions,
+        rank_ic_weighted_factor_baseline_predictions,
+    ]
+    baseline_predictions = [
+        (prefix, display_name, predictions)
+        for (prefix, display_name), predictions in zip(
+            REFERENCE_BASELINE_SPECS,
+            baseline_prediction_series,
+            strict=True,
         )
-    sign_aligned_factor_baseline_report = None
-    if sign_aligned_factor_baseline_predictions is not None and not sign_aligned_factor_baseline_predictions.empty:
-        sign_aligned_factor_baseline_report = run_native_backtest(
-            preds=sign_aligned_factor_baseline_predictions,
-            **backtest_kwargs,
-        )
-    rank_avg_factor_baseline_report = None
-    if rank_avg_factor_baseline_predictions is not None and not rank_avg_factor_baseline_predictions.empty:
-        rank_avg_factor_baseline_report = run_native_backtest(
-            preds=rank_avg_factor_baseline_predictions,
-            **backtest_kwargs,
-        )
-    rank_ic_weighted_factor_baseline_report = None
-    if (
-        rank_ic_weighted_factor_baseline_predictions is not None
-        and not rank_ic_weighted_factor_baseline_predictions.empty
-    ):
-        rank_ic_weighted_factor_baseline_report = run_native_backtest(
-            preds=rank_ic_weighted_factor_baseline_predictions,
-            **backtest_kwargs,
-        )
+    ]
+    same_gate_baseline_reports = _run_baseline_backtests(
+        baseline_predictions,
+        backtest_kwargs=backtest_kwargs,
+    )
+    fixed_risk_backtest_kwargs = {
+        **backtest_kwargs,
+        "risk_control": None,
+        "risk_control_signal_values": None,
+    }
+    fixed_risk_baseline_reports = _run_baseline_backtests(
+        [
+            (f"fixed_risk_{prefix}", f"Fixed-Risk {display_name}", predictions)
+            for prefix, display_name, predictions in baseline_predictions
+        ],
+        backtest_kwargs=fixed_risk_backtest_kwargs,
+    )
     plot_report = backtest_report.rename(columns={"net_return": "return"})
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,
@@ -384,26 +417,8 @@ def evaluate_prediction_bundle(
     ).to_numpy()
     plot_report.attrs["benchmark_name"] = benchmark_name
     plot_report.attrs["rebalance_freq"] = rebalance_freq
-    if avg_factor_baseline_report is not None:
-        plot_report["avg_factor_baseline_return"] = (
-            avg_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
-        )
-        plot_report.attrs["avg_factor_baseline_name"] = "Avg Unique Factor Baseline"
-    if sign_aligned_factor_baseline_report is not None:
-        plot_report["sign_aligned_factor_baseline_return"] = (
-            sign_aligned_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
-        )
-        plot_report.attrs["sign_aligned_factor_baseline_name"] = "Sign-Aligned Factor Baseline"
-    if rank_avg_factor_baseline_report is not None:
-        plot_report["rank_avg_factor_baseline_return"] = (
-            rank_avg_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
-        )
-        plot_report.attrs["rank_avg_factor_baseline_name"] = "Rank-ZScore Average Factor Baseline"
-    if rank_ic_weighted_factor_baseline_report is not None:
-        plot_report["rank_ic_weighted_factor_baseline_return"] = (
-            rank_ic_weighted_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
-        )
-        plot_report.attrs["rank_ic_weighted_factor_baseline_name"] = "RankIC-Weighted Factor Baseline"
+    _attach_baseline_reports_to_plot(plot_report, same_gate_baseline_reports)
+    _attach_baseline_reports_to_plot(plot_report, fixed_risk_baseline_reports)
 
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     monthly_summary = build_period_summary(metric_report, freq="ME")

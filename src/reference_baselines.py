@@ -10,12 +10,26 @@ REFERENCE_BASELINE_SPECS = (
     ("rank_ic_weighted_factor_baseline", "RankIC-Weighted Factor Baseline"),
 )
 
-REFERENCE_BASELINE_PREFIXES = tuple(prefix for prefix, _ in REFERENCE_BASELINE_SPECS)
+FIXED_RISK_REFERENCE_BASELINE_SPECS = tuple(
+    (f"fixed_risk_{prefix}", f"Fixed-Risk {display_name}")
+    for prefix, display_name in REFERENCE_BASELINE_SPECS
+)
+
+ALL_REFERENCE_BASELINE_SPECS = REFERENCE_BASELINE_SPECS + FIXED_RISK_REFERENCE_BASELINE_SPECS
+
+REFERENCE_BASELINE_PREFIXES = tuple(prefix for prefix, _ in ALL_REFERENCE_BASELINE_SPECS)
 
 CORE_REFERENCE_BASELINE_PREFIXES = (
     "rank_avg_factor_baseline",
     "rank_ic_weighted_factor_baseline",
 )
+
+FIXED_RISK_CORE_REFERENCE_BASELINE_PREFIXES = tuple(
+    f"fixed_risk_{prefix}"
+    for prefix in CORE_REFERENCE_BASELINE_PREFIXES
+)
+
+CANDIDATE_GATE_REFERENCE_BASELINE_PREFIXES = FIXED_RISK_CORE_REFERENCE_BASELINE_PREFIXES
 
 
 def reference_baseline_summary_fields(prefix: str) -> list[str]:

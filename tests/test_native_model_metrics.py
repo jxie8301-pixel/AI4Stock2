@@ -590,17 +590,27 @@ class NativeModelMetricsTest(unittest.TestCase):
                 "return": [0.10, -0.05, 0.20, 0.05],
                 "bench": [0.02, -0.01, 0.03, 0.00],
                 "avg_factor_baseline_return": [0.08, -0.02, 0.25, 0.01],
+                "fixed_risk_avg_factor_baseline_return": [0.03, -0.01, 0.10, 0.00],
             },
             index=pd.to_datetime(["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30"]),
         )
         report.attrs["avg_factor_baseline_name"] = "Avg Unique Factor Baseline"
+        report.attrs["fixed_risk_avg_factor_baseline_name"] = "Fixed-Risk Avg Unique Factor Baseline"
         report.attrs["rebalance_freq"] = 2
 
         portfolio_metrics, _ = compute_portfolio_metrics((report, None))
 
         self.assertEqual(portfolio_metrics["avg_factor_baseline_name"], "Avg Unique Factor Baseline")
+        self.assertEqual(
+            portfolio_metrics["fixed_risk_avg_factor_baseline_name"],
+            "Fixed-Risk Avg Unique Factor Baseline",
+        )
         self.assertEqual(portfolio_metrics["months_beating_avg_factor_baseline_summary"], "2 / 4 = 50.00%")
         self.assertEqual(portfolio_metrics["rebalances_beating_avg_factor_baseline_summary"], "0 / 2 = 0.00%")
+        self.assertEqual(
+            portfolio_metrics["months_beating_fixed_risk_avg_factor_baseline_summary"],
+            "3 / 4 = 75.00%",
+        )
         self.assertAlmostEqual(
             portfolio_metrics["top_1_positive_month_share"]["risk"],
             0.20 / (0.20 + 0.10 + 0.05),

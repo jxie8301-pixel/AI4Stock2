@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "candidate_id": "example_candidate",
+  "role": "example_only_not_a_real_result",
+  "source": {
+    "run_tag": "example-run-tag",
+    "config_snapshot": "path/to/local/config_snapshot.yaml",
+    "prediction_artifacts": "path/to/local/prediction_artifacts"
+  },
+  "portfolio_metrics": {
+    "annualized_return": 0.0,
+    "annualized_volatility": 0.0,
+    "sharpe_ratio": 0.0,
+    "max_drawdown": 0.0,
+    "monthly_win_rate": 0.0,
+    "rebalance_win_rate": 0.0
+  },
+  "baseline_comparison": {
+    "baseline_name": "fixed_risk_rank_ic_weighted_factor_baseline",
+    "baseline_annualized_return": 0.0,
+    "excess_annualized_return": 0.0,
+    "rebalances_beating_baseline": "0 / 0 = 0.00%"
+  },
+  "reproducibility": {
+    "required_profile_fields": [
+      "experiment_profile",
+      "feature_profile",
+      "model_profile",
+      "strategy",
+      "label",
+      "rolling",
+      "backtest"
+    ],
+    "notes": "Keep real candidate profiles and run outputs local; commit only this schema-style example."
+  }
+}

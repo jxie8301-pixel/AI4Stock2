@@ -15,10 +15,13 @@ data-bk/
 
 # Results
 results/
+shortlists/
 *.log
 *.parquet
 *.csv
 *.sh
+candidate_profile.json
+candidate_profiles.json
 dump_bin.py
 get_data.py
 
@@ -27,6 +30,8 @@ get_data.py
 cookies.json
 .env
 .claude/
+.codex
+.codex/
 AI4Stock.txt
 fetch_fails_v2.log
 check_dataset.py

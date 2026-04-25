@@ -217,7 +217,8 @@ Current status:
 - [x] Collector common parquet write/read and numeric-dtype utilities are extracted behind compatibility wrappers
 - [x] Candidate diagnostics share artifact readers, metric extraction, bucket-shape, and feature-family helpers
 - [x] Config validation supported-mode constants are centralized while keeping `validate_training_config` as the public entrypoint
-- [ ] Backtest wrapper boundary cleanup is the next reliability target
+- [x] Backtest wrapper/report boundaries use shared native-to-legacy return helpers while keeping engine `net_return` canonical
+- [ ] Legacy CLI / compatibility import cleanup is the next reliability target
 
 Detailed implementation plan:
 

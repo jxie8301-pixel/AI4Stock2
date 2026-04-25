@@ -35,6 +35,27 @@ class BacktestTraceTest(unittest.TestCase):
             ],
         )
 
+    def test_select_trace_dates_accepts_native_net_return(self):
+        report = pd.DataFrame(
+            {
+                "net_return": [0.01, -0.20, 0.03, -0.04],
+                "turnover": [0.1, 0.05, 0.4, 0.2],
+                "cost": [0.001, 0.003, 0.002, 0.02],
+            },
+            index=pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"]),
+        )
+
+        dates = select_trace_dates(report, top_n=1)
+
+        self.assertEqual(
+            dates,
+            [
+                pd.Timestamp("2024-01-03"),
+                pd.Timestamp("2024-01-04"),
+                pd.Timestamp("2024-01-05"),
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

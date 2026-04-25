@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from src.experiment_store import finalize_run_store, resolve_rebalance_freq, resolve_retrain_step
+from src.backtest_report import attach_native_baseline_returns, to_legacy_return_report
 from src.backtest_trace import save_trace_artifacts, select_trace_dates
 from src.industry_groups import load_instrument_industry_groups
 from src.label_utils import (
@@ -49,17 +50,6 @@ def _run_baseline_backtests(
             ),
         )
     return reports
-
-
-def _attach_baseline_reports_to_plot(
-    plot_report: pd.DataFrame,
-    baseline_reports: dict[str, tuple[str, pd.DataFrame]],
-) -> None:
-    for prefix, (display_name, baseline_report) in baseline_reports.items():
-        plot_report[f"{prefix}_return"] = (
-            baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
-        )
-        plot_report.attrs[f"{prefix}_name"] = display_name
 
 
 def _sanitize_dict_keys(data: Any) -> Any:
@@ -397,9 +387,7 @@ def evaluate_prediction_bundle(
         **backtest_kwargs,
     )
     trace_top_n = max(int(cfg.get("artifacts", {}).get("backtest_trace_top_n", 8) or 8), 0)
-    trace_dates: set[pd.Timestamp] = set(
-        select_trace_dates(backtest_report.rename(columns={"net_return": "return"}), top_n=trace_top_n)
-    )
+    trace_dates: set[pd.Timestamp] = set(select_trace_dates(backtest_report, top_n=trace_top_n))
     if "intraperiod_exit_count" in backtest_report.columns:
         exit_rows = backtest_report.loc[backtest_report["intraperiod_exit_count"].fillna(0).astype(int) > 0]
         if not exit_rows.empty:
@@ -443,7 +431,7 @@ def evaluate_prediction_bundle(
         ],
         backtest_kwargs=fixed_risk_backtest_kwargs,
     )
-    plot_report = backtest_report.rename(columns={"net_return": "return"})
+    plot_report = to_legacy_return_report(backtest_report)
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,
         plot_report.index,
@@ -451,8 +439,8 @@ def evaluate_prediction_bundle(
     ).to_numpy()
     plot_report.attrs["benchmark_name"] = benchmark_name
     plot_report.attrs["rebalance_freq"] = rebalance_freq
-    _attach_baseline_reports_to_plot(plot_report, same_gate_baseline_reports)
-    _attach_baseline_reports_to_plot(plot_report, fixed_risk_baseline_reports)
+    attach_native_baseline_returns(plot_report, same_gate_baseline_reports)
+    attach_native_baseline_returns(plot_report, fixed_risk_baseline_reports)
 
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     monthly_summary = build_period_summary(metric_report, freq="ME")

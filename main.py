@@ -11,6 +11,7 @@ import pickle
 from pathlib import Path
 
 from src.experiment_store import finalize_run_store, prepare_run_store, resolve_rebalance_freq
+from src.backtest_report import attach_native_baseline_returns, to_legacy_return_report
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_selection import (
     apply_feature_transforms,
@@ -432,7 +433,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
             intraperiod_exit=cfg["backtest"].get("intraperiod_exit"),
         )
     
-    plot_report = backtest_report.rename(columns={'net_return': 'return'})
+    plot_report = to_legacy_return_report(backtest_report)
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,
         plot_report.index,
@@ -441,10 +442,10 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     plot_report.attrs["benchmark_name"] = benchmark_name
     plot_report.attrs["rebalance_freq"] = rebalance_freq
     if avg_factor_baseline_report is not None:
-        plot_report["avg_factor_baseline_return"] = (
-            avg_factor_baseline_report["net_return"].reindex(plot_report.index).fillna(0.0).to_numpy()
+        attach_native_baseline_returns(
+            plot_report,
+            {"avg_factor_baseline": ("Avg Factor Baseline", avg_factor_baseline_report)},
         )
-        plot_report.attrs["avg_factor_baseline_name"] = "Avg Factor Baseline"
 
     portfolio_results, metric_report = compute_portfolio_metrics((plot_report, None))
     monthly_summary = build_period_summary(metric_report, freq="ME")
@@ -464,7 +465,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
         args=args,
         results_dir=results_dir,
         prefix="native",
-        report_for_selection=plot_report,
+        report_for_selection=backtest_report,
         rerun_fn=lambda trace_dates: run_native_backtest(
             preds=pred_series,
             labels=backtest_label_series,

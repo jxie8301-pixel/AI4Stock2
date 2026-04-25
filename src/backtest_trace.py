@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.backtest_report import get_backtest_return_series
+
 
 def parse_trace_dates_arg(trace_dates_arg: str | None) -> set[pd.Timestamp]:
     if not trace_dates_arg:
@@ -24,15 +26,16 @@ def select_trace_dates(report: pd.DataFrame, top_n: int = 5) -> list[pd.Timestam
     report = report.copy()
     report.index = pd.to_datetime(report.index)
 
-    if top_n > 0 and "return" in report.columns:
-        candidates.extend(pd.to_datetime(report["return"].abs().nlargest(top_n).index).tolist())
+    return_series = get_backtest_return_series(report)
+    if top_n > 0 and return_series is not None:
+        candidates.extend(pd.to_datetime(return_series.abs().nlargest(top_n).index).tolist())
     if top_n > 0 and "turnover" in report.columns:
         candidates.extend(pd.to_datetime(report["turnover"].nlargest(top_n).index).tolist())
     if top_n > 0 and "cost" in report.columns:
         candidates.extend(pd.to_datetime(report["cost"].nlargest(top_n).index).tolist())
 
-    if "return" in report.columns:
-        cum_returns = (1.0 + report["return"].astype(float)).cumprod()
+    if return_series is not None:
+        cum_returns = (1.0 + return_series).cumprod()
         drawdown = cum_returns / cum_returns.cummax() - 1.0
         if not drawdown.empty:
             candidates.append(pd.Timestamp(drawdown.idxmin()))

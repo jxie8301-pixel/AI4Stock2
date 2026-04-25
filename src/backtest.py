@@ -2,6 +2,7 @@
 
 import pandas as pd
 
+from src.backtest_report import to_legacy_return_report
 from src.native_backtest import (
     DEFAULT_ACCOUNT,
     DEFAULT_MIN_COST,
@@ -97,7 +98,7 @@ def run_backtest(
         report, trace_df = native_result
     else:
         report = native_result
-    report = report.rename(columns={"net_return": "return"})
+    report = to_legacy_return_report(report)
     print(
         "Backtest complete: "
         f"{report.index.min()} ~ {report.index.max()} (native engine)"

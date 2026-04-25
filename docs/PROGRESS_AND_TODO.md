@@ -213,7 +213,8 @@ Current status:
 - [x] `main.py` is explicitly marked as the legacy single-window entrypoint
 - [x] Semantic Tushare composites preserve missingness and require minimum observed component weight
 - [x] Legacy valuation sentinel columns are preserved, with clean NaN-preserving variants and invalid flags added for migration
-- [ ] Tushare bucket-source precondition validation is the next reliability cleanup target
+- [x] Tushare bucket-source precondition validation records sidecar/context schema assumptions in metadata
+- [ ] Collector common parquet utility extraction is the next reliability cleanup target
 
 Detailed implementation plan:
 

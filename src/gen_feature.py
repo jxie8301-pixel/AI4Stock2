@@ -215,6 +215,73 @@ def _get_tushare_industry_context_feature_cols() -> list[str]:
     return cols
 
 
+def _get_tushare_bucket_source_required_columns() -> list[str]:
+    required = [
+        "date",
+        "symbol",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "turnover",
+        "turnover_free",
+        "volume_ratio",
+        "total_mv",
+        "circ_mv",
+        "total_share",
+        "circ_share",
+        "free_share",
+        "pb",
+        "pe",
+        "pe_ttm",
+        "ps",
+        "ps_ttm",
+        "dv_ratio",
+        "dv_ttm",
+        "amplitude",
+        "pct_chg",
+        "limit_pre_close",
+        "up_limit",
+        "down_limit",
+    ]
+    required += TUSHARE_FINA_INDICATOR_FEATURE_COLS
+    required += TUSHARE_DIVIDEND_FEATURE_COLS
+    required += TUSHARE_FORECAST_FEATURE_COLS
+    required += TUSHARE_EXPRESS_FEATURE_COLS
+    required += _get_tushare_industry_context_feature_cols()
+    return list(dict.fromkeys(required))
+
+
+def _validate_tushare_bucket_source_schema(source_bucket_paths: list[Path]) -> dict[str, Any]:
+    required_columns = _get_tushare_bucket_source_required_columns()
+    required_set = set(required_columns)
+    missing_by_path: list[tuple[str, list[str]]] = []
+    for path in source_bucket_paths:
+        schema_columns = set(pq.read_schema(path).names)
+        missing = sorted(required_set - schema_columns)
+        if missing:
+            missing_by_path.append((str(path), missing))
+
+    if missing_by_path:
+        preview = "; ".join(
+            f"{path}: {', '.join(missing[:12])}{' ...' if len(missing) > 12 else ''}"
+            for path, missing in missing_by_path[:3]
+        )
+        raise ValueError(
+            "Tushare bucket source is missing required sidecar/context columns. "
+            "Regenerate the source store with Tushare sidecar and industry context columns before factor generation. "
+            f"Missing columns by bucket: {preview}"
+        )
+
+    return {
+        "validated": True,
+        "required_columns": required_columns,
+        "validated_bucket_count": len(source_bucket_paths),
+    }
+
+
 def _rolling_compound_return(series: pd.Series, window: int) -> pd.Series:
     safe = pd.to_numeric(series, errors="coerce").clip(lower=-0.999999)
     return np.expm1(np.log1p(safe).rolling(int(window), min_periods=1).sum())
@@ -1091,6 +1158,9 @@ def _generate_factor_store_from_bucket_source(
 
     feature_names = get_full_factor_space_feature_names(data_source=data_source)
     source_meta = load_source_store_metadata(pdir) or {}
+    source_schema_validation: dict[str, Any] = {"validated": False, "reason": "not_required"}
+    if data_source == "tushare":
+        source_schema_validation = _validate_tushare_bucket_source_schema(source_bucket_paths)
     workers = max(1, int(workers))
 
     print(
@@ -1149,6 +1219,11 @@ def _generate_factor_store_from_bucket_source(
         "data_source": data_source or "",
         "source_parquet_dir": str(pdir),
         "source_storage_layout": "bucket_shards",
+        "source_schema_validation": source_schema_validation,
+        "source_layout_assumptions": {
+            "bucket_source_contains_prejoined_rows": True,
+            "tushare_bucket_source_requires_sidecar_context_columns": data_source == "tushare",
+        },
         "source_bucket_count": int(source_meta.get("bucket_count") or len(active_bucket_ids)),
         "num_features": len(feature_names),
         "num_rows": total_rows,

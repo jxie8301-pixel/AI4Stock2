@@ -216,7 +216,8 @@ Current status:
 - [x] Tushare bucket-source precondition validation records sidecar/context schema assumptions in metadata
 - [x] Collector common parquet write/read and numeric-dtype utilities are extracted behind compatibility wrappers
 - [x] Candidate diagnostics share artifact readers, metric extraction, bucket-shape, and feature-family helpers
-- [ ] Config validation split is the next reliability cleanup target
+- [x] Config validation supported-mode constants are centralized while keeping `validate_training_config` as the public entrypoint
+- [ ] Backtest wrapper boundary cleanup is the next reliability target
 
 Detailed implementation plan:
 

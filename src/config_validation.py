@@ -236,6 +236,47 @@ TOP_LEVEL_SCHEMA = {
     "universe": None,
 }
 
+STRATEGY_WEIGHTING_MODES = {"equal", "rank", "score_softmax"}
+STRATEGY_SCORE_TRANSFORM_MODES = {"none", "rank_pct", "zscore_clip"}
+SCORE_FUSION_MODES = {"multiply", "blend", "filter"}
+SCORE_FUSION_TRANSFORM_MODES = {"raw", "rank_pct"}
+RISK_CONTROL_MODES = {"fixed", "benchmark_ma", "signal_strength", "benchmark_ma_signal_strength"}
+RISK_SIGNAL_SOURCES = {"score_strength", "validation_metric"}
+RISK_SIGNAL_METRICS = {"top1", "topk_mean", "topk_sum"}
+VALIDATION_SIGNAL_METRICS = {
+    "best_valid_daily_rank_ic",
+    "best_valid_daily_ic",
+    "valid_top1_label_mean",
+    "valid_top1_positive_rate",
+    "valid_topk_label_mean",
+    "valid_topk_label_median",
+    "valid_topk_min_label_mean",
+    "valid_topk_positive_rate",
+    "valid_topk_excess_mean",
+}
+RISK_CURVE_MODES = {"linear", "convex", "concave", "sigmoid"}
+INTRAPERIOD_EXIT_MODES = {"none", "score_threshold", "expected_return_threshold"}
+INTRAPERIOD_SCORE_SOURCES = {"raw", "transformed", "rank_pct", "zscore"}
+INTRAPERIOD_CALIBRATION_MODES = {"quantile_bins"}
+PRICE_CONFIRM_MODES = {"close_below_ma"}
+BENCHMARK_MODES = {"cross_section_mean", "file"}
+BENCHMARK_VALUE_TYPES = {"return", "close"}
+LGBM_BINARY_LOSSES = {"binary", "binary_logloss", "cross_entropy", "logloss"}
+LGBM_EARLY_STOPPING_METRICS = {
+    "default",
+    "daily_ic",
+    "daily_rank_ic",
+    "valid_topk_label_mean",
+    "valid_topk_excess_mean",
+}
+LGBM_SAMPLE_WEIGHT_MODES = {"none", "opportunity_distance"}
+BUYABILITY_TRAIN_TRANSFORM_MODES = {"buyability_binary", "buyability_margin_binary"}
+BUYABILITY_OPPORTUNITY_MODES = {"positive", "threshold", "industry_excess", "benchmark_excess"}
+
+
+def _format_modes(values: set[str]) -> str:
+    return ", ".join(sorted(values))
+
 
 def _validate_known_keys(mapping: dict[str, Any], schema: dict[str, Any], path: str = "config") -> None:
     unknown = sorted(set(mapping) - set(schema))
@@ -376,12 +417,12 @@ def validate_training_config(
             raise ValueError("label.train_transform must be a mapping")
         mode = normalize_train_label_transform_mode(train_transform_cfg.get("mode"))
         train_transform_cfg["mode"] = mode
-        if mode in {"buyability_binary", "buyability_margin_binary"}:
+        if mode in BUYABILITY_TRAIN_TRANSFORM_MODES:
             opportunity_mode = str((opportunity_cfg or {}).get("mode", "positive"))
-            if opportunity_mode not in {"positive", "threshold", "industry_excess", "benchmark_excess"}:
+            if opportunity_mode not in BUYABILITY_OPPORTUNITY_MODES:
                 raise ValueError(
                     "buyability binary train transforms currently require "
-                    "label.opportunity.mode to be one of: positive, threshold, industry_excess, benchmark_excess"
+                    f"label.opportunity.mode to be one of: {_format_modes(BUYABILITY_OPPORTUNITY_MODES)}"
                 )
         if mode == "buyability_margin_binary" and float((opportunity_cfg or {}).get("neutral_band", 0.0)) <= 0:
             raise ValueError("label.train_transform.mode=buyability_margin_binary requires label.opportunity.neutral_band > 0")
@@ -414,12 +455,14 @@ def validate_training_config(
     if n_drop >= topk:
         raise ValueError("strategy.n_drop must be smaller than strategy.topk")
     weighting = str(strategy_cfg.get("weighting", "equal") or "equal").strip().lower()
-    if weighting not in {"equal", "rank", "score_softmax"}:
-        raise ValueError("strategy.weighting must be one of: equal, rank, score_softmax")
+    if weighting not in STRATEGY_WEIGHTING_MODES:
+        raise ValueError(f"strategy.weighting must be one of: {_format_modes(STRATEGY_WEIGHTING_MODES)}")
     strategy_cfg["weighting"] = weighting
     score_transform = str(strategy_cfg.get("score_transform", "none") or "none").strip().lower()
-    if score_transform not in {"none", "rank_pct", "zscore_clip"}:
-        raise ValueError("strategy.score_transform must be one of: none, rank_pct, zscore_clip")
+    if score_transform not in STRATEGY_SCORE_TRANSFORM_MODES:
+        raise ValueError(
+            f"strategy.score_transform must be one of: {_format_modes(STRATEGY_SCORE_TRANSFORM_MODES)}"
+        )
     strategy_cfg["score_transform"] = score_transform
     score_zscore_clip = strategy_cfg.get("score_zscore_clip", 3.0)
     score_zscore_clip = float(score_zscore_clip)
@@ -469,13 +512,15 @@ def validate_training_config(
         enabled = bool(score_fusion_cfg.get("enabled", False))
         score_fusion_cfg["enabled"] = enabled
         mode = str(score_fusion_cfg.get("mode", "multiply") or "multiply").strip().lower()
-        if mode not in {"multiply", "blend", "filter"}:
-            raise ValueError("strategy.score_fusion.mode must be one of: multiply, blend, filter")
+        if mode not in SCORE_FUSION_MODES:
+            raise ValueError(f"strategy.score_fusion.mode must be one of: {_format_modes(SCORE_FUSION_MODES)}")
         score_fusion_cfg["mode"] = mode
         for field in ("primary_transform", "secondary_transform"):
             transform = str(score_fusion_cfg.get(field, "raw") or "raw").strip().lower()
-            if transform not in {"raw", "rank_pct"}:
-                raise ValueError(f"strategy.score_fusion.{field} must be one of: raw, rank_pct")
+            if transform not in SCORE_FUSION_TRANSFORM_MODES:
+                raise ValueError(
+                    f"strategy.score_fusion.{field} must be one of: {_format_modes(SCORE_FUSION_TRANSFORM_MODES)}"
+                )
             score_fusion_cfg[field] = transform
         score_fusion_cfg["primary_power"] = _expect_positive_float(
             score_fusion_cfg.get("primary_power", 1.0),
@@ -523,9 +568,9 @@ def validate_training_config(
         risk_mode = str(raw_risk_cfg.get("mode", "fixed") or "fixed").strip().lower()
         if risk_control_cfg is None and risk_mode == "none":
             risk_mode = "fixed"
-        if risk_mode not in {"fixed", "benchmark_ma", "signal_strength", "benchmark_ma_signal_strength"}:
+        if risk_mode not in RISK_CONTROL_MODES:
             raise ValueError(
-                "backtest.risk_control.mode must be one of: fixed, benchmark_ma, signal_strength, benchmark_ma_signal_strength"
+                f"backtest.risk_control.mode must be one of: {_format_modes(RISK_CONTROL_MODES)}"
             )
         validated_risk_cfg["mode"] = risk_mode
         if risk_mode == "fixed":
@@ -560,31 +605,21 @@ def validate_training_config(
         if risk_mode in {"signal_strength", "benchmark_ma_signal_strength"}:
             signal_metric = str(raw_risk_cfg.get("signal_metric", "topk_mean") or "topk_mean").strip().lower()
             signal_source = str(raw_risk_cfg.get("signal_source", "score_strength") or "score_strength").strip().lower()
-            if signal_source not in {"score_strength", "validation_metric"}:
+            if signal_source not in RISK_SIGNAL_SOURCES:
                 raise ValueError(
-                    "backtest.risk_control.signal_source must be one of: score_strength, validation_metric"
+                    f"backtest.risk_control.signal_source must be one of: {_format_modes(RISK_SIGNAL_SOURCES)}"
                 )
-            if signal_metric not in {"top1", "topk_mean", "topk_sum"}:
-                raise ValueError("backtest.risk_control.signal_metric must be one of: top1, topk_mean, topk_sum")
+            if signal_metric not in RISK_SIGNAL_METRICS:
+                raise ValueError(
+                    f"backtest.risk_control.signal_metric must be one of: {_format_modes(RISK_SIGNAL_METRICS)}"
+                )
             validation_metric = raw_risk_cfg.get("validation_metric")
             if signal_source == "validation_metric":
                 validation_metric = str(validation_metric or "valid_topk_label_mean").strip().lower()
-                if validation_metric not in {
-                    "best_valid_daily_rank_ic",
-                    "best_valid_daily_ic",
-                    "valid_top1_label_mean",
-                    "valid_top1_positive_rate",
-                    "valid_topk_label_mean",
-                    "valid_topk_label_median",
-                    "valid_topk_min_label_mean",
-                    "valid_topk_positive_rate",
-                    "valid_topk_excess_mean",
-                }:
+                if validation_metric not in VALIDATION_SIGNAL_METRICS:
                     raise ValueError(
                         "backtest.risk_control.validation_metric must be one of: "
-                        "best_valid_daily_rank_ic, best_valid_daily_ic, valid_top1_label_mean, "
-                        "valid_top1_positive_rate, valid_topk_label_mean, valid_topk_label_median, "
-                        "valid_topk_min_label_mean, valid_topk_positive_rate, valid_topk_excess_mean"
+                        f"{_format_modes(VALIDATION_SIGNAL_METRICS)}"
                     )
             secondary_validation_metric = raw_risk_cfg.get("secondary_validation_metric")
             if secondary_validation_metric is not None:
@@ -593,22 +628,10 @@ def validate_training_config(
                         "backtest.risk_control.secondary_validation_metric requires signal_source=validation_metric"
                     )
                 secondary_validation_metric = str(secondary_validation_metric).strip().lower()
-                if secondary_validation_metric not in {
-                    "best_valid_daily_rank_ic",
-                    "best_valid_daily_ic",
-                    "valid_top1_label_mean",
-                    "valid_top1_positive_rate",
-                    "valid_topk_label_mean",
-                    "valid_topk_label_median",
-                    "valid_topk_min_label_mean",
-                    "valid_topk_positive_rate",
-                    "valid_topk_excess_mean",
-                }:
+                if secondary_validation_metric not in VALIDATION_SIGNAL_METRICS:
                     raise ValueError(
                         "backtest.risk_control.secondary_validation_metric must be one of: "
-                        "best_valid_daily_rank_ic, best_valid_daily_ic, valid_top1_label_mean, "
-                        "valid_top1_positive_rate, valid_topk_label_mean, valid_topk_label_median, "
-                        "valid_topk_min_label_mean, valid_topk_positive_rate, valid_topk_excess_mean"
+                        f"{_format_modes(VALIDATION_SIGNAL_METRICS)}"
                     )
             min_signal = float(raw_risk_cfg.get("min_signal", 0.0))
             max_signal = float(raw_risk_cfg.get("max_signal", 2.0))
@@ -693,9 +716,9 @@ def validate_training_config(
                         "backtest.risk_control.secondary_max_risk must be >= backtest.risk_control.secondary_min_risk"
                     )
             risk_curve = str(raw_risk_cfg.get("risk_curve", "linear") or "linear").strip().lower()
-            if risk_curve not in {"linear", "convex", "concave", "sigmoid"}:
+            if risk_curve not in RISK_CURVE_MODES:
                 raise ValueError(
-                    "backtest.risk_control.risk_curve must be one of: linear, convex, concave, sigmoid"
+                    f"backtest.risk_control.risk_curve must be one of: {_format_modes(RISK_CURVE_MODES)}"
                 )
             risk_curve_power = float(raw_risk_cfg.get("risk_curve_power", 2.0))
             if risk_curve_power <= 0:
@@ -742,23 +765,27 @@ def validate_training_config(
         if not isinstance(intraperiod_exit_cfg, dict):
             raise ValueError("backtest.intraperiod_exit must be a mapping when provided")
         exit_mode = str(intraperiod_exit_cfg.get("mode", "none") or "none").strip().lower()
-        if exit_mode not in {"none", "score_threshold", "expected_return_threshold"}:
+        if exit_mode not in INTRAPERIOD_EXIT_MODES:
             raise ValueError(
-                "backtest.intraperiod_exit.mode must be one of: none, score_threshold, expected_return_threshold"
+                f"backtest.intraperiod_exit.mode must be one of: {_format_modes(INTRAPERIOD_EXIT_MODES)}"
             )
         intraperiod_exit_cfg["mode"] = exit_mode
         if exit_mode in {"score_threshold", "expected_return_threshold"}:
             score_source = str(intraperiod_exit_cfg.get("score_source", "raw") or "raw").strip().lower()
-            if score_source not in {"raw", "transformed", "rank_pct", "zscore"}:
+            if score_source not in INTRAPERIOD_SCORE_SOURCES:
                 raise ValueError(
-                    "backtest.intraperiod_exit.score_source must be one of: raw, transformed, rank_pct, zscore"
+                    "backtest.intraperiod_exit.score_source must be one of: "
+                    f"{_format_modes(INTRAPERIOD_SCORE_SOURCES)}"
                 )
             intraperiod_exit_cfg["score_source"] = score_source
             intraperiod_exit_cfg["threshold"] = float(intraperiod_exit_cfg.get("threshold", 0.0))
         if exit_mode == "expected_return_threshold":
             calibration = str(intraperiod_exit_cfg.get("calibration", "quantile_bins") or "quantile_bins").strip().lower()
-            if calibration not in {"quantile_bins"}:
-                raise ValueError("backtest.intraperiod_exit.calibration must be one of: quantile_bins")
+            if calibration not in INTRAPERIOD_CALIBRATION_MODES:
+                raise ValueError(
+                    "backtest.intraperiod_exit.calibration must be one of: "
+                    f"{_format_modes(INTRAPERIOD_CALIBRATION_MODES)}"
+                )
             intraperiod_exit_cfg["calibration"] = calibration
             intraperiod_exit_cfg["n_bins"] = max(int(intraperiod_exit_cfg.get("n_bins", 20) or 20), 2)
             intraperiod_exit_cfg["min_history"] = max(int(intraperiod_exit_cfg.get("min_history", 200) or 200), 1)
@@ -767,8 +794,11 @@ def validate_training_config(
             if not isinstance(price_confirm_cfg, dict):
                 raise ValueError("backtest.intraperiod_exit.price_confirm must be a mapping when provided")
             confirm_mode = str(price_confirm_cfg.get("mode", "close_below_ma") or "close_below_ma").strip().lower()
-            if confirm_mode not in {"close_below_ma"}:
-                raise ValueError("backtest.intraperiod_exit.price_confirm.mode must be one of: close_below_ma")
+            if confirm_mode not in PRICE_CONFIRM_MODES:
+                raise ValueError(
+                    "backtest.intraperiod_exit.price_confirm.mode must be one of: "
+                    f"{_format_modes(PRICE_CONFIRM_MODES)}"
+                )
             price_confirm_cfg["mode"] = confirm_mode
             price_confirm_cfg["ma_window"] = max(int(price_confirm_cfg.get("ma_window", 10) or 10), 1)
             price_confirm_cfg["min_remaining_steps"] = max(
@@ -791,8 +821,8 @@ def validate_training_config(
         if not isinstance(benchmark_cfg, dict):
             raise ValueError("backtest.benchmark must be a mapping when provided")
         benchmark_mode = str(benchmark_cfg.get("mode", "cross_section_mean") or "cross_section_mean").strip().lower()
-        if benchmark_mode not in {"cross_section_mean", "file"}:
-            raise ValueError("backtest.benchmark.mode must be one of: cross_section_mean, file")
+        if benchmark_mode not in BENCHMARK_MODES:
+            raise ValueError(f"backtest.benchmark.mode must be one of: {_format_modes(BENCHMARK_MODES)}")
         benchmark_cfg["mode"] = benchmark_mode
         if benchmark_mode == "file":
             benchmark_path = str(benchmark_cfg.get("path") or "").strip()
@@ -805,8 +835,10 @@ def validate_training_config(
                 raise ValueError("backtest.benchmark.date_column must be non-empty")
             if not value_column:
                 raise ValueError("backtest.benchmark.value_column must be non-empty")
-            if value_type not in {"return", "close"}:
-                raise ValueError("backtest.benchmark.value_type must be one of: return, close")
+            if value_type not in BENCHMARK_VALUE_TYPES:
+                raise ValueError(
+                    f"backtest.benchmark.value_type must be one of: {_format_modes(BENCHMARK_VALUE_TYPES)}"
+                )
             benchmark_cfg["path"] = benchmark_path
             benchmark_cfg["date_column"] = date_column
             benchmark_cfg["value_column"] = value_column
@@ -824,23 +856,17 @@ def validate_training_config(
         if not isinstance(lgbm_cfg, dict):
             raise ValueError("lgbm config block is required when model.name == 'lgbm'")
         loss = str(lgbm_cfg.get("loss", "regression") or "regression").strip().lower()
-        if train_transform_cfg is not None and str(train_transform_cfg.get("mode")) in {"buyability_binary", "buyability_margin_binary"}:
-            if loss not in {"binary", "binary_logloss", "cross_entropy", "logloss"}:
+        if train_transform_cfg is not None and str(train_transform_cfg.get("mode")) in BUYABILITY_TRAIN_TRANSFORM_MODES:
+            if loss not in LGBM_BINARY_LOSSES:
                 raise ValueError(
                     "buyability binary train transforms require lgbm.loss to be "
-                    "one of: binary, binary_logloss, cross_entropy, logloss"
+                    f"one of: {_format_modes(LGBM_BINARY_LOSSES)}"
                 )
         early_stopping_metric = str(lgbm_cfg.get("early_stopping_metric", "default") or "default").strip().lower()
-        if early_stopping_metric not in {
-            "default",
-            "daily_ic",
-            "daily_rank_ic",
-            "valid_topk_label_mean",
-            "valid_topk_excess_mean",
-        }:
+        if early_stopping_metric not in LGBM_EARLY_STOPPING_METRICS:
             raise ValueError(
                 "lgbm.early_stopping_metric must be one of: "
-                "default, daily_ic, daily_rank_ic, valid_topk_label_mean, valid_topk_excess_mean"
+                f"{_format_modes(LGBM_EARLY_STOPPING_METRICS)}"
             )
         lgbm_cfg["early_stopping_metric"] = early_stopping_metric
         _expect_positive_int(lgbm_cfg.get("num_boost_round"), "lgbm.num_boost_round")
@@ -862,10 +888,10 @@ def validate_training_config(
                 raise ValueError("lgbm.train_weight_floor must be in [0, 1)")
             lgbm_cfg["train_weight_floor"] = train_weight_floor
         sample_weight_mode = str(lgbm_cfg.get("sample_weight_mode", "none") or "none").strip().lower()
-        if sample_weight_mode not in {"none", "opportunity_distance"}:
-            raise ValueError("lgbm.sample_weight_mode must be one of: none, opportunity_distance")
+        if sample_weight_mode not in LGBM_SAMPLE_WEIGHT_MODES:
+            raise ValueError(f"lgbm.sample_weight_mode must be one of: {_format_modes(LGBM_SAMPLE_WEIGHT_MODES)}")
         if sample_weight_mode != "none":
-            if train_transform_cfg is None or str(train_transform_cfg.get("mode")) not in {"buyability_binary", "buyability_margin_binary"}:
+            if train_transform_cfg is None or str(train_transform_cfg.get("mode")) not in BUYABILITY_TRAIN_TRANSFORM_MODES:
                 raise ValueError(
                     "lgbm.sample_weight_mode requires a buyability binary train transform "
                     "(buyability_binary or buyability_margin_binary)"

@@ -214,7 +214,8 @@ Current status:
 - [x] Semantic Tushare composites preserve missingness and require minimum observed component weight
 - [x] Legacy valuation sentinel columns are preserved, with clean NaN-preserving variants and invalid flags added for migration
 - [x] Tushare bucket-source precondition validation records sidecar/context schema assumptions in metadata
-- [ ] Collector common parquet utility extraction is the next reliability cleanup target
+- [x] Collector common parquet write/read and numeric-dtype utilities are extracted behind compatibility wrappers
+- [ ] Candidate diagnostics shared utility extraction is the next reliability cleanup target
 
 Detailed implementation plan:
 

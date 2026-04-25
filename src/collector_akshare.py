@@ -3,8 +3,6 @@ from __future__ import annotations
 import argparse
 import math
 import json
-import os
-import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +17,12 @@ import pandas as pd
 import pyarrow.parquet as pq
 import requests
 from tqdm import tqdm
+
+from src.collector_io import (
+    optimize_numeric_dtypes,
+    read_parquet_safe,
+    write_optimized_parquet_atomic,
+)
 
 
 DEFAULT_HEADERS = {
@@ -134,9 +138,6 @@ PROCESSED_COLS = [
 SYMBOL_CACHE_COLS = ["symbol", "name", "fetched_at"]
 
 NON_NEGATIVE_COLS = {"volume", "amount", "turnover", "total_mv", "circ_mv", "total_share", "circ_share"}
-INT32_MIN = np.iinfo(np.int32).min
-INT32_MAX = np.iinfo(np.int32).max
-UINT32_MAX = np.iinfo(np.uint32).max
 REQUEST_SLEEP_SECONDS = 0.5
 MAX_CONSECUTIVE_FAILURES = 10
 PRECHECK_WORKERS = 16
@@ -500,54 +501,19 @@ def list_local_symbols() -> list[str]:
     return sorted(symbols)
 
 
-def _optimize_numeric_dtypes(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    for col in out.columns:
-        series = out[col]
-        if pd.api.types.is_float_dtype(series.dtype):
-            out[col] = series.astype("float32")
-            continue
-        if not pd.api.types.is_integer_dtype(series.dtype):
-            continue
-        if getattr(series, "isna", lambda: pd.Series([], dtype=bool))().any():
-            continue
-        col_min = int(series.min())
-        col_max = int(series.max())
-        if col_min >= 0 and col_max <= UINT32_MAX:
-            out[col] = series.astype("uint32")
-        elif INT32_MIN <= col_min <= INT32_MAX and INT32_MIN <= col_max <= INT32_MAX:
-            out[col] = series.astype("int32")
-    return out
-
-
 def save_optimized_parquet(df: pd.DataFrame, path: Path) -> None:
-    optimized = _optimize_numeric_dtypes(df)
-    tmp_path = path.with_name(
-        f".{path.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-    )
-    try:
-        optimized.to_parquet(tmp_path, index=False, engine="pyarrow", compression="zstd")
-        os.replace(tmp_path, path)
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+    write_optimized_parquet_atomic(df, path)
+
+
+def _optimize_numeric_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    return optimize_numeric_dtypes(df)
 
 
 def _read_parquet_safe(
     path: Path,
     columns: list[str] | None = None,
 ) -> pd.DataFrame | None:
-    if not path.exists():
-        return None
-    try:
-        if path.stat().st_size == 0:
-            return None
-    except OSError:
-        return None
-    try:
-        return pd.read_parquet(path, columns=columns)
-    except Exception:
-        return None
+    return read_parquet_safe(path, columns=columns)
 
 
 def _normalize_date_column(df: pd.DataFrame, column: str = "date") -> pd.DataFrame:

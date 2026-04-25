@@ -1,7 +1,12 @@
 import argparse
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
-from src.runtime_cli import apply_common_runtime_overrides
+import yaml
+
+from src.runtime_cli import apply_common_runtime_overrides, load_validated_config_from_args
 
 
 class RuntimeCliTest(unittest.TestCase):
@@ -21,6 +26,10 @@ class RuntimeCliTest(unittest.TestCase):
             "horizon": None,
             "train_days": None,
             "valid_days": None,
+            "config": "configs/config.yaml",
+            "config_is_snapshot": False,
+            "experiment_profile": None,
+            "model_profile": None,
         }
         base.update(overrides)
         return argparse.Namespace(**base)
@@ -80,6 +89,32 @@ class RuntimeCliTest(unittest.TestCase):
                 argparse.ArgumentParser(add_help=False),
                 allow_rolling_overrides=True,
             )
+
+    def test_load_validated_config_from_args_can_use_config_snapshot_directly(self):
+        snapshot = {
+            "experiment": {"profile": "core_v4_lgbm_default_10x20x10"},
+            "model": {"name": "lgbm", "profile": "lgbm_default"},
+            "strategy": {"topk": 8, "n_drop": 2},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            snapshot_path = Path(tmpdir) / "config_snapshot.yaml"
+            snapshot_path.write_text(yaml.safe_dump(snapshot), encoding="utf-8")
+            args = self._build_args(
+                config=str(snapshot_path),
+                config_is_snapshot=True,
+                topk=None,
+            )
+
+            with patch("src.runtime_cli.validate_training_config") as validate_mock:
+                cfg = load_validated_config_from_args(
+                    args,
+                    argparse.ArgumentParser(add_help=False),
+                    check_paths=False,
+                )
+
+        self.assertEqual(cfg["strategy"]["topk"], 8)
+        self.assertEqual(cfg["runtime"]["config_path"], str(snapshot_path))
+        validate_mock.assert_called_once_with(cfg, check_paths=False)
 
 
 if __name__ == "__main__":

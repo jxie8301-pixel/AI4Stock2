@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import argparse
 
-from src.config_loader import load_config
-from src.config_validation import validate_training_config
 from src.experiment_store import (
     prepare_run_store,
     resolve_retrain_step,
@@ -35,7 +33,7 @@ from src.rolling_types import (
     RollingPaths,
     RollingRuntimeData,
 )
-from src.runtime_cli import add_common_runtime_args, apply_common_runtime_overrides, load_validated_config_from_args
+from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,16 +65,12 @@ def run_rolling_pipeline() -> None:
     parser = build_parser()
     args = parser.parse_args()
     if args.load_predictions_dir:
-        try:
-            cfg = load_config(
-                args.config,
-                experiment_profile_name=getattr(args, "experiment_profile", None),
-                model_profile_name=getattr(args, "model_profile", None),
-            )
-            apply_common_runtime_overrides(cfg, args, parser, allow_rolling_overrides=True)
-            validate_training_config(cfg, check_paths=False)
-        except ValueError as exc:
-            parser.error(str(exc))
+        cfg = load_validated_config_from_args(
+            args,
+            parser,
+            allow_rolling_overrides=True,
+            check_paths=False,
+        )
     else:
         cfg = load_validated_config_from_args(args, parser, allow_rolling_overrides=True)
 

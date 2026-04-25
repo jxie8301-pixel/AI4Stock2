@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from src.config_loader import load_config
+from src.config_loader import load_config, load_runtime_config
 from src.config_validation import validate_training_config
 from src.data_source import SUPPORTED_DATA_SOURCES
 from src.override_utils import apply_override_args
@@ -13,6 +13,11 @@ from src.override_utils import apply_override_args
 
 def add_common_runtime_args(parser: argparse.ArgumentParser, *, include_model_arg: bool = True) -> None:
     parser.add_argument("--config", default="configs/config.yaml", help="Config file path")
+    parser.add_argument(
+        "--config-is-snapshot",
+        action="store_true",
+        help="Treat --config as a fully resolved config snapshot and skip experiment/model profile composition.",
+    )
     if include_model_arg:
         parser.add_argument("--model", default=None, help="Override model name")
     parser.add_argument("--experiment-profile", help="Named experiment profile from configs/experiment_profiles.yaml")
@@ -99,20 +104,26 @@ def load_validated_config_from_args(
     parser: argparse.ArgumentParser,
     *,
     allow_rolling_overrides: bool = False,
+    check_paths: bool = True,
 ) -> dict[str, Any]:
     try:
-        cfg = load_config(
-            args.config,
-            experiment_profile_name=getattr(args, "experiment_profile", None),
-            model_profile_name=getattr(args, "model_profile", None),
-        )
+        if getattr(args, "config_is_snapshot", False):
+            cfg = load_runtime_config(args.config)
+            cfg.setdefault("runtime", {})
+            cfg["runtime"]["config_path"] = args.config
+        else:
+            cfg = load_config(
+                args.config,
+                experiment_profile_name=getattr(args, "experiment_profile", None),
+                model_profile_name=getattr(args, "model_profile", None),
+            )
         apply_common_runtime_overrides(
             cfg,
             args,
             parser,
             allow_rolling_overrides=allow_rolling_overrides,
         )
-        validate_training_config(cfg, check_paths=True)
+        validate_training_config(cfg, check_paths=check_paths)
         return cfg
     except ValueError as exc:
         parser.error(str(exc))

@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import argparse
 import pickle
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 import torch
 
-from src.data_source import resolve_data_source_name
 from src.experiment_store import resolve_rebalance_freq
 from src.feature_selection import apply_feature_transforms
+from src.industry_groups import load_instrument_industry_groups
 from src.label_utils import (
     build_opportunity_target_series,
     compute_opportunity_sample_weights,
@@ -29,6 +28,7 @@ from src.rolling_baselines import (
     build_rank_ic_weighted_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
 )
+from src.return_horizon import build_forward_compound_return_series
 from src.rolling_runtime import build_label_series, build_prediction_metadata
 from src.rolling_types import PredictionBundle, RollingPaths, RollingRuntimeData
 
@@ -154,52 +154,6 @@ def _build_buyability_sample_weight_series(
     )
 
 
-def _build_forward_compound_return_series(
-    daily_returns: pd.Series,
-    *,
-    horizon: int,
-) -> pd.Series:
-    clean = pd.Series(daily_returns, copy=True).sort_index().astype(float)
-    horizon = max(int(horizon), 1)
-    if clean.empty:
-        return pd.Series(dtype=float)
-    values = clean.to_numpy(dtype=np.float64, copy=False)
-    out = np.full(len(clean), np.nan, dtype=np.float64)
-    for i in range(len(clean)):
-        end = i + horizon
-        if end >= len(clean):
-            break
-        window = values[i + 1 : end + 1]
-        if len(window) != horizon or not np.isfinite(window).all():
-            continue
-        out[i] = float(np.prod(1.0 + window) - 1.0)
-    return pd.Series(out, index=clean.index, dtype=float)
-
-
-def _load_instrument_industry_groups(
-    cfg: dict[str, Any],
-    *,
-    instruments: pd.Index,
-) -> pd.Series | None:
-    data_source = resolve_data_source_name(cfg)
-    raw_meta_dir = Path("data") / data_source / "raw" / "meta"
-    symbol_cache_path = raw_meta_dir / "symbol_cache.parquet"
-    if not symbol_cache_path.exists():
-        return None
-    try:
-        frame = pd.read_parquet(symbol_cache_path, columns=["local_symbol", "industry"])
-    except Exception:
-        return None
-    if frame.empty or "local_symbol" not in frame.columns or "industry" not in frame.columns:
-        return None
-    frame["local_symbol"] = frame["local_symbol"].astype(str).str.zfill(6)
-    frame["industry"] = frame["industry"].fillna("").replace("", pd.NA)
-    frame = frame.drop_duplicates("local_symbol", keep="last").set_index("local_symbol")
-    instrument_index = pd.Index(instruments.astype(str), dtype=object)
-    groups = frame["industry"].reindex(instrument_index)
-    return groups if groups.notna().any() else None
-
-
 def _build_full_runtime_label_series(runtime_data: RollingRuntimeData) -> pd.Series:
     dates = pd.to_datetime(runtime_data.dt_index).reset_index(drop=True)
     symbols = runtime_data.factor_frame["symbol"].astype(str).reset_index(drop=True)
@@ -232,14 +186,14 @@ def _prepare_opportunity_training_context(
     }
     mode = str(opportunity_cfg["mode"])
     if mode == "industry_excess":
-        context["instrument_groups"] = _load_instrument_industry_groups(
+        context["instrument_groups"] = load_instrument_industry_groups(
             cfg,
             instruments=runtime_data.factor_frame["symbol"].astype(str).drop_duplicates(),
         )
     elif mode == "benchmark_excess":
         runtime_labels = _build_full_runtime_label_series(runtime_data)
         benchmark_series, _ = build_benchmark_series(runtime_labels, cfg.get("backtest", {}).get("benchmark"))
-        context["benchmark_forward_returns"] = _build_forward_compound_return_series(
+        context["benchmark_forward_returns"] = build_forward_compound_return_series(
             benchmark_series,
             horizon=signal_horizon,
         )

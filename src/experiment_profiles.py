@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 from src.config_utils import deep_update, load_yaml_file
+from src.profile_resolution import build_inline_profile_path, load_profile_entry, merge_parent_profile
 
 
 DEFAULT_EXPERIMENT_PROFILE_CONFIG_PATH = "configs/experiment_profiles.yaml"
@@ -62,7 +62,7 @@ def resolve_experiment_profile(
 
 
 def _build_inline_profile_path(profile_name: str, profile_config_path: str) -> str:
-    return f"{Path(profile_config_path).resolve()}::{profile_name}"
+    return build_inline_profile_path(profile_name, profile_config_path)
 
 
 def _resolve_profile_definition(
@@ -72,26 +72,18 @@ def _resolve_profile_definition(
     profile_config_path: str,
     stack: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    if profile_name in stack:
-        cycle = " -> ".join([*stack, profile_name])
-        raise ValueError(f"Experiment profile inheritance cycle detected: {cycle}")
-    if profile_name not in profiles:
-        raise ValueError(f"Unknown experiment profile: {profile_name}")
-
-    profile_entry = deepcopy(profiles[profile_name])
-    source_path = _build_inline_profile_path(profile_name, profile_config_path)
-    if "path" not in profile_entry:
-        loaded_profile = {}
-    else:
-        repo_root = Path(profile_config_path).resolve().parent.parent
-        profile_path = Path(profile_entry.pop("path"))
-        if not profile_path.is_absolute():
-            profile_path = repo_root / profile_path
-        loaded_profile = load_yaml_file(profile_path)
-        source_path = str(profile_path)
+    loaded = load_profile_entry(
+        profile_name,
+        profiles=profiles,
+        profile_config_path=profile_config_path,
+        profile_kind="experiment",
+        stack=stack,
+    )
+    profile_entry = loaded.profile_entry
+    source_path = loaded.source_path
 
     extends_name = str(profile_entry.pop("extends", "") or "").strip()
-    merged = deepcopy(loaded_profile)
+    merged = deepcopy(loaded.loaded_profile)
     deep_update(merged, profile_entry)
     if extends_name:
         parent_profile = _resolve_profile_definition(
@@ -100,12 +92,7 @@ def _resolve_profile_definition(
             profile_config_path=profile_config_path,
             stack=(*stack, profile_name),
         )
-        parent_profile = deepcopy(parent_profile)
-        parent_profile.pop("name", None)
-        parent_profile.pop("path", None)
-        merged_profile = parent_profile
-        deep_update(merged_profile, merged)
-        merged = merged_profile
+        merged = merge_parent_profile(parent_profile, merged)
 
     merged["name"] = profile_name
     merged["path"] = source_path

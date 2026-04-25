@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 from typing import Any
 
 from src.config_utils import deep_update, load_yaml_file
 from src.data_source import get_default_factor_store_dir, resolve_data_source_name
+from src.profile_resolution import build_inline_profile_path, load_profile_entry, merge_parent_profile
 
 
 DEFAULT_PROFILE_CONFIG_PATH = "configs/feature_profiles.yaml"
@@ -22,7 +22,7 @@ def load_feature_profiles(config_path: str = DEFAULT_PROFILE_CONFIG_PATH) -> dic
 
 
 def _build_inline_profile_path(profile_name: str, profile_config_path: str) -> str:
-    return f"{Path(profile_config_path).resolve()}::{profile_name}"
+    return build_inline_profile_path(profile_name, profile_config_path)
 
 
 def _normalize_profile_column_mutation(
@@ -116,23 +116,15 @@ def _resolve_profile_definition(
     profile_config_path: str,
     stack: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    if profile_name in stack:
-        cycle = " -> ".join([*stack, profile_name])
-        raise ValueError(f"Feature profile inheritance cycle detected: {cycle}")
-    if profile_name not in profiles:
-        raise ValueError(f"Unknown feature profile: {profile_name}")
-
-    profile_entry = deepcopy(profiles[profile_name])
-    source_path = _build_inline_profile_path(profile_name, profile_config_path)
-    if "path" not in profile_entry:
-        loaded_profile = {}
-    else:
-        repo_root = Path(profile_config_path).resolve().parent.parent
-        feature_path = Path(profile_entry.pop("path"))
-        if not feature_path.is_absolute():
-            feature_path = repo_root / feature_path
-        loaded_profile = load_yaml_file(feature_path)
-        source_path = str(feature_path)
+    loaded = load_profile_entry(
+        profile_name,
+        profiles=profiles,
+        profile_config_path=profile_config_path,
+        profile_kind="feature",
+        stack=stack,
+    )
+    profile_entry = loaded.profile_entry
+    source_path = loaded.source_path
 
     extends_name = str(profile_entry.pop("extends", "") or "").strip()
     drop_columns = _normalize_profile_column_mutation(
@@ -148,7 +140,7 @@ def _resolve_profile_definition(
         field_name=f"feature profile '{profile_name}'.repeat_columns",
     )
 
-    merged = deepcopy(loaded_profile)
+    merged = deepcopy(loaded.loaded_profile)
     deep_update(merged, profile_entry)
     if extends_name:
         parent_profile = _resolve_profile_definition(
@@ -157,12 +149,7 @@ def _resolve_profile_definition(
             profile_config_path=profile_config_path,
             stack=(*stack, profile_name),
         )
-        parent_profile = deepcopy(parent_profile)
-        parent_profile.pop("name", None)
-        parent_profile.pop("path", None)
-        merged_profile = parent_profile
-        deep_update(merged_profile, merged)
-        merged = merged_profile
+        merged = merge_parent_profile(parent_profile, merged)
 
     if drop_columns or add_columns:
         base_columns = _materialize_profile_selected_columns(merged)

@@ -7,12 +7,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
-from src.data_source import resolve_data_source_name
 from src.experiment_store import finalize_run_store, resolve_rebalance_freq, resolve_retrain_step
 from src.backtest_trace import save_trace_artifacts, select_trace_dates
+from src.industry_groups import load_instrument_industry_groups
 from src.label_utils import (
     build_opportunity_target_series,
     get_label_column_name,
@@ -28,6 +27,7 @@ from src.rolling_baselines import (
     build_rank_ic_weighted_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
 )
+from src.return_horizon import build_forward_compound_return_series
 from src.rolling_runtime import load_rolling_runtime_data, load_source_market_data_frame
 from src.rolling_types import PredictionBundle, RollingPaths
 
@@ -68,6 +68,35 @@ def _sanitize_dict_keys(data: Any) -> Any:
     return {str(key): _sanitize_dict_keys(value) for key, value in data.items()}
 
 
+def _append_run_warning(
+    warnings: list[dict[str, Any]],
+    *,
+    code: str,
+    message: str,
+    severity: str = "warning",
+    **context: Any,
+) -> None:
+    record = {
+        "severity": str(severity),
+        "code": str(code),
+        "message": str(message),
+    }
+    for key, value in context.items():
+        if value is not None:
+            record[str(key)] = value
+    warnings.append(record)
+    print(f"[!] {message}")
+
+
+def _write_run_warnings(results_dir: Path, warnings: list[dict[str, Any]]) -> Path | None:
+    if not warnings:
+        return None
+    path = results_dir / "run_warnings.json"
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(warnings, f, indent=2, ensure_ascii=False, default=str)
+    return path
+
+
 def _build_validation_metric_signal_series(
     bundle: PredictionBundle,
     *,
@@ -103,52 +132,6 @@ def _build_validation_metric_signal_series(
     return signal if not signal.empty else None
 
 
-def _build_forward_compound_return_series(
-    daily_returns: pd.Series,
-    *,
-    horizon: int,
-) -> pd.Series:
-    clean = pd.Series(daily_returns, copy=True).sort_index().astype(float)
-    horizon = max(int(horizon), 1)
-    if clean.empty:
-        return pd.Series(dtype=float)
-    values = clean.to_numpy(dtype=np.float64, copy=False)
-    out = np.full(len(clean), np.nan, dtype=np.float64)
-    for i in range(len(clean)):
-        end = i + horizon
-        if end >= len(clean):
-            break
-        window = values[i + 1 : end + 1]
-        if len(window) != horizon or not np.isfinite(window).all():
-            continue
-        out[i] = float(np.prod(1.0 + window) - 1.0)
-    return pd.Series(out, index=clean.index, dtype=float)
-
-
-def _load_instrument_industry_groups(
-    cfg: dict[str, Any],
-    *,
-    instruments: pd.Index,
-) -> pd.Series | None:
-    data_source = resolve_data_source_name(cfg)
-    raw_meta_dir = Path("data") / data_source / "raw" / "meta"
-    symbol_cache_path = raw_meta_dir / "symbol_cache.parquet"
-    if not symbol_cache_path.exists():
-        return None
-    try:
-        frame = pd.read_parquet(symbol_cache_path, columns=["local_symbol", "industry"])
-    except Exception:
-        return None
-    if frame.empty or "local_symbol" not in frame.columns or "industry" not in frame.columns:
-        return None
-    frame["local_symbol"] = frame["local_symbol"].astype(str).str.zfill(6)
-    frame["industry"] = frame["industry"].fillna("").replace("", pd.NA)
-    frame = frame.drop_duplicates("local_symbol", keep="last").set_index("local_symbol")
-    instrument_index = pd.Index(instruments.astype(str), dtype=object)
-    groups = frame["industry"].reindex(instrument_index)
-    return groups if groups.notna().any() else None
-
-
 def evaluate_prediction_bundle(
     cfg: dict[str, Any],
     args: argparse.Namespace,
@@ -176,6 +159,7 @@ def evaluate_prediction_bundle(
     signal_horizon = int(bundle.metadata.get("signal_horizon", resolve_signal_horizon(cfg)))
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
     runtime_data_cache = None
+    run_warnings: list[dict[str, Any]] = []
 
     def _ensure_runtime_data(*, extra_columns: list[str] | None = None):
         nonlocal runtime_data_cache
@@ -211,19 +195,40 @@ def evaluate_prediction_bundle(
             runtime_data = _ensure_runtime_data()
             avg_factor_baseline_predictions = build_average_factor_baseline_predictions(runtime_data)
         except Exception as exc:
-            print(f"[!] Skipping avg-factor baseline reconstruction: {exc}")
+            _append_run_warning(
+                run_warnings,
+                code="baseline_reconstruction_failed",
+                message=f"Skipping avg-factor baseline reconstruction: {exc}",
+                baseline="avg_factor_baseline",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
     if sign_aligned_factor_baseline_predictions is None:
         try:
             runtime_data = _ensure_runtime_data()
             sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(runtime_data)
         except Exception as exc:
-            print(f"[!] Skipping sign-aligned baseline reconstruction: {exc}")
+            _append_run_warning(
+                run_warnings,
+                code="baseline_reconstruction_failed",
+                message=f"Skipping sign-aligned baseline reconstruction: {exc}",
+                baseline="sign_aligned_factor_baseline",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
     if rank_avg_factor_baseline_predictions is None:
         try:
             runtime_data = _ensure_runtime_data()
             rank_avg_factor_baseline_predictions = build_rank_average_factor_baseline_predictions(runtime_data)
         except Exception as exc:
-            print(f"[!] Skipping rank-average baseline reconstruction: {exc}")
+            _append_run_warning(
+                run_warnings,
+                code="baseline_reconstruction_failed",
+                message=f"Skipping rank-average baseline reconstruction: {exc}",
+                baseline="rank_avg_factor_baseline",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
     if rank_ic_weighted_factor_baseline_predictions is None:
         try:
             runtime_data = _ensure_runtime_data()
@@ -231,7 +236,14 @@ def evaluate_prediction_bundle(
                 runtime_data,
             )
         except Exception as exc:
-            print(f"[!] Skipping rank-IC-weighted baseline reconstruction: {exc}")
+            _append_run_warning(
+                run_warnings,
+                code="baseline_reconstruction_failed",
+                message=f"Skipping rank-IC-weighted baseline reconstruction: {exc}",
+                baseline="rank_ic_weighted_factor_baseline",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
     market_data = None
     intraperiod_exit_cfg = cfg.get("backtest", {}).get("intraperiod_exit") or {}
     price_confirm_cfg = intraperiod_exit_cfg.get("price_confirm") if isinstance(intraperiod_exit_cfg, dict) else None
@@ -271,12 +283,12 @@ def evaluate_prediction_bundle(
     opportunity_instrument_groups: pd.Series | None = None
     benchmark_forward_returns: pd.Series | None = None
     if str(opportunity_cfg["mode"]) == "industry_excess":
-        opportunity_instrument_groups = _load_instrument_industry_groups(
+        opportunity_instrument_groups = load_instrument_industry_groups(
             cfg,
             instruments=aligned_preds.index.get_level_values("instrument").unique(),
         )
     elif str(opportunity_cfg["mode"]) == "benchmark_excess":
-        benchmark_forward_returns = _build_forward_compound_return_series(bench_series, horizon=signal_horizon)
+        benchmark_forward_returns = build_forward_compound_return_series(bench_series, horizon=signal_horizon)
     try:
         opportunity_labels = build_opportunity_target_series(
             aligned_labels,
@@ -285,7 +297,14 @@ def evaluate_prediction_bundle(
             benchmark_forward_returns=benchmark_forward_returns,
         )
     except Exception as exc:
-        print(f"[!] Skipping opportunity label derivation: {exc}")
+        _append_run_warning(
+            run_warnings,
+            code="opportunity_label_derivation_failed",
+            message=f"Skipping opportunity label derivation: {exc}",
+            opportunity_mode=str(opportunity_cfg["mode"]),
+            error_type=type(exc).__name__,
+            error=str(exc),
+        )
         opportunity_labels = None
     opportunity_paths = save_opportunity_diagnostics(
         paths.results_dir,
@@ -306,15 +325,25 @@ def evaluate_prediction_bundle(
             metric_name = str(risk_control_cfg.get("validation_metric", "valid_topk_label_mean") or "valid_topk_label_mean").strip().lower()
             primary_signal_values = _build_validation_metric_signal_series(bundle, metric_name=metric_name)
             if primary_signal_values is None:
-                print(f"[!] No rolling validation metric series available for risk control metric={metric_name}; backtest may fail.")
+                _append_run_warning(
+                    run_warnings,
+                    code="risk_control_validation_metric_missing",
+                    message=f"No rolling validation metric series available for risk control metric={metric_name}; backtest may fail.",
+                    metric=metric_name,
+                )
             secondary_metric_name = risk_control_cfg.get("secondary_validation_metric")
             if secondary_metric_name is not None:
                 secondary_metric_name = str(secondary_metric_name).strip().lower()
                 secondary_signal_values = _build_validation_metric_signal_series(bundle, metric_name=secondary_metric_name)
                 if secondary_signal_values is None:
-                    print(
-                        f"[!] No rolling validation metric series available for secondary risk control metric={secondary_metric_name}; "
-                        "backtest may fail."
+                    _append_run_warning(
+                        run_warnings,
+                        code="risk_control_validation_metric_missing",
+                        message=(
+                            f"No rolling validation metric series available for secondary risk control metric={secondary_metric_name}; "
+                            "backtest may fail."
+                        ),
+                        metric=secondary_metric_name,
                     )
                 risk_control_signal_values = {}
                 if primary_signal_values is not None:
@@ -350,12 +379,17 @@ def evaluate_prediction_bundle(
         "intraperiod_exit": cfg["backtest"].get("intraperiod_exit"),
     }
     if cfg["strategy"].get("max_industry_weight") is not None:
-        instrument_groups = _load_instrument_industry_groups(
+        instrument_groups = load_instrument_industry_groups(
             cfg,
             instruments=bundle.final_predictions.index.get_level_values("instrument").unique(),
         )
         if instrument_groups is None:
-            print("[!] strategy.max_industry_weight is set but no industry mapping was loaded; industry cap will be ignored.")
+            _append_run_warning(
+                run_warnings,
+                code="industry_mapping_missing",
+                message="strategy.max_industry_weight is set but no industry mapping was loaded; industry cap will be ignored.",
+                config_path="strategy.max_industry_weight",
+            )
         else:
             backtest_kwargs["instrument_groups"] = instrument_groups
     backtest_report = run_native_backtest(
@@ -479,6 +513,7 @@ def evaluate_prediction_bundle(
     safe_portfolio_results = _sanitize_dict_keys(portfolio_results)
     with open(paths.results_dir / "native_portfolio_metrics.json", "w") as f:
         json.dump(safe_portfolio_results, f, indent=2, default=str)
+    run_warnings_path = _write_run_warnings(paths.results_dir, run_warnings)
 
     manifest_path = finalize_run_store(
         run_store,
@@ -509,6 +544,9 @@ def evaluate_prediction_bundle(
             "fusion_secondary_prediction_dir": bundle.metadata.get("fusion_secondary_prediction_dir", ""),
             "fusion_overlap_rows": bundle.metadata.get("fusion_overlap_rows", ""),
             "fusion_overlap_dates": bundle.metadata.get("fusion_overlap_dates", ""),
+            "run_warning_count": len(run_warnings),
+            "run_warnings_path": str(run_warnings_path) if run_warnings_path else "",
+            "run_warnings": run_warnings,
             **opportunity_paths,
         },
     )

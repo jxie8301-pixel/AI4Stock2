@@ -15,22 +15,20 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from run_single_factor_diagnostics import (
-    _apply_industry_neutralization,
-    _derive_diagnostic_label_series,
-    _resolve_period_dates,
-    _resolve_segments,
-)
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import resolve_selected_feature_columns
 from src.label_utils import get_label_column_name, resolve_signal_horizon
 from src.override_utils import parse_override_arg
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
+from src.single_factor_runtime import (
+    apply_industry_neutralization,
+    derive_diagnostic_label_series,
+    resolve_period_dates,
+    resolve_segments,
+)
 from src.single_factor_diagnostics import (
-    build_single_factor_detail_frames,
-    build_segmented_single_factor_diagnostics,
-    build_single_factor_diagnostics,
+    build_single_factor_diagnostics_bundle,
     save_single_factor_diagnostics,
 )
 
@@ -71,6 +69,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Cross-sectional quantile bins used for monotonicity and top-bottom spread checks.",
     )
     parser.add_argument("--top-n", type=int, default=50, help="How many factors to keep in top-factor exports.")
+    parser.add_argument(
+        "--no-detail-artifacts",
+        action="store_true",
+        help="Skip daily bucket/spread/monthly/missing CSV artifacts when only summary diagnostics are needed.",
+    )
     parser.add_argument(
         "--segment-scheme",
         choices=["none", "config_split", "yearly"],
@@ -303,7 +306,7 @@ def main() -> None:
     signal_horizon = int(resolve_signal_horizon(cfg))
     label_column = get_label_column_name(signal_horizon)
 
-    date_start, date_end = _resolve_period_dates(cfg, args)
+    date_start, date_end = resolve_period_dates(cfg, args)
     base_output_dir = (
         Path(args.base_output_dir)
         if args.base_output_dir
@@ -402,13 +405,13 @@ def main() -> None:
         raise ValueError("Factor store returned no rows for the requested diagnostics period.")
     load_elapsed = perf_counter() - load_started
 
-    segments = _resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
+    segments = resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
     label_cache: dict[tuple[str, float], tuple[np.ndarray, np.ndarray]] = {}
     for case in cases:
         label_key = (case.diagnostic_label_space, float(case.diagnostic_threshold))
         if label_key in label_cache:
             continue
-        case_labels = _derive_diagnostic_label_series(
+        case_labels = derive_diagnostic_label_series(
             base_frame,
             cfg=cfg,
             signal_horizon=signal_horizon,
@@ -435,31 +438,26 @@ def main() -> None:
         neutralize_elapsed = 0.0
         if bool(getattr(args, "industry_neutral", False)):
             neutralize_started = perf_counter()
-            case_frame, neutralized_feature_count = _apply_industry_neutralization(
+            case_frame, neutralized_feature_count = apply_industry_neutralization(
                 case_frame,
                 cfg=cfg,
                 feature_names=feature_names,
             )
             neutralize_elapsed = perf_counter() - neutralize_started
-        summary = build_single_factor_diagnostics(
+        diagnostics_started = perf_counter()
+        bundle = build_single_factor_diagnostics_bundle(
             case_frame,
             feature_names=feature_names,
             label_column="label",
             quantile_bins=max(int(args.quantile_bins), 2),
-        )
-        detail_frames = build_single_factor_detail_frames(
-            case_frame,
-            feature_names=feature_names,
-            label_column="label",
-            quantile_bins=max(int(args.quantile_bins), 2),
-        )
-        segment_comparison, segment_summaries = build_segmented_single_factor_diagnostics(
-            case_frame,
-            feature_names=feature_names,
             segments=segments,
-            label_column="label",
-            quantile_bins=max(int(args.quantile_bins), 2),
+            include_details=not bool(getattr(args, "no_detail_artifacts", False)),
         )
+        diagnostics_elapsed = perf_counter() - diagnostics_started
+        summary = bundle.summary
+        detail_frames = bundle.detail_frames
+        segment_comparison = bundle.segment_comparison
+        segment_summaries = bundle.segment_summaries
         incremental_summary = _filter_summary_for_features(summary, incremental_feature_names)
 
         output_dir = _resolve_case_output_dir(base_output_dir, case)
@@ -482,10 +480,12 @@ def main() -> None:
             "incremental_features": incremental_feature_names,
             "row_count": len(case_frame),
             "quantile_bins": max(int(args.quantile_bins), 2),
+            "detail_artifacts": detail_frames is not None,
             "segment_scheme": args.segment_scheme,
             "segment_count": len(segment_summaries),
             "shared_load_elapsed_sec": round(load_elapsed, 6),
             "neutralize_elapsed_sec": round(neutralize_elapsed, 6),
+            "diagnostics_elapsed_sec": round(diagnostics_elapsed, 6),
             "case_elapsed_sec": round(perf_counter() - case_started, 6),
         }
         case_cfg_snapshot = deepcopy(cfg)

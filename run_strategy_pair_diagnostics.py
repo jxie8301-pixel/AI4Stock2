@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import argparse
 import ast
-import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+from src.candidate_diagnostics import (
+    bucket_shape,
+    metric_value,
+    parse_bucket_ids,
+    read_required_csv,
+    read_required_json,
+)
+from src.candidate_profiles import feature_family
 
 
 METRIC_KEYS = [
@@ -59,24 +67,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _read_csv(run_dir: Path, name: str) -> pd.DataFrame:
-    path = run_dir / name
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required artifact: {path}")
-    return pd.read_csv(path)
+    return read_required_csv(run_dir, name)
 
 
 def _read_json(run_dir: Path, name: str) -> dict[str, Any]:
-    path = run_dir / name
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required artifact: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return read_required_json(run_dir, name)
 
 
 def _metric_value(payload: dict[str, Any], key: str) -> Any:
-    value = payload.get(key)
-    if isinstance(value, dict) and "risk" in value:
-        return value["risk"]
-    return value
+    return metric_value(payload, key)
 
 
 def summarize_metrics(run_dirs: dict[str, Path]) -> pd.DataFrame:
@@ -115,42 +114,11 @@ def summarize_training(run_dirs: dict[str, Path]) -> pd.DataFrame:
 
 
 def _parse_bucket_ids(raw: str) -> set[int]:
-    values = {int(part.strip()) for part in raw.split(",") if part.strip()}
-    if not values:
-        raise ValueError("--middle-buckets must contain at least one integer bucket id.")
-    return values
+    return parse_bucket_ids(raw, option_name="--middle-buckets")
 
 
 def _bucket_shape(frame: pd.DataFrame, *, top_bucket: int, middle_buckets: set[int]) -> dict[str, Any]:
-    if "bucket" not in frame or "label_mean" not in frame:
-        raise ValueError("Bucket report must contain 'bucket' and 'label_mean'.")
-    by_bucket = frame.set_index("bucket")
-    if top_bucket not in by_bucket.index:
-        raise ValueError(f"Top bucket {top_bucket} not found in bucket report.")
-    bottom_bucket = int(frame["bucket"].max())
-    top_label = float(by_bucket.at[top_bucket, "label_mean"])
-    bottom_label = float(by_bucket.at[bottom_bucket, "label_mean"])
-    best_idx = int(frame.loc[frame["label_mean"].idxmax(), "bucket"])
-    worst_idx = int(frame.loc[frame["label_mean"].idxmin(), "bucket"])
-    middle_frame = frame[frame["bucket"].isin(middle_buckets)]
-    middle_mean = float(middle_frame["label_mean"].mean()) if not middle_frame.empty else float("nan")
-    middle_best = float(middle_frame["label_mean"].max()) if not middle_frame.empty else float("nan")
-    sorted_labels = frame.sort_values("label_mean", ascending=False).reset_index(drop=True)
-    top_label_rank = int(sorted_labels.index[sorted_labels["bucket"] == top_bucket][0]) + 1
-    return {
-        "top_bucket": top_bucket,
-        "bottom_bucket": bottom_bucket,
-        "top_label_mean": top_label,
-        "bottom_label_mean": bottom_label,
-        "top_minus_bottom": top_label - bottom_label,
-        "middle_label_mean": middle_mean,
-        "middle_best_label_mean": middle_best,
-        "top_minus_middle_mean": top_label - middle_mean,
-        "top_minus_middle_best": top_label - middle_best,
-        "best_bucket": best_idx,
-        "worst_bucket": worst_idx,
-        "top_bucket_label_rank": top_label_rank,
-    }
+    return bucket_shape(frame, top_bucket=top_bucket, middle_buckets=middle_buckets)
 
 
 def compare_buckets(
@@ -238,23 +206,7 @@ def compare_daily(candidate_name: str, candidate_dir: Path, baseline_name: str, 
 
 
 def _feature_family(feature: str) -> str:
-    if feature.startswith("TS_stock_vs_industry_"):
-        return "ts_stock_vs_industry"
-    if feature.startswith("TS_industry_"):
-        return "ts_industry_state"
-    if feature.endswith("_minus_industry") or "_minus_industry_" in feature:
-        return "ts_relative_value_quality"
-    if feature.startswith("TS_dividend") or feature.startswith("TS_bp") or feature.startswith("TS_sp"):
-        return "ts_valuation"
-    if "amihud" in feature or "turnover" in feature:
-        return "liquidity"
-    if feature.startswith("LGBM_"):
-        return "lgbm"
-    if feature.startswith("TEMP_"):
-        return "temporal"
-    if feature.startswith("TECH_"):
-        return "technical"
-    return "other"
+    return feature_family(feature)
 
 
 def compare_feature_importance(candidate_name: str, candidate_dir: Path, baseline_name: str, baseline_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:

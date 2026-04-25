@@ -215,7 +215,8 @@ Current status:
 - [x] Legacy valuation sentinel columns are preserved, with clean NaN-preserving variants and invalid flags added for migration
 - [x] Tushare bucket-source precondition validation records sidecar/context schema assumptions in metadata
 - [x] Collector common parquet write/read and numeric-dtype utilities are extracted behind compatibility wrappers
-- [ ] Candidate diagnostics shared utility extraction is the next reliability cleanup target
+- [x] Candidate diagnostics share artifact readers, metric extraction, bucket-shape, and feature-family helpers
+- [ ] Config validation split is the next reliability cleanup target
 
 Detailed implementation plan:
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from run_candidate_pool_diagnostics import _parse_runs, sync_outputs_to_candidate_root
+from src.candidate_diagnostics import bucket_shape, metric_value, parse_bucket_ids
 from src.candidate_profiles import build_candidate_profile, flatten_candidate_profile, to_jsonable
 
 
@@ -203,3 +204,21 @@ def test_sync_outputs_to_candidate_root_copies_aggregate_and_per_candidate_profi
     assert (shortlist_root / "portfolio_summary.csv").exists()
     assert (candidate_dir / "candidate_profile.json").exists()
     assert (candidate_dir / "candidate_profile.csv").exists()
+
+
+def test_candidate_diagnostics_shared_helpers_handle_metrics_and_buckets() -> None:
+    frame = pd.DataFrame(
+        [
+            {"bucket": "1", "label_mean": "0.03"},
+            {"bucket": "2", "label_mean": "0.01"},
+            {"bucket": "3", "label_mean": "-0.02"},
+        ]
+    )
+
+    shape = bucket_shape(frame, top_bucket=1, middle_buckets={2})
+
+    assert metric_value({"sharpe_ratio": {"risk": 1.2}}, "sharpe_ratio") == 1.2
+    assert parse_bucket_ids("2, 3") == {2, 3}
+    assert shape["top_minus_bottom"] == 0.05
+    assert shape["best_bucket"] == 1
+    assert shape["top_bucket_label_rank"] == 1

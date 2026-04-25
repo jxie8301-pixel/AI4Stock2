@@ -11,7 +11,14 @@ from typing import Any
 
 import pandas as pd
 
-from src.candidate_profiles import build_candidate_profiles, flatten_candidate_profiles, to_jsonable
+from src.candidate_diagnostics import (
+    bucket_shape,
+    metric_value,
+    parse_bucket_ids,
+    read_required_csv,
+    read_required_json,
+)
+from src.candidate_profiles import build_candidate_profiles, feature_family, flatten_candidate_profiles, to_jsonable
 from src.reference_baselines import (
     CANDIDATE_GATE_REFERENCE_BASELINE_PREFIXES,
     CORE_REFERENCE_BASELINE_PREFIXES,
@@ -143,31 +150,19 @@ def _resolve_candidate_dirs(args: argparse.Namespace) -> tuple[Path | None, dict
 
 
 def _parse_bucket_ids(raw: str) -> set[int]:
-    values = {int(part.strip()) for part in raw.split(",") if part.strip()}
-    if not values:
-        raise ValueError("--middle-buckets must contain at least one bucket id.")
-    return values
+    return parse_bucket_ids(raw, option_name="--middle-buckets")
 
 
 def _read_csv(run_dir: Path, filename: str) -> pd.DataFrame:
-    path = run_dir / filename
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required artifact: {path}")
-    return pd.read_csv(path)
+    return read_required_csv(run_dir, filename)
 
 
 def _read_json(run_dir: Path, filename: str) -> dict[str, Any]:
-    path = run_dir / filename
-    if not path.exists():
-        raise FileNotFoundError(f"Missing required artifact: {path}")
-    return json.loads(path.read_text(encoding="utf-8"))
+    return read_required_json(run_dir, filename)
 
 
 def _metric_value(metrics: dict[str, Any], key: str) -> Any:
-    value = metrics.get(key)
-    if isinstance(value, dict) and "risk" in value:
-        return value["risk"]
-    return value
+    return metric_value(metrics, key)
 
 
 def _resolve_output_dir(args: argparse.Namespace) -> Path:
@@ -245,38 +240,7 @@ def summarize_concentration(runs: dict[str, Path]) -> pd.DataFrame:
 
 
 def _bucket_shape(frame: pd.DataFrame, *, top_bucket: int, middle_buckets: set[int]) -> dict[str, Any]:
-    numeric = frame.copy()
-    numeric["bucket"] = pd.to_numeric(numeric["bucket"], errors="coerce")
-    numeric["label_mean"] = pd.to_numeric(numeric["label_mean"], errors="coerce")
-    numeric = numeric.dropna(subset=["bucket", "label_mean"]).sort_values("bucket")
-    numeric["bucket"] = numeric["bucket"].astype(int)
-    if top_bucket not in set(numeric["bucket"]):
-        raise ValueError(f"Top bucket {top_bucket} not found.")
-    bottom_bucket = int(numeric["bucket"].max())
-    by_bucket = numeric.set_index("bucket")
-    top_label = float(by_bucket.at[top_bucket, "label_mean"])
-    bottom_label = float(by_bucket.at[bottom_bucket, "label_mean"])
-    middle = numeric[numeric["bucket"].isin(middle_buckets)]
-    best_row = numeric.loc[numeric["label_mean"].idxmax()]
-    worst_row = numeric.loc[numeric["label_mean"].idxmin()]
-    ranked = numeric.sort_values("label_mean", ascending=False).reset_index(drop=True)
-    top_rank = int(ranked.index[ranked["bucket"] == top_bucket][0]) + 1
-    return {
-        "top_bucket": top_bucket,
-        "bottom_bucket": bottom_bucket,
-        "top_label_mean": top_label,
-        "bottom_label_mean": bottom_label,
-        "top_minus_bottom": top_label - bottom_label,
-        "middle_label_mean": float(middle["label_mean"].mean()) if not middle.empty else float("nan"),
-        "middle_best_label_mean": float(middle["label_mean"].max()) if not middle.empty else float("nan"),
-        "top_minus_middle_mean": top_label - float(middle["label_mean"].mean()) if not middle.empty else float("nan"),
-        "top_minus_middle_best": top_label - float(middle["label_mean"].max()) if not middle.empty else float("nan"),
-        "best_bucket": int(best_row["bucket"]),
-        "best_bucket_label_mean": float(best_row["label_mean"]),
-        "worst_bucket": int(worst_row["bucket"]),
-        "top_bucket_label_rank": top_rank,
-        "bucket_label_spearman": float(numeric["bucket"].corr(numeric["label_mean"], method="spearman")),
-    }
+    return bucket_shape(frame, top_bucket=top_bucket, middle_buckets=middle_buckets)
 
 
 def summarize_buckets(runs: dict[str, Path], *, top_bucket: int, middle_buckets: set[int]) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -298,23 +262,7 @@ def summarize_buckets(runs: dict[str, Path], *, top_bucket: int, middle_buckets:
 
 
 def _feature_family(feature: str) -> str:
-    if feature.startswith("TS_stock_vs_industry_"):
-        return "ts_stock_vs_industry"
-    if feature.startswith("TS_industry_"):
-        return "ts_industry_state"
-    if feature.endswith("_minus_industry") or "_minus_industry_" in feature:
-        return "ts_relative_value_quality"
-    if feature.startswith(("TS_dividend", "TS_bp", "TS_sp")):
-        return "ts_valuation"
-    if "amihud" in feature or "turnover" in feature:
-        return "liquidity"
-    if feature.startswith("LGBM_"):
-        return "lgbm"
-    if feature.startswith("TEMP_"):
-        return "temporal"
-    if feature.startswith("TECH_"):
-        return "technical"
-    return "other"
+    return feature_family(feature)
 
 
 def summarize_feature_families(runs: dict[str, Path]) -> pd.DataFrame:

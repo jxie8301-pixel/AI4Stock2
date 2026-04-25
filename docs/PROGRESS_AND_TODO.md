@@ -166,7 +166,8 @@ system baseline for feature research.
   - standalone `rankic_weighted` semantic sleeve
   - parent model score plus semantic sleeve overlay
   - conservative formula sleeve using low-volatility, dividend quality, value-quality, profitability quality, and trend confirmation
-- [ ] Add absolute baseline metrics to experiment manifests; current `*_baseline_excess_annualized_return` fields are model-minus-baseline deltas and are easy to misread
+- [x] Add absolute baseline metrics to experiment manifests; current `*_baseline_excess_annualized_return` fields are model-minus-baseline deltas and are easy to misread
+  - include baseline annualized return, volatility, Sharpe / information ratio, max drawdown, monthly win rate, and rebalance win rate in both manifest and `experiment_index.csv`
 - [ ] Export monthly and rebalance-period summaries for each factor baseline, especially `rankic_weighted_factor` and `rank_zscore_avg_factor`
 - [ ] Treat the non-ML factor sleeves as minimum bars for future model promotion:
   - annualized return and Sharpe must improve after costs

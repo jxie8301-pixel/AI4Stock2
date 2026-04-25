@@ -605,6 +605,20 @@ class NativeModelMetricsTest(unittest.TestCase):
             portfolio_metrics["fixed_risk_avg_factor_baseline_name"],
             "Fixed-Risk Avg Unique Factor Baseline",
         )
+        self.assertAlmostEqual(
+            portfolio_metrics["avg_factor_baseline_annualized_return"]["risk"],
+            np.mean([0.08, -0.02, 0.25, 0.01]) * 242,
+            places=8,
+        )
+        self.assertAlmostEqual(
+            portfolio_metrics["avg_factor_baseline_sharpe_ratio"]["risk"],
+            portfolio_metrics["avg_factor_baseline_information_ratio"]["risk"],
+            places=8,
+        )
+        self.assertAlmostEqual(portfolio_metrics["avg_factor_baseline_monthly_win_rate"]["risk"], 0.75, places=8)
+        self.assertEqual(portfolio_metrics["avg_factor_baseline_profitable_month_summary"], "3 / 4 = 75.00%")
+        self.assertAlmostEqual(portfolio_metrics["avg_factor_baseline_rebalance_win_rate"]["risk"], 1.0, places=8)
+        self.assertEqual(portfolio_metrics["avg_factor_baseline_profitable_rebalance_summary"], "2 / 2 = 100.00%")
         self.assertEqual(portfolio_metrics["months_beating_avg_factor_baseline_summary"], "2 / 4 = 50.00%")
         self.assertEqual(portfolio_metrics["rebalances_beating_avg_factor_baseline_summary"], "0 / 2 = 0.00%")
         self.assertEqual(

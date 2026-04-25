@@ -31,6 +31,15 @@ PORTFOLIO_PROFILE_KEYS = [
 ]
 
 REFERENCE_BASELINE_PROFILE_FIELDS = [
+    "annualized_return",
+    "annualized_volatility",
+    "sharpe_ratio",
+    "information_ratio",
+    "max_drawdown",
+    "monthly_win_rate",
+    "profitable_month_summary",
+    "rebalance_win_rate",
+    "profitable_rebalance_summary",
     "excess_annualized_return",
     "excess_information_ratio",
     "months_beating_pct",
@@ -104,6 +113,15 @@ def summarize_reference_baselines(metrics: dict[str, Any]) -> dict[str, dict[str
     out: dict[str, dict[str, Any]] = {}
     for prefix in REFERENCE_BASELINE_PREFIXES:
         baseline = {
+            "annualized_return": metric_value(metrics, f"{prefix}_annualized_return"),
+            "annualized_volatility": metric_value(metrics, f"{prefix}_annualized_volatility"),
+            "sharpe_ratio": metric_value(metrics, f"{prefix}_sharpe_ratio"),
+            "information_ratio": metric_value(metrics, f"{prefix}_information_ratio"),
+            "max_drawdown": metric_value(metrics, f"{prefix}_max_drawdown"),
+            "monthly_win_rate": metric_value(metrics, f"{prefix}_monthly_win_rate"),
+            "profitable_month_summary": metric_text(metrics, f"{prefix}_profitable_month_summary"),
+            "rebalance_win_rate": metric_value(metrics, f"{prefix}_rebalance_win_rate"),
+            "profitable_rebalance_summary": metric_text(metrics, f"{prefix}_profitable_rebalance_summary"),
             "excess_annualized_return": metric_value(metrics, f"{prefix}_excess_annualized_return"),
             "excess_information_ratio": metric_value(metrics, f"{prefix}_excess_information_ratio"),
             "months_beating_pct": metric_value(metrics, f"months_beating_{prefix}_pct"),

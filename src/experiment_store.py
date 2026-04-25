@@ -148,24 +148,14 @@ def _safe_float(value: Any) -> float | None:
 def _flatten_reference_baseline_metrics(portfolio_metrics: dict) -> dict[str, Any]:
     flattened: dict[str, Any] = {}
     for prefix in REFERENCE_BASELINE_PREFIXES:
-        flattened[f"{prefix}_excess_annualized_return"] = _safe_float(
-            portfolio_metrics.get(f"{prefix}_excess_annualized_return", {}).get("risk")
-        )
-        flattened[f"{prefix}_excess_information_ratio"] = _safe_float(
-            portfolio_metrics.get(f"{prefix}_excess_information_ratio", {}).get("risk")
-        )
-        flattened[f"months_beating_{prefix}_pct"] = _safe_float(
-            portfolio_metrics.get(f"months_beating_{prefix}_pct", {}).get("risk")
-        )
-        flattened[f"months_beating_{prefix}_summary"] = str(
-            portfolio_metrics.get(f"months_beating_{prefix}_summary") or ""
-        )
-        flattened[f"rebalances_beating_{prefix}_pct"] = _safe_float(
-            portfolio_metrics.get(f"rebalances_beating_{prefix}_pct", {}).get("risk")
-        )
-        flattened[f"rebalances_beating_{prefix}_summary"] = str(
-            portfolio_metrics.get(f"rebalances_beating_{prefix}_summary") or ""
-        )
+        for field in reference_baseline_summary_fields(prefix):
+            value = portfolio_metrics.get(field)
+            if isinstance(value, dict):
+                flattened[field] = _safe_float(value.get("risk"))
+            elif field.endswith("_summary"):
+                flattened[field] = str(value or "")
+            else:
+                flattened[field] = _safe_float(value)
     return flattened
 
 

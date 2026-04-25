@@ -141,9 +141,9 @@ def _attach_reference_metrics(
     result[f"{prefix}_name"] = display_name
     result[f"{prefix}_annualized_return"] = {"risk": reference_mean * ann_factor}
     result[f"{prefix}_annualized_volatility"] = {"risk": reference_std * np.sqrt(ann_factor)}
-    result[f"{prefix}_information_ratio"] = {
-        "risk": (reference_mean / reference_std) * np.sqrt(ann_factor) if reference_std > 0 else 0.0
-    }
+    reference_sharpe = (reference_mean / reference_std) * np.sqrt(ann_factor) if reference_std > 0 else 0.0
+    result[f"{prefix}_sharpe_ratio"] = {"risk": reference_sharpe}
+    result[f"{prefix}_information_ratio"] = {"risk": reference_sharpe}
     result[f"{prefix}_max_drawdown"] = {"risk": _compute_max_drawdown(reference_returns)}
     result[f"{prefix}_excess_annualized_return"] = {"risk": excess_mean * ann_factor}
     result[f"{prefix}_excess_information_ratio"] = {
@@ -151,6 +151,17 @@ def _attach_reference_metrics(
     }
 
     monthly_reference = _resample_compound_returns(reference_returns, "ME")
+    monthly_reference_positive_count = int((monthly_reference > 0).sum()) if not monthly_reference.empty else 0
+    monthly_reference_total_count = int(len(monthly_reference))
+    result[f"{prefix}_monthly_win_rate"] = {
+        "risk": float((monthly_reference_positive_count / monthly_reference_total_count) if monthly_reference_total_count > 0 else 0.0)
+    }
+    result[f"{prefix}_profitable_month_count"] = monthly_reference_positive_count
+    result[f"{prefix}_total_month_count"] = monthly_reference_total_count
+    result[f"{prefix}_profitable_month_summary"] = _format_count_ratio(
+        monthly_reference_positive_count,
+        monthly_reference_total_count,
+    )
     aligned_monthly_strategy, aligned_monthly_reference = monthly_ret.align(monthly_reference, join="inner")
     monthly_beats = (
         int((aligned_monthly_strategy > aligned_monthly_reference).sum())
@@ -167,6 +178,21 @@ def _attach_reference_metrics(
 
     if rebalance_freq > 0:
         reference_rebalance = _compute_chunked_period_returns(reference_returns, rebalance_freq)
+        rebalance_reference_positive_count = int((reference_rebalance > 0).sum()) if not reference_rebalance.empty else 0
+        rebalance_reference_total_count = int(len(reference_rebalance))
+        result[f"{prefix}_rebalance_win_rate"] = {
+            "risk": float(
+                (rebalance_reference_positive_count / rebalance_reference_total_count)
+                if rebalance_reference_total_count > 0
+                else 0.0
+            )
+        }
+        result[f"{prefix}_profitable_rebalance_count"] = rebalance_reference_positive_count
+        result[f"{prefix}_total_rebalance_count"] = rebalance_reference_total_count
+        result[f"{prefix}_profitable_rebalance_summary"] = _format_count_ratio(
+            rebalance_reference_positive_count,
+            rebalance_reference_total_count,
+        )
         strategy_rebalance = _compute_chunked_period_returns(strategy_returns, rebalance_freq)
         aligned_rebalance_strategy, aligned_rebalance_reference = strategy_rebalance.align(
             reference_rebalance,

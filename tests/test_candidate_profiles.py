@@ -40,12 +40,30 @@ def _make_run_dir(tmp_path: Path) -> Path:
             "monthly_win_rate": {"risk": 0.75},
             "rebalance_win_rate": {"risk": 0.67},
             "turnover_mean": {"risk": 0.04},
+            "rank_avg_factor_baseline_annualized_return": {"risk": 0.30},
+            "rank_avg_factor_baseline_annualized_volatility": {"risk": 0.18},
+            "rank_avg_factor_baseline_sharpe_ratio": {"risk": 1.67},
+            "rank_avg_factor_baseline_information_ratio": {"risk": 1.67},
+            "rank_avg_factor_baseline_max_drawdown": {"risk": -0.12},
+            "rank_avg_factor_baseline_monthly_win_rate": {"risk": 0.58},
+            "rank_avg_factor_baseline_profitable_month_summary": "7 / 12 (58.33%)",
+            "rank_avg_factor_baseline_rebalance_win_rate": {"risk": 0.55},
+            "rank_avg_factor_baseline_profitable_rebalance_summary": "6 / 11 (54.55%)",
             "rank_avg_factor_baseline_excess_annualized_return": {"risk": 0.12},
             "rank_avg_factor_baseline_excess_information_ratio": {"risk": 1.1},
             "months_beating_rank_avg_factor_baseline_pct": {"risk": 0.62},
             "months_beating_rank_avg_factor_baseline_summary": "8 / 12 (66.67%)",
             "rebalances_beating_rank_avg_factor_baseline_pct": {"risk": 0.58},
             "rebalances_beating_rank_avg_factor_baseline_summary": "7 / 12 (58.33%)",
+            "rank_ic_weighted_factor_baseline_annualized_return": {"risk": 0.22},
+            "rank_ic_weighted_factor_baseline_annualized_volatility": {"risk": 0.14},
+            "rank_ic_weighted_factor_baseline_sharpe_ratio": {"risk": 1.57},
+            "rank_ic_weighted_factor_baseline_information_ratio": {"risk": 1.57},
+            "rank_ic_weighted_factor_baseline_max_drawdown": {"risk": -0.10},
+            "rank_ic_weighted_factor_baseline_monthly_win_rate": {"risk": 0.67},
+            "rank_ic_weighted_factor_baseline_profitable_month_summary": "8 / 12 (66.67%)",
+            "rank_ic_weighted_factor_baseline_rebalance_win_rate": {"risk": 0.64},
+            "rank_ic_weighted_factor_baseline_profitable_rebalance_summary": "7 / 11 (63.64%)",
             "rank_ic_weighted_factor_baseline_excess_annualized_return": {"risk": 0.20},
             "rank_ic_weighted_factor_baseline_excess_information_ratio": {"risk": 1.4},
             "months_beating_rank_ic_weighted_factor_baseline_pct": {"risk": 0.75},
@@ -142,7 +160,11 @@ def test_build_candidate_profile_marks_calibrated_ranker(tmp_path: Path) -> None
     assert flat["top_bucket_label_rank"] == 1
     assert profile["promotion_gates"]["beats_fixed_risk_rank_avg_factor_baseline"]["passed"]
     assert profile["promotion_gates"]["beats_fixed_risk_rank_ic_weighted_factor_baseline"]["passed"]
+    assert flat["rank_avg_factor_baseline_annualized_return"] == 0.30
+    assert flat["rank_avg_factor_baseline_monthly_win_rate"] == 0.58
+    assert flat["rank_avg_factor_baseline_profitable_month_summary"] == "7 / 12 (58.33%)"
     assert flat["rank_avg_factor_baseline_rebalances_beating_pct"] == 0.58
+    assert flat["rank_ic_weighted_factor_baseline_rebalance_win_rate"] == 0.64
     assert flat["rank_ic_weighted_factor_baseline_excess_annualized_return"] == 0.20
     assert flat["fixed_risk_rank_avg_factor_baseline_rebalances_beating_pct"] == 0.60
     assert flat["fixed_risk_rank_ic_weighted_factor_baseline_excess_annualized_return"] == 0.22

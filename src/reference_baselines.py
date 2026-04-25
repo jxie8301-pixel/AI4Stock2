@@ -34,6 +34,15 @@ CANDIDATE_GATE_REFERENCE_BASELINE_PREFIXES = FIXED_RISK_CORE_REFERENCE_BASELINE_
 
 def reference_baseline_summary_fields(prefix: str) -> list[str]:
     return [
+        f"{prefix}_annualized_return",
+        f"{prefix}_annualized_volatility",
+        f"{prefix}_sharpe_ratio",
+        f"{prefix}_information_ratio",
+        f"{prefix}_max_drawdown",
+        f"{prefix}_monthly_win_rate",
+        f"{prefix}_profitable_month_summary",
+        f"{prefix}_rebalance_win_rate",
+        f"{prefix}_profitable_rebalance_summary",
         f"{prefix}_excess_annualized_return",
         f"{prefix}_excess_information_ratio",
         f"months_beating_{prefix}_pct",

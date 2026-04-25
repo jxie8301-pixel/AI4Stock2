@@ -113,12 +113,30 @@ class ExperimentStoreTest(unittest.TestCase):
                     "top_5_positive_rebalance_share": {"risk": 0.8},
                     "payoff_ratio": {"risk": 1.3},
                     "profit_factor": {"risk": 1.6},
+                    "avg_factor_baseline_annualized_return": {"risk": 0.12},
+                    "avg_factor_baseline_annualized_volatility": {"risk": 0.18},
+                    "avg_factor_baseline_sharpe_ratio": {"risk": 0.67},
+                    "avg_factor_baseline_information_ratio": {"risk": 0.67},
+                    "avg_factor_baseline_max_drawdown": {"risk": -0.22},
+                    "avg_factor_baseline_monthly_win_rate": {"risk": 0.52},
+                    "avg_factor_baseline_profitable_month_summary": "25 / 48 = 52.08%",
+                    "avg_factor_baseline_rebalance_win_rate": {"risk": 0.54},
+                    "avg_factor_baseline_profitable_rebalance_summary": "52 / 97 = 53.61%",
                     "avg_factor_baseline_excess_annualized_return": {"risk": 0.03},
                     "avg_factor_baseline_excess_information_ratio": {"risk": 0.4},
                     "months_beating_avg_factor_baseline_pct": {"risk": 0.625},
                     "months_beating_avg_factor_baseline_summary": "30 / 48 = 62.50%",
                     "rebalances_beating_avg_factor_baseline_pct": {"risk": 0.58},
                     "rebalances_beating_avg_factor_baseline_summary": "56 / 97 = 57.73%",
+                    "fixed_risk_rank_avg_factor_baseline_annualized_return": {"risk": 0.06},
+                    "fixed_risk_rank_avg_factor_baseline_annualized_volatility": {"risk": 0.08},
+                    "fixed_risk_rank_avg_factor_baseline_sharpe_ratio": {"risk": 0.75},
+                    "fixed_risk_rank_avg_factor_baseline_information_ratio": {"risk": 0.75},
+                    "fixed_risk_rank_avg_factor_baseline_max_drawdown": {"risk": -0.11},
+                    "fixed_risk_rank_avg_factor_baseline_monthly_win_rate": {"risk": 0.58},
+                    "fixed_risk_rank_avg_factor_baseline_profitable_month_summary": "28 / 48 = 58.33%",
+                    "fixed_risk_rank_avg_factor_baseline_rebalance_win_rate": {"risk": 0.57},
+                    "fixed_risk_rank_avg_factor_baseline_profitable_rebalance_summary": "55 / 97 = 56.70%",
                     "fixed_risk_rank_avg_factor_baseline_excess_annualized_return": {"risk": 0.19},
                     "fixed_risk_rank_avg_factor_baseline_excess_information_ratio": {"risk": 0.7},
                     "months_beating_fixed_risk_rank_avg_factor_baseline_pct": {"risk": 0.72},
@@ -160,12 +178,36 @@ class ExperimentStoreTest(unittest.TestCase):
             self.assertEqual(rows[0]["top_5_positive_rebalance_share"], "0.8")
             self.assertEqual(rows[0]["payoff_ratio"], "1.3")
             self.assertEqual(rows[0]["profit_factor"], "1.6")
+            self.assertEqual(rows[0]["avg_factor_baseline_annualized_return"], "0.12")
+            self.assertEqual(rows[0]["avg_factor_baseline_annualized_volatility"], "0.18")
+            self.assertEqual(rows[0]["avg_factor_baseline_sharpe_ratio"], "0.67")
+            self.assertEqual(rows[0]["avg_factor_baseline_information_ratio"], "0.67")
+            self.assertEqual(rows[0]["avg_factor_baseline_max_drawdown"], "-0.22")
+            self.assertEqual(rows[0]["avg_factor_baseline_monthly_win_rate"], "0.52")
+            self.assertEqual(rows[0]["avg_factor_baseline_profitable_month_summary"], "25 / 48 = 52.08%")
+            self.assertEqual(rows[0]["avg_factor_baseline_rebalance_win_rate"], "0.54")
+            self.assertEqual(rows[0]["avg_factor_baseline_profitable_rebalance_summary"], "52 / 97 = 53.61%")
             self.assertEqual(rows[0]["avg_factor_baseline_excess_annualized_return"], "0.03")
             self.assertEqual(rows[0]["avg_factor_baseline_excess_information_ratio"], "0.4")
             self.assertEqual(rows[0]["months_beating_avg_factor_baseline_pct"], "0.625")
             self.assertEqual(rows[0]["months_beating_avg_factor_baseline_summary"], "30 / 48 = 62.50%")
             self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_pct"], "0.58")
             self.assertEqual(rows[0]["rebalances_beating_avg_factor_baseline_summary"], "56 / 97 = 57.73%")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_annualized_return"], "0.06")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_annualized_volatility"], "0.08")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_sharpe_ratio"], "0.75")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_information_ratio"], "0.75")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_max_drawdown"], "-0.11")
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_monthly_win_rate"], "0.58")
+            self.assertEqual(
+                rows[0]["fixed_risk_rank_avg_factor_baseline_profitable_month_summary"],
+                "28 / 48 = 58.33%",
+            )
+            self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_rebalance_win_rate"], "0.57")
+            self.assertEqual(
+                rows[0]["fixed_risk_rank_avg_factor_baseline_profitable_rebalance_summary"],
+                "55 / 97 = 56.70%",
+            )
             self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_excess_annualized_return"], "0.19")
             self.assertEqual(rows[0]["fixed_risk_rank_avg_factor_baseline_excess_information_ratio"], "0.7")
             self.assertEqual(rows[0]["months_beating_fixed_risk_rank_avg_factor_baseline_pct"], "0.72")

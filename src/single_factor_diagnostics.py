@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import json
 from typing import Any
@@ -30,6 +31,14 @@ class SingleFactorDetailFrames:
     top_bottom_spread_daily: pd.DataFrame
     rank_ic_monthly: pd.DataFrame
     feature_missing_by_year: pd.DataFrame
+
+
+@dataclass(frozen=True)
+class SingleFactorDiagnosticsBundle:
+    summary: pd.DataFrame
+    detail_frames: SingleFactorDetailFrames | None
+    segment_comparison: pd.DataFrame
+    segment_summaries: dict[str, pd.DataFrame]
 
 
 def _safe_ratio(numerator: int | float, denominator: int | float) -> float:
@@ -93,7 +102,19 @@ def _pearson_corr_from_arrays(xs: np.ndarray, ys: np.ndarray) -> float:
 
 
 def _rank_average(values: np.ndarray) -> np.ndarray:
-    return pd.Series(values, dtype=float).rank(method="average").to_numpy(dtype=np.float64, copy=False)
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return np.asarray([], dtype=np.float64)
+    order = np.argsort(values, kind="mergesort")
+    sorted_values = values[order]
+    group_start_mask = np.r_[True, sorted_values[1:] != sorted_values[:-1]]
+    starts = np.flatnonzero(group_start_mask)
+    ends = np.r_[starts[1:], values.size]
+    average_ranks = 0.5 * (starts.astype(np.float64) + ends.astype(np.float64) - 1.0) + 1.0
+    ranks_sorted = np.repeat(average_ranks, ends - starts)
+    ranks = np.empty(values.size, dtype=np.float64)
+    ranks[order] = ranks_sorted
+    return ranks
 
 
 def _spearman_corr_from_arrays(xs: np.ndarray, ys: np.ndarray) -> float:
@@ -103,14 +124,20 @@ def _spearman_corr_from_arrays(xs: np.ndarray, ys: np.ndarray) -> float:
 
 
 def _rank_to_quantile_bins_array(values: np.ndarray, quantile_bins: int) -> np.ndarray:
-    rank_pct = pd.Series(values, dtype=float).rank(method="average", pct=True).to_numpy(dtype=np.float64, copy=False)
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return np.asarray([], dtype=np.int32)
+    rank_pct = _rank_average(values) / float(values.size)
     bucket = np.floor(rank_pct * float(quantile_bins) - 1e-12).astype(np.int32)
     return np.clip(bucket, 0, max(int(quantile_bins) - 1, 0))
 
 
+@lru_cache(maxsize=4096)
 def _infer_feature_group(feature_name: str) -> str:
     if feature_name.startswith("TS_"):
         raw = feature_name[3:]
+        if raw.startswith("sem_"):
+            return "tushare_semantic_alpha"
         if raw.startswith(("industry_", "stock_vs_industry", "stock_industry", "stock_relative_strength")):
             return "tushare_industry"
         if raw.startswith(("fi_", "latest_eps", "latest_dt_eps", "latest_bps", "latest_ocfps", "latest_roe", "latest_roa", "latest_grossprofit", "latest_netprofit", "latest_debt", "latest_q_", "latest_tr_", "latest_or_", "latest_op_", "latest_netprofit_yoy", "latest_ocf")):
@@ -444,24 +471,12 @@ def _build_single_factor_summary_from_context(
     return summary
 
 
-def build_single_factor_detail_frames(
-    frame: pd.DataFrame,
+def _build_single_factor_detail_frames_from_context(
+    context: PreparedSingleFactorDiagnosticsContext,
     *,
     feature_names: list[str],
-    label_column: str = "label",
     quantile_bins: int = DEFAULT_QUANTILE_BINS,
 ) -> SingleFactorDetailFrames:
-    """Build detailed time-series artifacts for single-factor research."""
-    if "date" not in frame.columns:
-        raise ValueError("frame must contain a 'date' column")
-    if label_column not in frame.columns:
-        raise ValueError(f"frame must contain label column: {label_column}")
-
-    context = _prepare_single_factor_diagnostics_context(
-        frame,
-        feature_names=feature_names,
-        label_column=label_column,
-    )
     bucket_rows: list[dict[str, Any]] = []
     spread_rows: list[dict[str, Any]] = []
     rank_ic_rows: list[dict[str, Any]] = []
@@ -547,6 +562,31 @@ def build_single_factor_detail_frames(
     )
 
 
+def build_single_factor_detail_frames(
+    frame: pd.DataFrame,
+    *,
+    feature_names: list[str],
+    label_column: str = "label",
+    quantile_bins: int = DEFAULT_QUANTILE_BINS,
+) -> SingleFactorDetailFrames:
+    """Build detailed time-series artifacts for single-factor research."""
+    if "date" not in frame.columns:
+        raise ValueError("frame must contain a 'date' column")
+    if label_column not in frame.columns:
+        raise ValueError(f"frame must contain label column: {label_column}")
+
+    context = _prepare_single_factor_diagnostics_context(
+        frame,
+        feature_names=feature_names,
+        label_column=label_column,
+    )
+    return _build_single_factor_detail_frames_from_context(
+        context,
+        feature_names=feature_names,
+        quantile_bins=quantile_bins,
+    )
+
+
 def normalize_segments(
     segments: list[tuple[str, str | pd.Timestamp, str | pd.Timestamp]] | None,
 ) -> list[tuple[str, pd.Timestamp, pd.Timestamp]]:
@@ -627,25 +667,15 @@ def build_single_factor_diagnostics(
     )
 
 
-def build_segmented_single_factor_diagnostics(
-    frame: pd.DataFrame,
+def _build_segmented_single_factor_diagnostics_from_context(
+    context: PreparedSingleFactorDiagnosticsContext,
     *,
     feature_names: list[str],
-    segments: list[tuple[str, str | pd.Timestamp, str | pd.Timestamp]] | None,
-    label_column: str = "label",
+    normalized_segments: list[tuple[str, pd.Timestamp, pd.Timestamp]],
     quantile_bins: int = DEFAULT_QUANTILE_BINS,
 ) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
-    normalized_segments = normalize_segments(segments)
     if not normalized_segments:
         return pd.DataFrame(), {}
-    if "date" not in frame.columns:
-        raise ValueError("frame must contain a 'date' column")
-
-    context = _prepare_single_factor_diagnostics_context(
-        frame,
-        feature_names=feature_names,
-        label_column=label_column,
-    )
     segment_frames: dict[str, pd.DataFrame] = {}
     comparison_rows: list[pd.DataFrame] = []
 
@@ -713,6 +743,84 @@ def build_segmented_single_factor_diagnostics(
         na_position="last",
     ).reset_index(drop=True)
     return merged, segment_frames
+
+
+def build_segmented_single_factor_diagnostics(
+    frame: pd.DataFrame,
+    *,
+    feature_names: list[str],
+    segments: list[tuple[str, str | pd.Timestamp, str | pd.Timestamp]] | None,
+    label_column: str = "label",
+    quantile_bins: int = DEFAULT_QUANTILE_BINS,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
+    normalized_segments = normalize_segments(segments)
+    if not normalized_segments:
+        return pd.DataFrame(), {}
+    if "date" not in frame.columns:
+        raise ValueError("frame must contain a 'date' column")
+    if label_column not in frame.columns:
+        raise ValueError(f"frame must contain label column: {label_column}")
+
+    context = _prepare_single_factor_diagnostics_context(
+        frame,
+        feature_names=feature_names,
+        label_column=label_column,
+    )
+    return _build_segmented_single_factor_diagnostics_from_context(
+        context,
+        feature_names=feature_names,
+        normalized_segments=normalized_segments,
+        quantile_bins=quantile_bins,
+    )
+
+
+def build_single_factor_diagnostics_bundle(
+    frame: pd.DataFrame,
+    *,
+    feature_names: list[str],
+    label_column: str = "label",
+    quantile_bins: int = DEFAULT_QUANTILE_BINS,
+    segments: list[tuple[str, str | pd.Timestamp, str | pd.Timestamp]] | None = None,
+    include_details: bool = True,
+) -> SingleFactorDiagnosticsBundle:
+    """Compute summary, optional detail frames, and segment diagnostics from one prepared context."""
+    if "date" not in frame.columns:
+        raise ValueError("frame must contain a 'date' column")
+    if label_column not in frame.columns:
+        raise ValueError(f"frame must contain label column: {label_column}")
+
+    context = _prepare_single_factor_diagnostics_context(
+        frame,
+        feature_names=feature_names,
+        label_column=label_column,
+    )
+    safe_quantile_bins = max(int(quantile_bins), 2)
+    summary = _build_single_factor_summary_from_context(
+        context,
+        feature_names=feature_names,
+        quantile_bins=safe_quantile_bins,
+    )
+    detail_frames = (
+        _build_single_factor_detail_frames_from_context(
+            context,
+            feature_names=feature_names,
+            quantile_bins=safe_quantile_bins,
+        )
+        if include_details
+        else None
+    )
+    segment_comparison, segment_summaries = _build_segmented_single_factor_diagnostics_from_context(
+        context,
+        feature_names=feature_names,
+        normalized_segments=normalize_segments(segments),
+        quantile_bins=safe_quantile_bins,
+    )
+    return SingleFactorDiagnosticsBundle(
+        summary=summary,
+        detail_frames=detail_frames,
+        segment_comparison=segment_comparison,
+        segment_summaries=segment_summaries,
+    )
 
 
 def _render_markdown_table(frame: pd.DataFrame, *, max_rows: int = 20) -> str:

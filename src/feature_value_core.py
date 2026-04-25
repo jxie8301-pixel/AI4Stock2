@@ -73,6 +73,39 @@ def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return numerator / (denominator.abs() + EPS)
 
 
+def _bounded_signal(series: pd.Series | np.ndarray, scale: float) -> pd.Series:
+    values = pd.Series(series, dtype=float)
+    scale_value = max(float(scale), EPS)
+    return pd.Series(np.tanh(values / scale_value), index=values.index, dtype=float)
+
+
+def _as_indexed_float_series(series: pd.Series | np.ndarray, index: pd.Index) -> pd.Series:
+    return pd.Series(series, index=index, dtype=float)
+
+
+def _weighted_observed_sum(
+    components: list[tuple[float, pd.Series | np.ndarray]],
+    *,
+    index: pd.Index,
+    min_valid_weight_ratio: float = 0.5,
+) -> pd.Series:
+    total_weight = sum(abs(float(weight)) for weight, _ in components)
+    if total_weight <= EPS:
+        return pd.Series(np.nan, index=index, dtype=float)
+
+    weighted_sum = pd.Series(0.0, index=index, dtype=float)
+    observed_weight = pd.Series(0.0, index=index, dtype=float)
+    for weight, series in components:
+        weight_value = float(weight)
+        values = _as_indexed_float_series(series, index)
+        valid = values.notna()
+        weighted_sum += values.where(valid, 0.0) * weight_value
+        observed_weight += valid.astype(float) * abs(weight_value)
+
+    required_weight = total_weight * float(min_valid_weight_ratio)
+    return weighted_sum.where(observed_weight >= required_weight)
+
+
 def _event_age(event: pd.Series) -> pd.Series:
     ages: list[float] = []
     last_idx: int | None = None
@@ -907,37 +940,59 @@ def compute_tushare_factor_features(
     out[f"amihud_term_{short_flow_window}_{long_flow_window}"] = amihud_short / (amihud_long + EPS) - 1.0
     out[f"downside_amihud_{long_flow_window}"] = downside_amihud
     out[f"dividend_yield_ttm_surprise_{zscore_window}"] = dividend_yield_ttm_series - dividend_yield_ttm_baseline
-    out["fi_ocf_to_eps"] = _safe_ratio(fi_ocfps, fi_eps)
-    out["fi_ocfps_minus_eps"] = fi_ocfps - fi_eps
-    out["fi_ocf_yoy_minus_np_yoy"] = fi_ocf_yoy - fi_netprofit_yoy
-    out["fi_roe_quality_gap"] = fi_roe_dt - fi_roe
-    out["fi_q_roe_quality_gap"] = fi_q_dt_roe - fi_q_roe
-    out["fi_margin_quality"] = fi_gpm - fi_npm
-    out["fi_profitability_combo"] = fi_roe_dt + fi_roa + fi_npm
-    out["fi_growth_quality_combo"] = fi_or_yoy + fi_op_yoy + fi_netprofit_yoy + fi_ocf_yoy
+    fi_ocf_to_eps = _safe_ratio(fi_ocfps, fi_eps)
+    fi_ocfps_minus_eps = fi_ocfps - fi_eps
+    fi_ocf_yoy_minus_np_yoy = fi_ocf_yoy - fi_netprofit_yoy
+    fi_roe_quality_gap = fi_roe_dt - fi_roe
+    fi_q_roe_quality_gap = fi_q_dt_roe - fi_q_roe
+    fi_margin_quality = fi_gpm - fi_npm
+    fi_profitability_combo = fi_roe_dt + fi_roa + fi_npm
+    fi_growth_quality_combo = fi_or_yoy + fi_op_yoy + fi_netprofit_yoy + fi_ocf_yoy
+    out["fi_ocf_to_eps"] = fi_ocf_to_eps
+    out["fi_ocfps_minus_eps"] = fi_ocfps_minus_eps
+    out["fi_ocf_yoy_minus_np_yoy"] = fi_ocf_yoy_minus_np_yoy
+    out["fi_roe_quality_gap"] = fi_roe_quality_gap
+    out["fi_q_roe_quality_gap"] = fi_q_roe_quality_gap
+    out["fi_margin_quality"] = fi_margin_quality
+    out["fi_profitability_combo"] = fi_profitability_combo
+    out["fi_growth_quality_combo"] = fi_growth_quality_combo
     fc_p_change_mid = (fc_p_change_min + fc_p_change_max) / 2.0
     fc_p_change_width = fc_p_change_max - fc_p_change_min
     fc_net_profit_mid = (fc_net_profit_min + fc_net_profit_max) / 2.0
     fc_net_profit_width = fc_net_profit_max - fc_net_profit_min
     fc_freshness_weight = np.exp(-fc_days_since_ann.clip(lower=0) / 20.0)
+    fc_positive_confidence = pd.Series(np.nan, index=base.index, dtype=float)
+    fc_confidence_valid = (
+        fc_p_change_min.notna()
+        & fc_p_change_max.notna()
+        & fc_p_change_mid.notna()
+        & fc_p_change_width.notna()
+    )
+    fc_positive_confidence.loc[fc_confidence_valid] = 0.0
+    fc_positive_mask = fc_confidence_valid & (fc_p_change_min > 0)
+    fc_negative_mask = fc_confidence_valid & (fc_p_change_max < 0)
+    fc_positive_confidence.loc[fc_positive_mask] = (
+        fc_p_change_mid.loc[fc_positive_mask] / (fc_p_change_width.loc[fc_positive_mask].abs() + EPS)
+    )
+    fc_positive_confidence.loc[fc_negative_mask] = (
+        -fc_p_change_mid.loc[fc_negative_mask].abs() / (fc_p_change_width.loc[fc_negative_mask].abs() + EPS)
+    )
     out["fc_p_change_mid"] = fc_p_change_mid
     out["fc_p_change_width"] = fc_p_change_width
     out["fc_net_profit_mid"] = fc_net_profit_mid
     out["fc_net_profit_width"] = fc_net_profit_width
     out["fc_net_profit_mid_ratio"] = _safe_ratio(fc_net_profit_mid, fc_last_parent_net)
-    out["fc_positive_confidence"] = np.where(
-        fc_p_change_min > 0,
-        fc_p_change_mid / (fc_p_change_width.abs() + EPS),
-        np.where(fc_p_change_max < 0, -fc_p_change_mid.abs() / (fc_p_change_width.abs() + EPS), 0.0),
-    )
+    out["fc_positive_confidence"] = fc_positive_confidence
     out["fc_days_since_ann"] = fc_days_since_ann
     out["fc_freshness_weight"] = fc_freshness_weight
     out["fc_surprise_fresh"] = fc_p_change_mid * fc_freshness_weight
     exp_growth_combo = exp_yoy_sales + exp_yoy_op + exp_yoy_dedu_np + exp_yoy_eps
+    exp_profit_quality_gap = exp_yoy_dedu_np - exp_yoy_tp
+    exp_asset_efficiency = exp_yoy_sales - exp_growth_assets
     exp_freshness_weight = np.exp(-exp_days_since_ann.clip(lower=0) / 20.0)
     out["exp_growth_combo"] = exp_growth_combo
-    out["exp_profit_quality_gap"] = exp_yoy_dedu_np - exp_yoy_tp
-    out["exp_asset_efficiency"] = exp_yoy_sales - exp_growth_assets
+    out["exp_profit_quality_gap"] = exp_profit_quality_gap
+    out["exp_asset_efficiency"] = exp_asset_efficiency
     out["exp_profit_margin_proxy"] = exp_n_income / (exp_revenue.abs() + EPS)
     out["exp_op_margin_proxy"] = exp_operate_profit / (exp_revenue.abs() + EPS)
     out["exp_days_since_ann"] = exp_days_since_ann
@@ -1040,6 +1095,153 @@ def compute_tushare_factor_features(
     )
     out["fi_margin_quality_minus_industry"] = pd.Series(out["fi_margin_quality"], index=base.index, dtype=float) - _series(
         "ind_fi_margin_quality_mean"
+    )
+
+    def _out_series(name: str) -> pd.Series:
+        value = out.get(name)
+        if value is None:
+            return pd.Series(np.nan, index=base.index, dtype=float)
+        return pd.Series(value, index=base.index, dtype=float)
+
+    def _component(series: pd.Series | np.ndarray, scale: float) -> pd.Series:
+        return _bounded_signal(_as_indexed_float_series(series, base.index), scale)
+
+    bp_clean = (1.0 / pb.where(pb > 0)).replace([np.inf, -np.inf], np.nan)
+    sp_ttm_clean = (1.0 / ps_ttm.where(ps_ttm > 0)).replace([np.inf, -np.inf], np.nan)
+    bp_rel = bp_clean - _series("ind_bp_mean")
+    sp_ttm_series = sp_ttm_clean
+    sp_ttm_rel = sp_ttm_series - _series("ind_sp_ttm_mean")
+    dividend_rel = dividend_yield_ttm_series - _series("ind_dividend_yield_ttm_mean")
+    ocf_rel = pd.Series(fi_ocf_to_eps, index=base.index, dtype=float) - _series("ind_fi_ocf_to_eps_mean")
+    margin_rel = pd.Series(fi_margin_quality, index=base.index, dtype=float) - _series("ind_fi_margin_quality_mean")
+    quality_gate = _weighted_observed_sum(
+        [
+            (0.35, _component(fi_roe_dt, 20.0)),
+            (0.25, _component(ocf_rel, 2.0)),
+            (0.20, _component(fi_ocf_yoy_minus_np_yoy, 50.0)),
+            (0.10, _component(margin_rel, 20.0)),
+            (-0.20, _component(fi_debt_to_assets, 60.0)),
+        ],
+        index=base.index,
+    )
+    value_rel = _weighted_observed_sum(
+        [
+            (1.00, bp_rel),
+            (1.00, sp_ttm_rel),
+            (0.25, _component(dividend_rel, 5.0)),
+        ],
+        index=base.index,
+    )
+    growth_cash_quality = _weighted_observed_sum(
+        [
+            (0.30, _component(fi_or_yoy, 50.0)),
+            (0.25, _component(fi_op_yoy, 50.0)),
+            (0.30, _component(fi_ocf_yoy, 50.0)),
+            (0.15, _component(fi_netprofit_yoy, 50.0)),
+            (-0.25, _component((fi_netprofit_yoy - fi_ocf_yoy).abs(), 50.0)),
+        ],
+        index=base.index,
+    )
+    forecast_confidence = _component(fc_positive_confidence, 1.0)
+    forecast_fresh_strength = _component(fc_p_change_mid, 50.0) * forecast_confidence * fc_freshness_weight
+    express_quality = _weighted_observed_sum(
+        [
+            (0.35, _component(exp_yoy_sales, 50.0)),
+            (0.35, _component(exp_yoy_dedu_np, 50.0)),
+            (0.20, _component(exp_yoy_eps, 50.0)),
+            (0.10, _component(exp_profit_quality_gap, 30.0)),
+            (-0.15, _component(exp_growth_assets, 50.0)),
+        ],
+        index=base.index,
+    )
+    trend_quality_mid = _weighted_observed_sum(
+        [
+            (0.35, _component(industry_ret_mid, 0.20)),
+            (0.25, _component(_series(f"ind_excess_ret_{mid_industry_window}"), 0.10)),
+            (0.25, _component(industry_pos_mid - 0.50, 0.20)),
+            (-0.15, _component(_series(f"ind_std_{mid_industry_window}"), 0.05)),
+        ],
+        index=base.index,
+    )
+    trend_quality_long = _weighted_observed_sum(
+        [
+            (0.35, _component(industry_ret_long, 0.30)),
+            (0.25, _component(_series(f"ind_excess_ret_{long_industry_window}"), 0.15)),
+            (0.25, _component(industry_pos_long - 0.50, 0.20)),
+            (-0.15, _component(_series(f"ind_std_{long_industry_window}"), 0.08)),
+        ],
+        index=base.index,
+    )
+    stock_vol_rel_mid = _out_series(f"stock_vs_industry_std_ratio_{mid_industry_window}")
+    stock_vol_rel_long = _out_series(f"stock_vs_industry_std_ratio_{long_industry_window}")
+    liquidity_absorption = _weighted_observed_sum(
+        [
+            (1.00, _component(_out_series(f"up_down_turnover_ratio_{long_flow_window}") - 1.0, 2.0)),
+            (1.00, _component(_out_series(f"return_turnover_corr_{long_flow_window}"), 1.0)),
+            (-1.00, _component(_out_series(f"downside_turnover_pressure_{long_flow_window}") - 0.50, 0.30)),
+        ],
+        index=base.index,
+    )
+    downside_liquidity_relief = _weighted_observed_sum(
+        [
+            (
+                -1.00,
+                _component(
+                    _out_series(f"stock_vs_industry_downside_amihud_ratio_{mid_industry_window}") - 1.0,
+                    1.0,
+                ),
+            ),
+            (-1.00, _component(_out_series(f"downside_turnover_pressure_{long_flow_window}") - 0.50, 0.30)),
+            (-1.00, _component(_out_series(f"near_down_limit_count_{long_flow_window}"), 3.0)),
+        ],
+        index=base.index,
+    )
+    out["sem_value_quality"] = value_rel + quality_gate
+    out["sem_value_quality_low_vol"] = value_rel + quality_gate - _component(stock_vol_rel_mid - 1.0, 0.50)
+    out["sem_dividend_quality"] = dividend_rel * (1.0 + quality_gate.clip(lower=-0.50, upper=0.75))
+    out["sem_profitability_resilience"] = quality_gate - _component(stock_vol_rel_mid - 1.0, 0.50)
+    out["sem_growth_cash_quality"] = growth_cash_quality
+    out[f"sem_growth_cash_quality_accel_{zscore_window}"] = growth_cash_quality - growth_cash_quality.rolling(
+        zscore_window,
+        min_periods=1,
+    ).mean().shift(1)
+    out["sem_forecast_confidence_fresh"] = forecast_fresh_strength
+    out[f"sem_forecast_unpriced_{short_industry_window}"] = forecast_fresh_strength - _component(own_ret_short, 0.10)
+    out["sem_express_growth_quality_fresh"] = express_quality * exp_freshness_weight
+    out[f"sem_industry_strength_low_vol_{mid_industry_window}"] = trend_quality_mid - _component(
+        stock_vol_rel_mid - 1.0,
+        0.50,
+    )
+    out[f"sem_industry_strength_low_vol_{long_industry_window}"] = trend_quality_long - _component(
+        stock_vol_rel_long - 1.0,
+        0.50,
+    )
+    out[f"sem_industry_relative_winner_{mid_industry_window}"] = (
+        trend_quality_mid
+        + _component(rel_ret_mid, 0.20)
+        - _component(stock_vol_rel_mid - 1.0, 0.50)
+    )
+    out[f"sem_industry_pullback_recovery_{short_industry_window}_{mid_industry_window}"] = (
+        trend_quality_mid
+        + _component(rel_ret_mid, 0.20)
+        - _component(rel_ret_short, 0.10)
+    )
+    out[f"sem_liquidity_absorption_{long_flow_window}"] = liquidity_absorption
+    out[f"sem_downside_liquidity_relief_{long_flow_window}"] = downside_liquidity_relief
+    out[f"sem_limit_breakout_quality_{long_flow_window}"] = _weighted_observed_sum(
+        [
+            (1.00, _component(_out_series(f"hit_up_limit_count_{long_flow_window}"), 3.0)),
+            (-1.00, _component(_out_series(f"hit_down_limit_count_{long_flow_window}"), 3.0)),
+            (1.00, trend_quality_mid),
+            (-1.00, _component(_out_series(f"near_down_limit_count_{long_flow_window}"), 3.0)),
+        ],
+        index=base.index,
+    )
+    out[f"sem_low_vol_value_reversal_{short_industry_window}"] = (
+        value_rel
+        + quality_gate
+        - _component(stock_vol_rel_mid - 1.0, 0.50)
+        - _component(own_ret_short, 0.10)
     )
     out["latest_eps"] = fi_eps
     out["latest_dt_eps"] = fi_dt_eps

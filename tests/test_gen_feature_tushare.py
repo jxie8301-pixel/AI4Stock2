@@ -2,6 +2,7 @@ import unittest
 import tempfile
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from src.gen_feature import (
@@ -40,6 +41,8 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_breadth_accel_20_60", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_turnover_ratio_20", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_amihud_ratio_60", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}sem_value_quality", tushare_names)
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}sem_industry_strength_low_vol_20", tushare_names)
         self.assertNotIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", default_names)
         self.assertNotIn("TEMP_ret_20", default_names)
         self.assertNotIn("TEMP_corr_cv_20", default_names)
@@ -219,6 +222,50 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertTrue(pd.notna(feat.iloc[2]["volume_ratio_raw_zscore_20"]))
         self.assertAlmostEqual(float(feat.iloc[1]["dividend_yield_ttm_surprise_20"]), -0.8, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_ttm_surprise_20"]), 0.0, places=6)
+        self.assertTrue(pd.notna(feat.iloc[2]["sem_value_quality"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["sem_dividend_quality"]))
+        self.assertTrue(pd.isna(feat.iloc[2]["sem_liquidity_absorption_20"]))
+
+    def test_semantic_tushare_factors_preserve_missing_components(self):
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31", "2026-04-01"]),
+                "open": [10.0, 10.5, 11.0],
+                "high": [10.5, 11.0, 11.5],
+                "low": [9.8, 10.2, 10.8],
+                "close": [10.0, 10.5, 11.0],
+                "volume": [100.0, 110.0, 120.0],
+            }
+        )
+
+        feat = compute_tushare_factor_features(df)
+
+        self.assertTrue(feat["fc_positive_confidence"].isna().all())
+        self.assertTrue(feat["sem_value_quality"].isna().all())
+        self.assertTrue(feat["sem_growth_cash_quality"].isna().all())
+        self.assertTrue(feat["sem_forecast_confidence_fresh"].isna().all())
+
+    def test_semantic_tushare_composites_require_minimum_observed_weight(self):
+        df = pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+                "open": [10.0, 10.5],
+                "high": [10.5, 11.0],
+                "low": [9.8, 10.2],
+                "close": [10.0, 10.5],
+                "volume": [100.0, 110.0],
+                "fi_or_yoy": [10.0, 10.0],
+                "fi_op_yoy": [np.nan, 8.0],
+                "fi_ocf_yoy": [np.nan, 7.0],
+                "fi_netprofit_yoy": [np.nan, np.nan],
+            }
+        )
+
+        feat = compute_tushare_factor_features(df)
+
+        self.assertTrue(pd.isna(feat.iloc[0]["sem_growth_cash_quality"]))
+        self.assertTrue(pd.notna(feat.iloc[1]["sem_growth_cash_quality"]))
+        self.assertTrue(pd.isna(feat.iloc[1]["sem_value_quality"]))
 
     def test_compute_all_factor_features_adds_tushare_columns_only_for_tushare_source(self):
         df = pd.DataFrame(

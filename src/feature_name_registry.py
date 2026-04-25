@@ -393,6 +393,9 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     long_flow_window = int(flow_windows[-1])
     valuation_windows = sorted({int(window) for window in cfg["valuation_change_windows"]})
     industry_windows = sorted({int(window) for window in cfg["industry_windows"]})
+    short_industry_window = int(industry_windows[0])
+    mid_industry_window = int(industry_windows[-2])
+    long_industry_window = int(industry_windows[-1])
     relative_industry_windows = sorted({int(window) for window in cfg.get("relative_industry_windows", [20, 60])})
     zscore_window = int(cfg["zscore_window"])
 
@@ -519,6 +522,25 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "fi_ocfps_minus_eps_minus_industry",
         "fi_roe_quality_gap_minus_industry",
         "fi_margin_quality_minus_industry",
+    ]
+    names += [
+        "sem_value_quality",
+        "sem_value_quality_low_vol",
+        "sem_dividend_quality",
+        "sem_profitability_resilience",
+        "sem_growth_cash_quality",
+        f"sem_growth_cash_quality_accel_{zscore_window}",
+        "sem_forecast_confidence_fresh",
+        f"sem_forecast_unpriced_{short_industry_window}",
+        "sem_express_growth_quality_fresh",
+        f"sem_industry_strength_low_vol_{mid_industry_window}",
+        f"sem_industry_strength_low_vol_{long_industry_window}",
+        f"sem_industry_relative_winner_{mid_industry_window}",
+        f"sem_industry_pullback_recovery_{short_industry_window}_{mid_industry_window}",
+        f"sem_liquidity_absorption_{long_flow_window}",
+        f"sem_downside_liquidity_relief_{long_flow_window}",
+        f"sem_limit_breakout_quality_{long_flow_window}",
+        f"sem_low_vol_value_reversal_{short_industry_window}",
     ]
     names += [
         "latest_eps",

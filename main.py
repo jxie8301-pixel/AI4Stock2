@@ -1,4 +1,8 @@
-"""AI4Stock2 native quantitative investment pipeline."""
+"""Legacy single-window native quantitative investment pipeline.
+
+The actively maintained research path is ``run_native_rolling.py``. This entrypoint
+is kept for one-off single-window checks and backward-compatible model save/load use.
+"""
 
 import argparse
 import inspect
@@ -513,7 +517,7 @@ def run_native_pipeline(cfg, args, results_dir, model_name):
     }
 
 def main():
-    parser = argparse.ArgumentParser(description="AI4Stock2 Native Quantitative Pipeline")
+    parser = argparse.ArgumentParser(description="AI4Stock2 legacy single-window native pipeline")
     add_common_runtime_args(parser, include_model_arg=True)
     parser.add_argument("--skip-backtest", action="store_true", help="Skip backtest, only train and evaluate signal")
     parser.add_argument("--load-model", help="Path to a saved model to load (skip training)")

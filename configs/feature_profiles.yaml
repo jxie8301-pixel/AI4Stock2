@@ -311,6 +311,38 @@ profiles:
       - TS_industry_dispersion_20
       - TS_industry_dispersion_60
 
+  core_v7_semantic_alpha_v1:
+    extends: core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_drop_rel_midlong_v1
+    add_columns:
+      - TS_sem_value_quality
+      - TS_sem_value_quality_low_vol
+      - TS_sem_dividend_quality
+      - TS_sem_profitability_resilience
+      - TS_sem_growth_cash_quality
+      - TS_sem_growth_cash_quality_accel_20
+      - TS_sem_forecast_confidence_fresh
+      - TS_sem_forecast_unpriced_5
+      - TS_sem_express_growth_quality_fresh
+      - TS_sem_industry_strength_low_vol_20
+      - TS_sem_industry_strength_low_vol_60
+      - TS_sem_industry_relative_winner_20
+      - TS_sem_industry_pullback_recovery_5_20
+      - TS_sem_liquidity_absorption_20
+      - TS_sem_downside_liquidity_relief_20
+      - TS_sem_limit_breakout_quality_20
+      - TS_sem_low_vol_value_reversal_5
+
+  core_v7_semantic_alpha_strong7_v1:
+    extends: core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_drop_rel_midlong_v1
+    add_columns:
+      - TS_sem_dividend_quality
+      - TS_sem_low_vol_value_reversal_5
+      - TS_sem_value_quality_low_vol
+      - TS_sem_profitability_resilience
+      - TS_sem_industry_strength_low_vol_60
+      - TS_sem_value_quality
+      - TS_sem_industry_strength_low_vol_20
+
   core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_relative_alpha_v1:
     extends: core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1
     add_columns:

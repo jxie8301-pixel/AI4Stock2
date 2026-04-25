@@ -7,6 +7,7 @@ import pandas as pd
 
 from src.single_factor_diagnostics import (
     build_single_factor_detail_frames,
+    build_single_factor_diagnostics_bundle,
     build_segmented_single_factor_diagnostics,
     build_single_factor_diagnostics,
     compute_feature_diagnostics,
@@ -116,6 +117,44 @@ def test_build_single_factor_detail_frames_exports_daily_and_yearly_artifacts() 
     assert bool((inverse_spread < 0).all())
     assert set(details.rank_ic_monthly["feature"]) == {"signal", "inverse"}
     assert details.feature_missing_by_year["feature_coverage_pct"].min() == 1.0
+
+
+def test_single_factor_diagnostics_bundle_matches_separate_builders() -> None:
+    frame = _build_test_frame()
+
+    bundle = build_single_factor_diagnostics_bundle(
+        frame,
+        feature_names=["signal", "inverse"],
+        label_column="label",
+        quantile_bins=2,
+        segments=[("all", "2024-01-01", "2024-12-31")],
+    )
+    summary = build_single_factor_diagnostics(
+        frame,
+        feature_names=["signal", "inverse"],
+        label_column="label",
+        quantile_bins=2,
+    )
+
+    pd.testing.assert_frame_equal(bundle.summary.reset_index(drop=True), summary.reset_index(drop=True))
+    assert bundle.detail_frames is not None
+    assert set(bundle.detail_frames.rank_ic_monthly["feature"]) == {"signal", "inverse"}
+    assert set(bundle.segment_summaries) == {"all"}
+
+
+def test_single_factor_diagnostics_bundle_can_skip_details() -> None:
+    frame = _build_test_frame()
+
+    bundle = build_single_factor_diagnostics_bundle(
+        frame,
+        feature_names=["signal"],
+        label_column="label",
+        quantile_bins=2,
+        include_details=False,
+    )
+
+    assert bundle.detail_frames is None
+    assert bundle.summary.iloc[0]["feature"] == "signal"
 
 
 def test_build_segmented_single_factor_diagnostics_detects_direction_flip() -> None:

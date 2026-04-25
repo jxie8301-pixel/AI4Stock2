@@ -15,6 +15,7 @@ from src.label_utils import (
     get_label_column_name,
     get_legacy_label_column_name,
 )
+from src.valuation_utils import nonpositive_invalid_flag, positive_inverse
 
 from src.feature_name_registry import (
     ALL_FACTORS_LGBM_PREFIX,
@@ -581,12 +582,25 @@ def compute_lgbm_purified_features(
     out["vwap_ratio"] = close / vwap - 1.0
     out["log_mcap"] = np.log1p(base["circ_mv"].clip(lower=0)) if "circ_mv" in base.columns else pd.Series(np.nan, index=base.index)
     if "pe_ttm" in base.columns:
-        out["ep_ttm"] = np.where(base["pe_ttm"] > 0, 1.0 / base["pe_ttm"], -1.0)
+        ep_ttm_clean = positive_inverse(base["pe_ttm"], index=base.index)
+        out["ep_ttm"] = ep_ttm_clean.fillna(-1.0)
         out["is_loss"] = (base["pe_ttm"] <= 0).astype(float)
+        out["ep_ttm_clean"] = ep_ttm_clean
+        out["ep_ttm_invalid"] = nonpositive_invalid_flag(base["pe_ttm"], index=base.index)
     else:
         out["ep_ttm"] = pd.Series(np.nan, index=base.index)
         out["is_loss"] = pd.Series(np.nan, index=base.index)
-    out["bp"] = np.where(base["pb"] > 0, 1.0 / base["pb"], -1.0) if "pb" in base.columns else pd.Series(np.nan, index=base.index)
+        out["ep_ttm_clean"] = pd.Series(np.nan, index=base.index)
+        out["ep_ttm_invalid"] = pd.Series(np.nan, index=base.index)
+    if "pb" in base.columns:
+        bp_clean = positive_inverse(base["pb"], index=base.index)
+        out["bp"] = bp_clean.fillna(-1.0)
+        out["bp_clean"] = bp_clean
+        out["bp_invalid"] = nonpositive_invalid_flag(base["pb"], index=base.index)
+    else:
+        out["bp"] = pd.Series(np.nan, index=base.index)
+        out["bp_clean"] = pd.Series(np.nan, index=base.index)
+        out["bp_invalid"] = pd.Series(np.nan, index=base.index)
     turnover_window = int(cfg["turnover_window"])
     out["turnover_20"] = base["turnover"].rolling(turnover_window, min_periods=1).mean() if "turnover" in base.columns else pd.Series(np.nan, index=base.index)
     extreme_window = int(cfg["extreme_window"])
@@ -851,12 +865,28 @@ def compute_tushare_factor_features(
     out["volume_ratio_raw"] = volume_ratio
     total_mv_safe = total_mv.replace(0, np.nan)
     out["float_mv_ratio"] = circ_mv / total_mv_safe
-    out["ep"] = np.where(pe > 0, 1.0 / pe, -1.0)
-    bp = np.where(pb > 0, 1.0 / pb, -1.0)
-    out["sp"] = np.where(ps > 0, 1.0 / ps, -1.0)
-    out["sp_ttm"] = np.where(ps_ttm > 0, 1.0 / ps_ttm, -1.0)
-    ep_ttm = np.where(pe_ttm > 0, 1.0 / pe_ttm, -1.0)
+    ep_clean = positive_inverse(pe, index=base.index)
+    sp_clean = positive_inverse(ps, index=base.index)
+    sp_ttm_clean = positive_inverse(ps_ttm, index=base.index)
+    ep_ttm_clean = positive_inverse(pe_ttm, index=base.index)
+    bp_clean = positive_inverse(pb, index=base.index)
+    out["ep"] = ep_clean.fillna(-1.0)
+    bp = bp_clean.fillna(-1.0)
+    out["sp"] = sp_clean.fillna(-1.0)
+    out["sp_ttm"] = sp_ttm_clean.fillna(-1.0)
+    ep_ttm = ep_ttm_clean.fillna(-1.0)
     out["ep_ttm_gap"] = out["ep"] - ep_ttm
+    out["ep_clean"] = ep_clean
+    out["ep_invalid"] = nonpositive_invalid_flag(pe, index=base.index)
+    out["sp_clean"] = sp_clean
+    out["sp_invalid"] = nonpositive_invalid_flag(ps, index=base.index)
+    out["sp_ttm_clean"] = sp_ttm_clean
+    out["sp_ttm_invalid"] = nonpositive_invalid_flag(ps_ttm, index=base.index)
+    out["ep_ttm_clean"] = ep_ttm_clean
+    out["ep_ttm_invalid"] = nonpositive_invalid_flag(pe_ttm, index=base.index)
+    out["ep_ttm_gap_clean"] = ep_clean - ep_ttm_clean
+    out["bp_clean"] = bp_clean
+    out["bp_invalid"] = nonpositive_invalid_flag(pb, index=base.index)
     out["dividend_yield"] = dv_ratio
     out["dividend_yield_ttm"] = dv_ttm
     out["has_dividend"] = np.where(np.isfinite(dv_ttm), (dv_ttm > 0).astype(float), np.nan)
@@ -883,12 +913,15 @@ def compute_tushare_factor_features(
     for window in cfg["valuation_change_windows"]:
         window = int(window)
         out[f"sp_ttm_change_{window}"] = pd.Series(out["sp_ttm"], index=base.index).pct_change(window, fill_method=None)
+        out[f"sp_ttm_clean_change_{window}"] = sp_ttm_clean.pct_change(window, fill_method=None)
         out[f"dividend_yield_ttm_change_{window}"] = pd.Series(out["dividend_yield_ttm"], index=base.index).pct_change(window, fill_method=None)
     ep_ttm_series = pd.Series(ep_ttm, index=base.index, dtype=float)
     bp_series = pd.Series(bp, index=base.index, dtype=float)
     for window in valuation_windows:
         out[f"ep_ttm_change_{window}"] = ep_ttm_series.diff(int(window))
+        out[f"ep_ttm_clean_change_{window}"] = ep_ttm_clean.diff(int(window))
         out[f"bp_change_{window}"] = bp_series.diff(int(window))
+        out[f"bp_clean_change_{window}"] = bp_clean.diff(int(window))
     for window in industry_windows:
         window = int(window)
         industry_ret = _series(f"ind_ret_{window}")
@@ -1078,6 +1111,10 @@ def compute_tushare_factor_features(
         "ind_sp_ttm_mean"
     )
     out["bp_minus_industry_bp"] = bp_series - _series("ind_bp_mean")
+    out["ep_clean_minus_industry_ep_clean"] = ep_clean - _series("ind_ep_clean_mean")
+    out["sp_clean_minus_industry_sp_clean"] = sp_clean - _series("ind_sp_clean_mean")
+    out["sp_ttm_clean_minus_industry_sp_ttm_clean"] = sp_ttm_clean - _series("ind_sp_ttm_clean_mean")
+    out["bp_clean_minus_industry_bp_clean"] = bp_clean - _series("ind_bp_clean_mean")
     out["dividend_yield_minus_industry"] = pd.Series(out["dividend_yield"], index=base.index, dtype=float) - _series(
         "ind_dividend_yield_mean"
     )
@@ -1106,11 +1143,9 @@ def compute_tushare_factor_features(
     def _component(series: pd.Series | np.ndarray, scale: float) -> pd.Series:
         return _bounded_signal(_as_indexed_float_series(series, base.index), scale)
 
-    bp_clean = (1.0 / pb.where(pb > 0)).replace([np.inf, -np.inf], np.nan)
-    sp_ttm_clean = (1.0 / ps_ttm.where(ps_ttm > 0)).replace([np.inf, -np.inf], np.nan)
-    bp_rel = bp_clean - _series("ind_bp_mean")
+    bp_rel = bp_clean - _series("ind_bp_clean_mean")
     sp_ttm_series = sp_ttm_clean
-    sp_ttm_rel = sp_ttm_series - _series("ind_sp_ttm_mean")
+    sp_ttm_rel = sp_ttm_series - _series("ind_sp_ttm_clean_mean")
     dividend_rel = dividend_yield_ttm_series - _series("ind_dividend_yield_ttm_mean")
     ocf_rel = pd.Series(fi_ocf_to_eps, index=base.index, dtype=float) - _series("ind_fi_ocf_to_eps_mean")
     margin_rel = pd.Series(fi_margin_quality, index=base.index, dtype=float) - _series("ind_fi_margin_quality_mean")

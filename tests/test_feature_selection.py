@@ -48,7 +48,11 @@ class FeatureSelectionTest(unittest.TestCase):
             "log_mcap",
             "ep_ttm",
             "is_loss",
+            "ep_ttm_clean",
+            "ep_ttm_invalid",
             "bp",
+            "bp_clean",
+            "bp_invalid",
         ]]
         meta = {
             "feature_names": [

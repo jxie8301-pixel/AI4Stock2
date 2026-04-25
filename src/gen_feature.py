@@ -43,6 +43,7 @@ from src.source_store import (
     list_bucket_paths,
     load_source_store_metadata,
 )
+from src.valuation_utils import positive_inverse
 
 from src.feature_name_registry import (
     ALL_FACTORS_ALPHA360_PREFIX,
@@ -200,6 +201,10 @@ def _get_tushare_industry_context_feature_cols() -> list[str]:
         "ind_sp_mean",
         "ind_sp_ttm_mean",
         "ind_bp_mean",
+        "ind_ep_clean_mean",
+        "ind_sp_clean_mean",
+        "ind_sp_ttm_clean_mean",
+        "ind_bp_clean_mean",
         "ind_dividend_yield_mean",
         "ind_dividend_yield_ttm_mean",
         "ind_fi_ocf_to_eps_mean",
@@ -309,10 +314,14 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
             (frame["close"] <= frame["down_limit"] * (1.0 + 1e-6)).astype(float),
             np.nan,
         )
-        ep = np.where(frame["pe"] > 0, 1.0 / frame["pe"], -1.0)
-        sp = np.where(frame["ps"] > 0, 1.0 / frame["ps"], -1.0)
-        sp_ttm = np.where(frame["ps_ttm"] > 0, 1.0 / frame["ps_ttm"], -1.0)
-        bp = np.where(frame["pb"] > 0, 1.0 / frame["pb"], -1.0)
+        ep_clean = positive_inverse(frame["pe"])
+        sp_clean = positive_inverse(frame["ps"])
+        sp_ttm_clean = positive_inverse(frame["ps_ttm"])
+        bp_clean = positive_inverse(frame["pb"])
+        ep = ep_clean.fillna(-1.0)
+        sp = sp_clean.fillna(-1.0)
+        sp_ttm = sp_ttm_clean.fillna(-1.0)
+        bp = bp_clean.fillna(-1.0)
         fina_indicator = _load_tushare_fina_indicator_features(symbol, pd.DatetimeIndex(frame["date"]))
         if fina_indicator is None or fina_indicator.empty:
             fi_frame = pd.DataFrame(index=frame.index)
@@ -343,6 +352,10 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
                     "sp": sp,
                     "sp_ttm": sp_ttm,
                     "bp": bp,
+                    "ep_clean": ep_clean.to_numpy(copy=False),
+                    "sp_clean": sp_clean.to_numpy(copy=False),
+                    "sp_ttm_clean": sp_ttm_clean.to_numpy(copy=False),
+                    "bp_clean": bp_clean.to_numpy(copy=False),
                     "dividend_yield": frame["dv_ratio"].to_numpy(copy=False),
                     "dividend_yield_ttm": frame["dv_ttm"].to_numpy(copy=False),
                     "fi_ocf_to_eps": fi_ocf_to_eps.to_numpy(copy=False),
@@ -375,6 +388,10 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
                 ind_sp_mean=("sp", "mean"),
                 ind_sp_ttm_mean=("sp_ttm", "mean"),
                 ind_bp_mean=("bp", "mean"),
+                ind_ep_clean_mean=("ep_clean", "mean"),
+                ind_sp_clean_mean=("sp_clean", "mean"),
+                ind_sp_ttm_clean_mean=("sp_ttm_clean", "mean"),
+                ind_bp_clean_mean=("bp_clean", "mean"),
                 ind_dividend_yield_mean=("dividend_yield", "mean"),
                 ind_dividend_yield_ttm_mean=("dividend_yield_ttm", "mean"),
                 ind_fi_ocf_to_eps_mean=("fi_ocf_to_eps", "mean"),

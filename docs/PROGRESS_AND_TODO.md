@@ -206,6 +206,15 @@ system baseline for feature research.
   - duplicated artifact readers and feature-family classifiers
 - [ ] Add a lightweight lint gate later, after source cleanup is complete; do not introduce broad formatting churn during the cleanup pass
 
+Current status:
+
+- [x] Shared forward-return, industry-group, parquet-scan, profile-resolution, and single-factor runtime helpers are extracted
+- [x] Rolling evaluation now records structured warnings for non-fatal fallback paths
+- [x] `main.py` is explicitly marked as the legacy single-window entrypoint
+- [x] Semantic Tushare composites preserve missingness and require minimum observed component weight
+- [x] Legacy valuation sentinel columns are preserved, with clean NaN-preserving variants and invalid flags added for migration
+- [ ] Tushare bucket-source precondition validation is the next reliability cleanup target
+
 Detailed implementation plan:
 
 1. Silent fallback cleanup

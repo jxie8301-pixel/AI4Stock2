@@ -31,7 +31,7 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/core_v4_techlite.yaml"))
         self.assertEqual(profile["selected_columns"][0], "KMID")
         self.assertEqual(profile["selected_columns"][-1], f"{TECHNICAL_FACTOR_PREFIX}mfi_14")
-        self.assertEqual(len(get_all_factor_feature_names()), 259)
+        self.assertEqual(len(get_all_factor_feature_names()), 263)
         self.assertIn(f"{TEMPORAL_FACTOR_PREFIX}ret_120", get_all_factor_feature_names())
         self.assertIn(f"{TECHNICAL_FACTOR_PREFIX}macd_hist_12_26_9", get_all_factor_feature_names())
         self.assertIn("CORR20__rep2", profile["selected_columns"])
@@ -101,7 +101,7 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertEqual(profile["generation_space"], "full_factor_space")
         self.assertEqual(profile["factor_store_dir"], "data/factor_store/full_factor_space")
         self.assertTrue(str(profile["profile_path"]).endswith("configs/features/lgbm_purified_v1.yaml"))
-        self.assertEqual(len(feature_names), 18)
+        self.assertEqual(len(feature_names), 22)
         self.assertEqual(profile["selected_columns"], [f"LGBM_{name}" for name in feature_names])
         self.assertEqual(
             feature_names,
@@ -120,7 +120,11 @@ class FeatureProfilesTest(unittest.TestCase):
                 "log_mcap",
                 "ep_ttm",
                 "is_loss",
+                "ep_ttm_clean",
+                "ep_ttm_invalid",
                 "bp",
+                "bp_clean",
+                "bp_invalid",
                 "turnover_20",
                 "dist_high_20",
                 "dist_low_20",

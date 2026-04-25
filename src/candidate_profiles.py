@@ -123,7 +123,7 @@ def feature_family(feature: str) -> str:
         return "ts_industry_state"
     if feature.endswith("_minus_industry") or "_minus_industry_" in feature:
         return "ts_relative_value_quality"
-    if feature.startswith(("TS_dividend", "TS_bp", "TS_sp")):
+    if feature.startswith(("TS_dividend", "TS_bp", "TS_sp", "TS_ep")):
         return "ts_valuation"
     if "amihud" in feature or "turnover" in feature:
         return "liquidity"

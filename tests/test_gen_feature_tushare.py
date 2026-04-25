@@ -28,7 +28,7 @@ class TushareFeatureTest(unittest.TestCase):
         default_names = get_all_factor_feature_names()
         tushare_names = get_all_factor_feature_names(data_source="tushare")
 
-        self.assertEqual(len(default_names), 259)
+        self.assertEqual(len(default_names), 263)
         self.assertEqual(len(tushare_names), len(default_names) + len(get_tushare_factor_feature_names()))
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}gap_up_limit", tushare_names)
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}industry_ret_20", tushare_names)
@@ -110,6 +110,10 @@ class TushareFeatureTest(unittest.TestCase):
                 "ind_sp_mean": [0.15, 0.15, 0.15],
                 "ind_sp_ttm_mean": [0.08, 0.08, 0.08],
                 "ind_bp_mean": [0.70, 0.70, 0.70],
+                "ind_ep_clean_mean": [0.10, 0.10, 0.10],
+                "ind_sp_clean_mean": [0.15, 0.15, 0.15],
+                "ind_sp_ttm_clean_mean": [0.08, 0.08, 0.08],
+                "ind_bp_clean_mean": [0.70, 0.70, 0.70],
                 "ind_dividend_yield_mean": [0.10, 0.10, 0.10],
                 "ind_dividend_yield_ttm_mean": [0.20, 0.20, 0.20],
                 "ind_fi_ocf_to_eps_mean": [1.5, 1.5, 1.5],
@@ -161,6 +165,10 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[1]["ep_ttm_gap"]), 0.05 - 0.0625, places=6)
         self.assertAlmostEqual(float(feat.iloc[0]["sp"]), 0.5, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["sp_ttm"]), 0.1, places=6)
+        self.assertTrue(pd.isna(feat.iloc[2]["ep_clean"]))
+        self.assertEqual(float(feat.iloc[2]["ep_invalid"]), 1.0)
+        self.assertAlmostEqual(float(feat.iloc[2]["sp_ttm_clean"]), 0.1, places=6)
+        self.assertEqual(float(feat.iloc[2]["sp_ttm_invalid"]), 0.0)
         self.assertEqual(float(feat.iloc[0]["has_dividend"]), 1.0)
         self.assertEqual(float(feat.iloc[1]["has_dividend"]), 0.0)
         self.assertAlmostEqual(float(feat.iloc[2]["limit_band_pct_mean_5"]), 0.2, places=6)
@@ -205,6 +213,9 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["sp_minus_industry_sp"]), 0.05, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["sp_ttm_minus_industry_sp_ttm"]), 0.02, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["bp_minus_industry_bp"]), 1.0 / 1.2 - 0.7, places=6)
+        self.assertTrue(pd.isna(feat.iloc[2]["ep_clean_minus_industry_ep_clean"]))
+        self.assertAlmostEqual(float(feat.iloc[2]["sp_ttm_clean_minus_industry_sp_ttm_clean"]), 0.02, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["bp_clean_minus_industry_bp_clean"]), 1.0 / 1.2 - 0.7, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_minus_industry"]), 0.1, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_ttm_minus_industry"]), 0.2, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fi_ocf_to_eps_minus_industry"]), 0.5, places=6)
@@ -718,6 +729,7 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn("ind_amihud_mean_20", context.columns)
         self.assertIn("ind_hit_up_limit_rate_20", context.columns)
         self.assertIn("ind_ep_mean", context.columns)
+        self.assertIn("ind_ep_clean_mean", context.columns)
         self.assertIn("ind_fi_ocf_to_eps_mean", context.columns)
         latest = context.sort_values("date").iloc[-1]
         self.assertAlmostEqual(float(latest["ind_turnover_mean_20"]), (2.0 + 4.0) / 2.0, places=6)
@@ -726,6 +738,10 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(latest["ind_sp_mean"]), 0.2, places=6)
         self.assertAlmostEqual(float(latest["ind_sp_ttm_mean"]), 0.1, places=6)
         self.assertAlmostEqual(float(latest["ind_bp_mean"]), 0.25, places=6)
+        self.assertAlmostEqual(float(latest["ind_ep_clean_mean"]), 0.04, places=6)
+        self.assertAlmostEqual(float(latest["ind_sp_clean_mean"]), 0.2, places=6)
+        self.assertAlmostEqual(float(latest["ind_sp_ttm_clean_mean"]), 0.1, places=6)
+        self.assertAlmostEqual(float(latest["ind_bp_clean_mean"]), 0.25, places=6)
         self.assertAlmostEqual(float(latest["ind_dividend_yield_mean"]), 0.2, places=6)
         self.assertAlmostEqual(float(latest["ind_dividend_yield_ttm_mean"]), 0.4, places=6)
         self.assertAlmostEqual(float(latest["ind_fi_ocf_to_eps_mean"]), 1.75, places=6)

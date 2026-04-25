@@ -300,7 +300,19 @@ def get_lgbm_purified_feature_names(config: dict[str, Any] | None = None) -> lis
     names += [f"ret_{d}" for d in cfg["momentum_windows"]]
     names += [f"dist_ma{d}" for d in cfg["ma_windows"]]
     names += ["std_60", "atr_14", "amihud_20", "vol_ratio_20", "corr_cv_20", "vwap_ratio"]
-    names += ["log_mcap", "ep_ttm", "is_loss", "bp", "turnover_20", "dist_high_20", "dist_low_20"]
+    names += [
+        "log_mcap",
+        "ep_ttm",
+        "is_loss",
+        "ep_ttm_clean",
+        "ep_ttm_invalid",
+        "bp",
+        "bp_clean",
+        "bp_invalid",
+        "turnover_20",
+        "dist_high_20",
+        "dist_low_20",
+    ]
     return names
 
 
@@ -422,6 +434,17 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "sp",
         "sp_ttm",
         "ep_ttm_gap",
+        "ep_clean",
+        "ep_invalid",
+        "sp_clean",
+        "sp_invalid",
+        "sp_ttm_clean",
+        "sp_ttm_invalid",
+        "ep_ttm_clean",
+        "ep_ttm_invalid",
+        "ep_ttm_gap_clean",
+        "bp_clean",
+        "bp_invalid",
         "dividend_yield",
         "dividend_yield_ttm",
         f"dividend_yield_ttm_surprise_{zscore_window}",
@@ -443,9 +466,12 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     names += [f"free_to_circ_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
     names += [f"float_mv_ratio_change_{int(window)}" for window in cfg["ratio_change_windows"]]
     names += [f"sp_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
+    names += [f"sp_ttm_clean_change_{int(window)}" for window in cfg["valuation_change_windows"]]
     names += [f"dividend_yield_ttm_change_{int(window)}" for window in cfg["valuation_change_windows"]]
     names += [f"ep_ttm_change_{int(window)}" for window in valuation_windows]
+    names += [f"ep_ttm_clean_change_{int(window)}" for window in valuation_windows]
     names += [f"bp_change_{int(window)}" for window in valuation_windows]
+    names += [f"bp_clean_change_{int(window)}" for window in valuation_windows]
     for window in industry_windows:
         window = int(window)
         names += [
@@ -516,6 +542,10 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "sp_minus_industry_sp",
         "sp_ttm_minus_industry_sp_ttm",
         "bp_minus_industry_bp",
+        "ep_clean_minus_industry_ep_clean",
+        "sp_clean_minus_industry_sp_clean",
+        "sp_ttm_clean_minus_industry_sp_ttm_clean",
+        "bp_clean_minus_industry_bp_clean",
         "dividend_yield_minus_industry",
         "dividend_yield_ttm_minus_industry",
         "fi_ocf_to_eps_minus_industry",

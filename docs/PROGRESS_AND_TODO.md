@@ -218,7 +218,9 @@ Current status:
 - [x] Candidate diagnostics share artifact readers, metric extraction, bucket-shape, and feature-family helpers
 - [x] Config validation supported-mode constants are centralized while keeping `validate_training_config` as the public entrypoint
 - [x] Backtest wrapper/report boundaries use shared native-to-legacy return helpers while keeping engine `net_return` canonical
-- [ ] Legacy CLI / compatibility import cleanup is the next reliability target
+- [x] `run_native_rolling.py` no longer re-exports underscored artifact/baseline helpers only for tests
+- [ ] Hidden legacy CLI flag cleanup is deferred until compatibility aliases are no longer needed
+- [ ] Unused import cleanup is the next reliability target
 
 Detailed implementation plan:
 

@@ -10,36 +10,28 @@ from src.experiment_store import (
 )
 from src.label_utils import get_label_column_name, resolve_signal_horizon
 from src.rolling_artifacts import (
-    build_paths as _build_paths,
-    ensure_output_dirs as _ensure_output_dirs,
+    build_paths,
+    ensure_output_dirs,
     load_prediction_bundle,
-    resolve_prediction_artifact_dir as _resolve_prediction_artifact_dir,
-    write_prediction_bundle as _write_prediction_bundle,
-)
-from src.rolling_baselines import (
-    build_average_factor_baseline_predictions as _build_average_factor_baseline_predictions,
-    build_rank_average_factor_baseline_predictions as _build_rank_average_factor_baseline_predictions,
-    build_rank_ic_weighted_factor_baseline_predictions as _build_rank_ic_weighted_factor_baseline_predictions,
-    build_sign_aligned_factor_baseline_predictions as _build_sign_aligned_factor_baseline_predictions,
+    resolve_prediction_artifact_dir,
+    write_prediction_bundle,
 )
 from src.rolling_evaluate import evaluate_prediction_bundle
 from src.prediction_fusion import fuse_prediction_bundle, resolve_score_fusion_cfg
 from src.rolling_runtime import load_rolling_runtime_data
 from src.rolling_train import generate_prediction_bundle
-from src.rolling_types import (
-    PREDICTION_ARTIFACT_DIRNAME,
-    PREDICTION_METADATA_FILENAME,
-    PredictionBundle,
-    RollingPaths,
-    RollingRuntimeData,
-)
+from src.rolling_types import PREDICTION_ARTIFACT_DIRNAME
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AI4Stock2 Native Rolling Pipeline")
     add_common_runtime_args(parser, include_model_arg=True)
-    parser.add_argument("--retrain-step", type=int, help="Rolling retrain step in trading days. If omitted, use config value.")
+    parser.add_argument(
+        "--retrain-step",
+        type=int,
+        help="Rolling retrain step in trading days. If omitted, use config value.",
+    )
     parser.add_argument("--horizon", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--train-days", type=int, help="Training window length in trading days. If omitted, use config value.")
     parser.add_argument("--valid-days", type=int, help="Validation window length in trading days. If omitted, use config value.")
@@ -90,13 +82,13 @@ def run_rolling_pipeline() -> None:
         model_name=model_name,
         model_ext=".pt" if model_name != "lgbm" else ".pkl",
     )
-    paths = _build_paths(run_store, model_name)
-    _ensure_output_dirs(paths, save_models=args.save_models, load_models=args.load_models, model_name=model_name)
+    paths = build_paths(run_store, model_name)
+    ensure_output_dirs(paths, save_models=args.save_models, load_models=args.load_models, model_name=model_name)
 
     print(f"\n>>> Running Native Rolling Pipeline (Backend: NATIVE) <<<")
     if args.load_predictions_dir:
         bundle = load_prediction_bundle(args.load_predictions_dir)
-        print(f"[*] Loaded prediction bundle from {_resolve_prediction_artifact_dir(args.load_predictions_dir)}")
+        print(f"[*] Loaded prediction bundle from {resolve_prediction_artifact_dir(args.load_predictions_dir)}")
     else:
         runtime_data = load_rolling_runtime_data(
             cfg,
@@ -117,11 +109,11 @@ def run_rolling_pipeline() -> None:
             model_name=model_name,
         )
         if args.save_predictions:
-            _write_prediction_bundle(bundle, paths.prediction_artifact_dir)
+            write_prediction_bundle(bundle, paths.prediction_artifact_dir)
             print(f"Prediction bundle saved: {paths.prediction_artifact_dir}")
 
     if args.load_predictions_dir and args.save_predictions:
-        _write_prediction_bundle(bundle, paths.prediction_artifact_dir)
+        write_prediction_bundle(bundle, paths.prediction_artifact_dir)
         print(f"Prediction bundle copied to current run: {paths.prediction_artifact_dir}")
 
     fusion_cfg = resolve_score_fusion_cfg(cfg)
@@ -141,7 +133,7 @@ def run_rolling_pipeline() -> None:
             f"secondary={secondary_dir}"
         )
         if args.save_predictions:
-            _write_prediction_bundle(bundle, paths.prediction_artifact_dir)
+            write_prediction_bundle(bundle, paths.prediction_artifact_dir)
             print(f"Fused prediction bundle saved: {paths.prediction_artifact_dir}")
 
     evaluate_prediction_bundle(

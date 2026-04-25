@@ -6,8 +6,24 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-import run_native_rolling
+from src.rolling_artifacts import (
+    load_prediction_bundle,
+    resolve_prediction_artifact_dir,
+    write_prediction_bundle,
+)
+from src.rolling_baselines import (
+    build_average_factor_baseline_predictions,
+    build_rank_average_factor_baseline_predictions,
+    build_rank_ic_weighted_factor_baseline_predictions,
+    build_sign_aligned_factor_baseline_predictions,
+)
 from src.rolling_runtime import load_source_market_data_frame
+from src.rolling_types import (
+    PREDICTION_ARTIFACT_DIRNAME,
+    PREDICTION_METADATA_FILENAME,
+    PredictionBundle,
+    RollingRuntimeData,
+)
 
 
 class RunNativeRollingTest(unittest.TestCase):
@@ -19,7 +35,7 @@ class RunNativeRollingTest(unittest.TestCase):
             ],
             names=["datetime", "instrument"],
         )
-        bundle = run_native_rolling.PredictionBundle(
+        bundle = PredictionBundle(
             final_predictions=pd.Series([0.1, 0.2], index=index, name="prediction"),
             label_series=pd.Series([0.01, 0.02], index=index, name="label"),
             backtest_label_series=pd.Series([0.001, 0.002], index=index, name="label"),
@@ -41,9 +57,9 @@ class RunNativeRollingTest(unittest.TestCase):
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            artifact_dir = Path(tmpdir) / run_native_rolling.PREDICTION_ARTIFACT_DIRNAME
-            run_native_rolling._write_prediction_bundle(bundle, artifact_dir)
-            loaded = run_native_rolling.load_prediction_bundle(artifact_dir)
+            artifact_dir = Path(tmpdir) / PREDICTION_ARTIFACT_DIRNAME
+            write_prediction_bundle(bundle, artifact_dir)
+            loaded = load_prediction_bundle(artifact_dir)
 
         pd.testing.assert_series_equal(loaded.final_predictions, bundle.final_predictions, check_names=False)
         pd.testing.assert_series_equal(loaded.label_series, bundle.label_series, check_names=False)
@@ -74,7 +90,7 @@ class RunNativeRollingTest(unittest.TestCase):
         self.assertAlmostEqual(float(loaded.training_summary_records[0]["valid_topk_label_mean"]), 0.12, places=8)
 
     def test_average_factor_baseline_uses_unique_source_columns(self):
-        runtime_data = run_native_rolling.RollingRuntimeData(
+        runtime_data = RollingRuntimeData(
             factor_frame=pd.DataFrame(
                 {
                     "date": pd.to_datetime(["2024-01-02", "2024-01-02"]),
@@ -98,7 +114,7 @@ class RunNativeRollingTest(unittest.TestCase):
             batch_size=2,
         )
 
-        preds = run_native_rolling._build_average_factor_baseline_predictions(runtime_data)
+        preds = build_average_factor_baseline_predictions(runtime_data)
 
         expected = pd.Series(
             [3.0, 5.0],
@@ -112,7 +128,7 @@ class RunNativeRollingTest(unittest.TestCase):
 
     def test_sign_aligned_factor_baseline_flips_negative_train_ic_features(self):
         dates = pd.to_datetime(["2024-01-01"] * 2 + ["2024-01-02"] * 2 + ["2024-01-03"] * 2)
-        runtime_data = run_native_rolling.RollingRuntimeData(
+        runtime_data = RollingRuntimeData(
             factor_frame=pd.DataFrame(
                 {
                     "date": dates,
@@ -135,13 +151,13 @@ class RunNativeRollingTest(unittest.TestCase):
             batch_size=2,
         )
 
-        preds = run_native_rolling._build_sign_aligned_factor_baseline_predictions(runtime_data)
+        preds = build_sign_aligned_factor_baseline_predictions(runtime_data)
         values = preds.to_numpy(dtype=float)
         self.assertGreater(values[0], values[1])
 
     def test_rank_average_factor_baseline_uses_cross_sectional_rank_zscores(self):
         dates = pd.to_datetime(["2024-01-02"] * 3)
-        runtime_data = run_native_rolling.RollingRuntimeData(
+        runtime_data = RollingRuntimeData(
             factor_frame=pd.DataFrame(
                 {
                     "date": dates,
@@ -165,7 +181,7 @@ class RunNativeRollingTest(unittest.TestCase):
             batch_size=3,
         )
 
-        preds = run_native_rolling._build_rank_average_factor_baseline_predictions(runtime_data)
+        preds = build_rank_average_factor_baseline_predictions(runtime_data)
 
         expected = pd.Series(
             [-1.0, 0.0, 1.0],
@@ -183,7 +199,7 @@ class RunNativeRollingTest(unittest.TestCase):
 
     def test_rank_ic_weighted_factor_baseline_uses_train_rank_ic_signs(self):
         dates = pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3 + ["2024-01-03"] * 3)
-        runtime_data = run_native_rolling.RollingRuntimeData(
+        runtime_data = RollingRuntimeData(
             factor_frame=pd.DataFrame(
                 {
                     "date": dates,
@@ -206,7 +222,7 @@ class RunNativeRollingTest(unittest.TestCase):
             batch_size=3,
         )
 
-        preds = run_native_rolling._build_rank_ic_weighted_factor_baseline_predictions(runtime_data)
+        preds = build_rank_ic_weighted_factor_baseline_predictions(runtime_data)
 
         values = preds.to_numpy(dtype=float)
         self.assertGreater(values[0], values[1])
@@ -215,12 +231,12 @@ class RunNativeRollingTest(unittest.TestCase):
     def test_resolve_prediction_artifact_dir_accepts_parent_run_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             run_dir = Path(tmpdir) / "run"
-            artifact_dir = run_dir / run_native_rolling.PREDICTION_ARTIFACT_DIRNAME
+            artifact_dir = run_dir / PREDICTION_ARTIFACT_DIRNAME
             artifact_dir.mkdir(parents=True, exist_ok=True)
-            with open(artifact_dir / run_native_rolling.PREDICTION_METADATA_FILENAME, "w", encoding="utf-8") as f:
+            with open(artifact_dir / PREDICTION_METADATA_FILENAME, "w", encoding="utf-8") as f:
                 json.dump({"selected_features": []}, f)
 
-            resolved = run_native_rolling._resolve_prediction_artifact_dir(run_dir)
+            resolved = resolve_prediction_artifact_dir(run_dir)
 
         self.assertEqual(resolved, artifact_dir)
 
@@ -236,7 +252,7 @@ class RunNativeRollingTest(unittest.TestCase):
                 }
             ).to_parquet(parquet_dir / "A.parquet", index=False)
 
-            runtime_data = run_native_rolling.RollingRuntimeData(
+            runtime_data = RollingRuntimeData(
                 factor_frame=pd.DataFrame(
                     {
                         "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),
@@ -298,7 +314,7 @@ class RunNativeRollingTest(unittest.TestCase):
                 }
             ).to_parquet(buckets / "part-0003.parquet", index=False)
 
-            runtime_data = run_native_rolling.RollingRuntimeData(
+            runtime_data = RollingRuntimeData(
                 factor_frame=pd.DataFrame(
                     {
                         "date": pd.to_datetime(["2024-01-02", "2024-01-03"]),

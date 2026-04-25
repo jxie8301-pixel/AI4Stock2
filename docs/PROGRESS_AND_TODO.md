@@ -39,6 +39,10 @@ What is true now:
 - Tushare side-input raw stages now include `fina_indicator`, `dividend`, `forecast`, and `express`
 - Tushare side-input features now include latest announced snapshots from `fina_indicator`, `dividend`, `forecast`, and `express`
 - Single-factor diagnostics now support yearly regime slices, optional industry neutralization, and detailed artifact exports for bucket returns, top-bottom spreads, monthly RankIC, and missingness by year
+- Semantic `TS_sem_*` factors have been added as an explicit factor-engineering layer; the latest useful subset is concentrated in dividend quality, low-volatility value reversal, value-quality, profitability resilience, and industry-strength low-volatility combinations
+- The current `core_v7_semantic_alpha_strong7_v1` profile is useful as a semantic-factor test profile, but it should not be promoted to `candidate` yet because the default rolling LGBM backtest underperformed its parent feature profile
+- The latest semantic diagnostics suggest these factors may be more useful as a separate linear / rank-score sleeve or overlay than as raw extra columns inside the same LGBM setup
+- Absolute factor-baseline performance is now a real research constraint: `rankic_weighted_factor` and `rank_zscore_avg_factor` must be treated as hard non-ML baselines, not only as auxiliary diagnostics
 - Latest full-space diagnostics show that `TS_dividend_*` and `TS_stock_vs_industry_*` retain signal best after industry neutralization
 - Latest full-space diagnostics also show that most pure `TS_industry_*` features and several absolute flow/event and valuation signals are largely industry / style exposure rather than clean within-industry stock alpha
 - Several `TS_exp_*` / `TS_latest_exp_*` features still have zero effective coverage in the current diagnostics range and should not be treated as validated alpha candidates yet
@@ -99,6 +103,10 @@ The project now needs four baseline concepts instead of one:
      `results/two_stage_industry_blend_tune_batch_20260410_042559.tsv`
    - Interpretation:
      the current stack appears to learn relative industry opportunity more cleanly than absolute future return magnitude.
+6. Non-ML factor baseline hard gate
+   - `rankic_weighted_factor` and `rank_zscore_avg_factor` are now promotion gates for future ML candidates.
+   - A model that improves headline annualized return but does not beat the non-ML factor sleeves on drawdown, monthly win rate, and rebalance win rate should remain a research result, not a candidate.
+   - Conservative formula style baselines should be added next: low volatility, dividend / payout, value-quality, profitability quality, and simple trend confirmation.
 
 Important interpretation:
 
@@ -145,6 +153,132 @@ system baseline for feature research.
   - more same-family temporal / technical window variants
 - [ ] Repair or quarantine zero-coverage `TS_exp_*` / `TS_latest_exp_*` fields before drawing further conclusions from the express family
 - [ ] Keep feature research aimed at "what stock can make money inside its current context", not at adding more proxies for the same price-state signal
+
+### 0B. Semantic Factors And Non-ML Baselines
+
+- [ ] Do not promote `core_v7_semantic_alpha_strong7_v1` to `candidate` unless it beats the parent profile under the same strategy family and not only in single-factor diagnostics
+- [ ] Re-test the strong semantic subset under the current candidate-style conversion family:
+  - `top8` / `top10`
+  - `score_softmax`
+  - `rank_pct`
+  - intraperiod exit / validation overlay variants only after the raw comparison is understood
+- [ ] Test semantic factors as a score-level sleeve rather than only as LGBM input columns:
+  - standalone `rankic_weighted` semantic sleeve
+  - parent model score plus semantic sleeve overlay
+  - conservative formula sleeve using low-volatility, dividend quality, value-quality, profitability quality, and trend confirmation
+- [ ] Add absolute baseline metrics to experiment manifests; current `*_baseline_excess_annualized_return` fields are model-minus-baseline deltas and are easy to misread
+- [ ] Export monthly and rebalance-period summaries for each factor baseline, especially `rankic_weighted_factor` and `rank_zscore_avg_factor`
+- [ ] Treat the non-ML factor sleeves as minimum bars for future model promotion:
+  - annualized return and Sharpe must improve after costs
+  - max drawdown must not deteriorate without a clear return tradeoff
+  - monthly win rate and rebalance win rate must be reported directly
+- [ ] Fix or quarantine `TS_sem_express_growth_quality_fresh` before using the full semantic profile; current diagnostics indicate the value path can collapse to all-zero / NaN-effective behavior
+- [ ] Keep `results/` ignored; preserve reproducibility through profile/config/source changes and use copied summary artifacts only when promoting to `candidate`
+
+### 0C. Code Quality And Reliability Cleanup
+
+- [ ] Treat this cleanup pass as reliability / maintainability work, not performance work
+- [ ] Remove research-critical silent fallback paths:
+  - baseline reconstruction failures should be recorded in manifest warnings or fail in strict mode
+  - opportunity-label derivation failures should not silently disable buyability diagnostics
+  - missing industry mapping should be explicit when `industry_excess` or `max_industry_weight` is configured
+- [ ] Extract duplicated domain helpers into shared modules:
+  - forward compound return construction
+  - industry group loading
+  - parquet dataset scan helpers
+  - profile inheritance / inline-path resolution helpers where practical
+- [ ] Decide the long-term status of `main.py`:
+  - either mark it as a legacy single-run wrapper
+  - or refactor it to reuse the rolling runtime / evaluation / artifact helpers
+- [ ] Fix semantic-factor missingness semantics:
+  - avoid treating missing components as neutral zero by default
+  - add minimum observed-component gates or coverage outputs for composite semantic factors
+  - split invalid valuation sentinels from actual economic factor values
+- [ ] Make Tushare bucket-source factor generation preconditions explicit:
+  - validate that packed source shards contain required sidecar / industry context columns
+  - record source-layout assumptions in factor-store metadata
+- [ ] Move diagnostics script helper logic out of runnable scripts and into `src/` modules
+- [ ] Split collector common parquet / lifecycle / symbol-cache utilities out of data-source-specific collectors
+- [ ] Clean compatibility and dead-code surfaces after the shared helpers are in place:
+  - hidden legacy CLI flags
+  - wrapper-only re-exports
+  - unused imports
+  - duplicated artifact readers and feature-family classifiers
+- [ ] Add a lightweight lint gate later, after source cleanup is complete; do not introduce broad formatting churn during the cleanup pass
+
+Detailed implementation plan:
+
+1. Silent fallback cleanup
+   - files: `src/rolling_evaluate.py`, `src/rolling_train.py`
+   - collect baseline reconstruction failures and opportunity-label failures into structured warnings
+   - expose warning records in run artifacts / manifests instead of only printing
+   - keep non-critical baseline reconstruction non-fatal at first, but make configured required paths explicit
+2. Industry group loading cleanup
+   - files: `src/rolling_train.py`, `src/rolling_evaluate.py`, `run_single_factor_diagnostics.py`
+   - add `src/industry_groups.py`
+   - centralize symbol-cache path resolution, industry parquet loading, and required-vs-optional behavior
+   - fail-fast when industry-neutral diagnostics are requested and groups cannot be loaded
+3. Forward horizon return cleanup
+   - files: `src/rolling_train.py`, `src/rolling_evaluate.py`, `run_single_factor_diagnostics.py`
+   - add `src/return_horizon.py`
+   - centralize `t+1 ... t+horizon` compound-return construction
+   - add tests for short input, NaN windows, index sorting, and horizon-one behavior
+4. Parquet dataset scan cleanup
+   - files: `src/factor_store.py`, `src/source_store.py`
+   - add `src/parquet_io.py`
+   - move shared Arrow dataset scan logic without changing scan parameters
+   - keep layout and manifest-specific decisions in factor/source store modules
+5. Profile resolution cleanup
+   - files: `src/feature_profiles.py`, `src/experiment_profiles.py`
+   - add a small shared profile helper only for inline path / inheritance mechanics
+   - leave feature-specific add/drop/repeat mutation local in `feature_profiles.py`
+6. `main.py` status cleanup
+   - files: `main.py`, `src/rolling_evaluate.py`
+   - first mark `main.py` as a legacy single-run entrypoint
+   - then extract common backtest kwargs / plot-report helpers so single and rolling paths do not drift
+7. Semantic factor missingness cleanup
+   - file: `src/feature_value_core.py`
+   - replace missing-as-neutral-zero composite components with explicit observed-component gating
+   - avoid adding new feature columns in the first pass unless tests show the coverage signal is necessary
+8. Valuation sentinel cleanup
+   - files: `src/feature_value_core.py`, `src/gen_feature.py`
+   - keep legacy `-1.0` columns initially for reproducibility
+   - add explicit invalid flags and clean NaN-preserving valuation variants before moving profiles to the clean variants
+9. Tushare bucket-source precondition cleanup
+   - file: `src/gen_feature.py`
+   - validate packed source schema before bucket-source factor generation
+   - record source-layout and sidecar assumptions in factor-store metadata
+10. Single-factor diagnostics runtime cleanup
+    - files: `run_single_factor_diagnostics.py`, `run_single_factor_diagnostics_batch.py`
+    - move period/segment/label-space/industry-neutral helpers into a `src/` module
+    - stop importing private helper functions from runnable scripts
+11. Candidate diagnostics shared utilities
+    - files: `run_candidate_pool_diagnostics.py`, `run_strategy_pair_diagnostics.py`, `src/candidate_profiles.py`
+    - centralize artifact readers, metric extraction, bucket shape, and feature-family classification
+12. Collector common parquet utilities
+    - files: `src/collector_tushare.py`, `src/collector_gm.py`, `src/collector_akshare.py`
+    - first extract only schema-neutral parquet / atomic-write helpers
+    - defer lifecycle and symbol-cache extraction until the low-level utility layer is stable
+13. Config validation split
+    - file: `src/config_validation.py`
+    - first centralize supported-mode constants
+    - later split domain validators while preserving `validate_training_config` as the public mutating entrypoint
+14. Backtest wrapper boundary cleanup
+    - files: `src/backtest_engine.py`, `src/native_backtest.py`, `src/backtest.py`, `main.py`, `src/rolling_evaluate.py`
+    - keep wrappers for compatibility
+    - keep canonical engine return column as `net_return`
+    - restrict legacy `return` aliasing to wrapper/report-preparation boundaries
+15. Legacy CLI / compatibility import cleanup
+    - files: `run_native_rolling.py`, `src/runtime_cli.py`, tests
+    - migrate tests away from underscored `run_native_rolling.py` aliases
+    - keep hidden legacy flags until test imports and documented commands no longer depend on them
+16. Unused import cleanup
+    - clean low-risk imports after shared helpers land
+    - do not run broad auto-formatting in this pass
+17. Lint gate
+    - defer dependency changes
+    - add `ruff` later only after code movement stabilizes
+    - start with unused import / broad exception / import sorting checks before considering format enforcement
 
 ### 1. Relative-Opportunity Research Track
 
@@ -218,6 +352,22 @@ system baseline for feature research.
   - selected stock-level absolute scale features
 - [ ] Compare full-rank vs mixed-rank/raw pipelines on the same baselines
 - [ ] Make sure experiment manifests record which features stayed absolute and which were ranked
+
+### 5A. Factor-Store Layout And WSL2 I/O
+
+- [ ] Keep the current `bucket_shards` path as the stable baseline, but stop assuming it is the final training-optimal layout
+- [ ] Add a second training-oriented factor-store layout for evaluation:
+  - date-major or year-partitioned panel layout
+  - explicitly tuned Parquet row-group size
+  - same logical columns and metadata contract as the current store
+- [ ] Separate incremental-update storage from training-read storage instead of forcing one layout to solve both jobs
+- [ ] Verify whether date-window pruning actually works on the training store; the current bucket files should not remain a single row group if we expect date filters to save I/O
+- [ ] Re-check universe filtering cost on the current factor store and remove redundant Python-side masking when Arrow-level symbol filtering is already sufficient
+- [ ] Add one reproducible local benchmark that compares:
+  - current `bucket_shards`
+  - proposed date-major training layout
+  - representative read patterns: `all`, `csi300`, short/long date windows, 1-column vs 40-column loads
+- [ ] Only promote a new layout after verifying end-to-end rolling runtime, not just synthetic file-read speed
 
 ### 6. Tushare Migration And Pipeline Cleanup
 

@@ -258,7 +258,10 @@ def summarize_concentration(monthly: pd.DataFrame) -> dict[str, Any]:
 
 
 def summarize_feature_families(run_dir: Path) -> list[dict[str, Any]]:
-    frame = read_csv_artifact(run_dir, "feature_importance_gain_mean.csv")
+    try:
+        frame = read_csv_artifact(run_dir, "feature_importance_gain_mean.csv")
+    except FileNotFoundError:
+        return []
     frame["feature_family"] = frame["feature"].astype(str).map(feature_family)
     frame["importance_gain"] = pd.to_numeric(frame["importance_gain"], errors="coerce").fillna(0.0)
     total = float(frame["importance_gain"].sum())

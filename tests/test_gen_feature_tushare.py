@@ -116,6 +116,9 @@ class TushareFeatureTest(unittest.TestCase):
                 "ind_bp_clean_mean": [0.70, 0.70, 0.70],
                 "ind_dividend_yield_mean": [0.10, 0.10, 0.10],
                 "ind_dividend_yield_ttm_mean": [0.20, 0.20, 0.20],
+                "ind_dividend_cash_to_eps_mean": [0.10, 0.10, 0.10],
+                "ind_dividend_cash_to_ocfps_mean": [0.05, 0.05, 0.05],
+                "ind_dividend_cash_yield_proxy_mean": [0.01, 0.01, 0.01],
                 "ind_fi_ocf_to_eps_mean": [1.5, 1.5, 1.5],
                 "ind_fi_ocfps_minus_eps_mean": [2.0, 2.0, 2.0],
                 "ind_fi_roe_quality_gap_mean": [-0.5, -0.5, -0.5],
@@ -133,6 +136,7 @@ class TushareFeatureTest(unittest.TestCase):
                 "fi_op_yoy": [4.0, 5.0, 6.0],
                 "fi_netprofit_yoy": [3.0, 4.0, 5.0],
                 "fi_ocf_yoy": [2.0, 3.0, 4.0],
+                "div_cash_div": [0.2, 0.0, 0.6],
                 "fc_p_change_min": [10.0, 20.0, 30.0],
                 "fc_p_change_max": [30.0, 40.0, 50.0],
                 "fc_net_profit_min": [100.0, 200.0, 300.0],
@@ -209,6 +213,9 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_amplitude_ratio_20"]), 2.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_hit_up_limit_gap_20"]), -0.2, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["stock_vs_industry_hit_down_limit_gap_20"]), -0.1, places=6)
+        self.assertTrue(pd.notna(feat.iloc[2]["stock_vs_industry_crowding_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["stock_vs_industry_liquidity_stress_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["stock_vs_industry_low_vol_liquidity_20"]))
         self.assertAlmostEqual(float(feat.iloc[2]["ep_minus_industry_ep"]), -1.1, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["sp_minus_industry_sp"]), 0.05, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["sp_ttm_minus_industry_sp_ttm"]), 0.02, places=6)
@@ -218,6 +225,12 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(feat.iloc[2]["bp_clean_minus_industry_bp_clean"]), 1.0 / 1.2 - 0.7, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_minus_industry"]), 0.1, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_ttm_minus_industry"]), 0.2, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_cash_to_eps"]), 0.2, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_cash_to_ocfps"]), 0.1, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_cash_yield_proxy"]), 0.6 / 12.0, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_cash_to_eps_minus_industry"]), 0.1, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_cash_to_ocfps_minus_industry"]), 0.05, places=6)
+        self.assertAlmostEqual(float(feat.iloc[2]["dividend_cash_yield_proxy_minus_industry"]), 0.6 / 12.0 - 0.01, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fi_ocf_to_eps_minus_industry"]), 0.5, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fi_ocfps_minus_eps_minus_industry"]), 1.0, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["fi_roe_quality_gap_minus_industry"]), -0.5, places=6)
@@ -233,8 +246,12 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertTrue(pd.notna(feat.iloc[2]["volume_ratio_raw_zscore_20"]))
         self.assertAlmostEqual(float(feat.iloc[1]["dividend_yield_ttm_surprise_20"]), -0.8, places=6)
         self.assertAlmostEqual(float(feat.iloc[2]["dividend_yield_ttm_surprise_20"]), 0.0, places=6)
+        self.assertTrue(pd.notna(feat.iloc[2]["dividend_cash_yield_proxy_surprise_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["dividend_yield_ttm_industry_spread_zscore_20"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["dividend_cash_yield_industry_spread_zscore_20"]))
         self.assertTrue(pd.notna(feat.iloc[2]["sem_value_quality"]))
         self.assertTrue(pd.notna(feat.iloc[2]["sem_dividend_quality"]))
+        self.assertTrue(pd.notna(feat.iloc[2]["sem_dividend_cash_quality"]))
         self.assertTrue(pd.isna(feat.iloc[2]["sem_liquidity_absorption_20"]))
 
     def test_semantic_tushare_factors_preserve_missing_components(self):
@@ -655,9 +672,11 @@ class TushareFeatureTest(unittest.TestCase):
             parquet_dir = root / "processed"
             meta_dir = root / "meta"
             fina_dir = root / "fina_indicator"
+            dividend_dir = root / "dividend"
             parquet_dir.mkdir()
             meta_dir.mkdir()
             fina_dir.mkdir()
+            dividend_dir.mkdir()
             symbol_cache = pd.DataFrame(
                 {
                     "local_symbol": ["000001", "000002"],
@@ -704,15 +723,23 @@ class TushareFeatureTest(unittest.TestCase):
                         "netprofit_margin": [10.0 + close_offset],
                     }
                 ).to_parquet(fina_dir / f"{symbol}.parquet", index=False)
+                pd.DataFrame(
+                    {
+                        "ann_date": ["20260329"],
+                        "cash_div": [0.5 + close_offset],
+                    }
+                ).to_parquet(dividend_dir / f"{symbol}.parquet", index=False)
 
             from src import gen_feature as gen_feature_module
 
             original_symbol_cache_path = gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH
             original_industry_context_path = gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH
             original_fina_dir = gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR
+            original_dividend_dir = gen_feature_module.TUSHARE_RAW_DIVIDEND_DIR
             gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = symbol_cache_path
             gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = industry_context_path
             gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR = fina_dir
+            gen_feature_module.TUSHARE_RAW_DIVIDEND_DIR = dividend_dir
             gen_feature_module._clear_tushare_context_caches()
             try:
                 _build_tushare_industry_context_cache(parquet_dir)
@@ -720,6 +747,7 @@ class TushareFeatureTest(unittest.TestCase):
                 gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = original_symbol_cache_path
                 gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = original_industry_context_path
                 gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR = original_fina_dir
+                gen_feature_module.TUSHARE_RAW_DIVIDEND_DIR = original_dividend_dir
                 gen_feature_module._clear_tushare_context_caches()
 
             context = pd.read_parquet(industry_context_path)
@@ -730,6 +758,7 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertIn("ind_hit_up_limit_rate_20", context.columns)
         self.assertIn("ind_ep_mean", context.columns)
         self.assertIn("ind_ep_clean_mean", context.columns)
+        self.assertIn("ind_dividend_cash_yield_proxy_mean", context.columns)
         self.assertIn("ind_fi_ocf_to_eps_mean", context.columns)
         latest = context.sort_values("date").iloc[-1]
         self.assertAlmostEqual(float(latest["ind_turnover_mean_20"]), (2.0 + 4.0) / 2.0, places=6)
@@ -744,6 +773,9 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(latest["ind_bp_clean_mean"]), 0.25, places=6)
         self.assertAlmostEqual(float(latest["ind_dividend_yield_mean"]), 0.2, places=6)
         self.assertAlmostEqual(float(latest["ind_dividend_yield_ttm_mean"]), 0.4, places=6)
+        self.assertAlmostEqual(float(latest["ind_dividend_cash_to_eps_mean"]), (0.5 / 1.0 + 1.5 / 2.0) / 2.0, places=6)
+        self.assertAlmostEqual(float(latest["ind_dividend_cash_to_ocfps_mean"]), (0.5 / 2.0 + 1.5 / 3.0) / 2.0, places=6)
+        self.assertAlmostEqual(float(latest["ind_dividend_cash_yield_proxy_mean"]), (0.5 / 12.0 + 1.5 / 13.0) / 2.0, places=6)
         self.assertAlmostEqual(float(latest["ind_fi_ocf_to_eps_mean"]), 1.75, places=6)
         self.assertAlmostEqual(float(latest["ind_fi_ocfps_minus_eps_mean"]), 1.0, places=6)
         self.assertAlmostEqual(float(latest["ind_fi_roe_quality_gap_mean"]), -1.0, places=6)

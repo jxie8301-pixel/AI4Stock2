@@ -207,6 +207,9 @@ def _get_tushare_industry_context_feature_cols() -> list[str]:
         "ind_bp_clean_mean",
         "ind_dividend_yield_mean",
         "ind_dividend_yield_ttm_mean",
+        "ind_dividend_cash_to_eps_mean",
+        "ind_dividend_cash_to_ocfps_mean",
+        "ind_dividend_cash_yield_proxy_mean",
         "ind_fi_ocf_to_eps_mean",
         "ind_fi_ocfps_minus_eps_mean",
         "ind_fi_roe_quality_gap_mean",
@@ -272,6 +275,7 @@ def _validate_tushare_bucket_source_schema(source_bucket_paths: list[Path]) -> d
         raise ValueError(
             "Tushare bucket source is missing required sidecar/context columns. "
             "Regenerate the source store with Tushare sidecar and industry context columns before factor generation. "
+            "For the default Tushare packed source, rerun gen_feature with --full-rebuild to auto-refresh stale source buckets. "
             f"Missing columns by bucket: {preview}"
         )
 
@@ -280,6 +284,28 @@ def _validate_tushare_bucket_source_schema(source_bucket_paths: list[Path]) -> d
         "required_columns": required_columns,
         "validated_bucket_count": len(source_bucket_paths),
     }
+
+
+def _rebuild_default_tushare_packed_source_if_stale(
+    source_dir: Path,
+    *,
+    workers: int,
+) -> dict[str, Any] | None:
+    from src import collector_tushare
+
+    if source_dir.resolve() != collector_tushare.PACKED_SOURCE_DIR.resolve():
+        return None
+
+    symbols = sorted(path.stem for path in collector_tushare.PROCESSED_DIR.glob("*.parquet"))
+    if not symbols:
+        raise FileNotFoundError(f"No processed Tushare parquet files found in {collector_tushare.PROCESSED_DIR}")
+
+    print("[0/3] Tushare packed source schema is stale; rebuilding packed source buckets...")
+    return collector_tushare.rebuild_packed_source_from_local(
+        symbols,
+        workers=max(1, int(workers)),
+        incremental=True,
+    )
 
 
 def _rolling_compound_return(series: pd.Series, window: int) -> pd.Series:
@@ -397,10 +423,22 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
         for col in TUSHARE_FINA_INDICATOR_FEATURE_COLS:
             if col not in fi_frame.columns:
                 fi_frame[col] = np.nan
+        dividend = _load_tushare_dividend_features(symbol, pd.DatetimeIndex(frame["date"]))
+        if dividend is None or dividend.empty:
+            div_frame = pd.DataFrame(index=frame.index)
+        else:
+            div_frame = dividend.reindex(pd.DatetimeIndex(frame["date"])).reset_index(drop=True)
+        for col in TUSHARE_DIVIDEND_FEATURE_COLS:
+            if col not in div_frame.columns:
+                div_frame[col] = np.nan
         fi_ocf_to_eps = fi_frame["fi_ocfps"] / (fi_frame["fi_eps"].abs() + EPS)
         fi_ocfps_minus_eps = fi_frame["fi_ocfps"] - fi_frame["fi_eps"]
         fi_roe_quality_gap = fi_frame["fi_roe_dt"] - fi_frame["fi_roe"]
         fi_margin_quality = fi_frame["fi_grossprofit_margin"] - fi_frame["fi_netprofit_margin"]
+        dividend_cash = div_frame["div_cash_div"]
+        dividend_cash_to_eps = dividend_cash / fi_frame["fi_eps"].where(fi_frame["fi_eps"] > EPS)
+        dividend_cash_to_ocfps = dividend_cash / fi_frame["fi_ocfps"].where(fi_frame["fi_ocfps"] > EPS)
+        dividend_cash_yield_proxy = dividend_cash / frame["close"].where(frame["close"] > EPS)
         rows.append(
             pd.DataFrame(
                 {
@@ -425,6 +463,9 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
                     "bp_clean": bp_clean.to_numpy(copy=False),
                     "dividend_yield": frame["dv_ratio"].to_numpy(copy=False),
                     "dividend_yield_ttm": frame["dv_ttm"].to_numpy(copy=False),
+                    "dividend_cash_to_eps": dividend_cash_to_eps.to_numpy(copy=False),
+                    "dividend_cash_to_ocfps": dividend_cash_to_ocfps.to_numpy(copy=False),
+                    "dividend_cash_yield_proxy": dividend_cash_yield_proxy.to_numpy(copy=False),
                     "fi_ocf_to_eps": fi_ocf_to_eps.to_numpy(copy=False),
                     "fi_ocfps_minus_eps": fi_ocfps_minus_eps.to_numpy(copy=False),
                     "fi_roe_quality_gap": fi_roe_quality_gap.to_numpy(copy=False),
@@ -461,6 +502,9 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
                 ind_bp_clean_mean=("bp_clean", "mean"),
                 ind_dividend_yield_mean=("dividend_yield", "mean"),
                 ind_dividend_yield_ttm_mean=("dividend_yield_ttm", "mean"),
+                ind_dividend_cash_to_eps_mean=("dividend_cash_to_eps", "mean"),
+                ind_dividend_cash_to_ocfps_mean=("dividend_cash_to_ocfps", "mean"),
+                ind_dividend_cash_yield_proxy_mean=("dividend_cash_yield_proxy", "mean"),
                 ind_fi_ocf_to_eps_mean=("fi_ocf_to_eps", "mean"),
                 ind_fi_ocfps_minus_eps_mean=("fi_ocfps_minus_eps", "mean"),
                 ind_fi_roe_quality_gap_mean=("fi_roe_quality_gap", "mean"),
@@ -670,27 +714,25 @@ def _augment_tushare_symbol_frame(
     if "date" not in out.columns:
         return out
     date_index = pd.DatetimeIndex(pd.to_datetime(out["date"]))
-    fina_indicator = _load_tushare_fina_indicator_features(symbol, date_index)
-    if fina_indicator is not None and not fina_indicator.empty:
-        aligned = fina_indicator.reindex(date_index)
-        out[aligned.columns] = aligned.to_numpy(copy=False)
-    dividend = _load_tushare_dividend_features(symbol, date_index)
-    if dividend is not None and not dividend.empty:
-        aligned = dividend.reindex(date_index)
-        out[aligned.columns] = aligned.to_numpy(copy=False)
-    forecast = _load_tushare_forecast_features(symbol, date_index)
-    if forecast is not None and not forecast.empty:
-        aligned = forecast.reindex(date_index)
-        out[aligned.columns] = aligned.to_numpy(copy=False)
-    express = _load_tushare_express_features(symbol, date_index)
-    if express is not None and not express.empty:
-        aligned = express.reindex(date_index)
-        out[aligned.columns] = aligned.to_numpy(copy=False)
-    industry_context = _load_tushare_industry_features(symbol, date_index)
-    if industry_context is not None and not industry_context.empty:
-        aligned = industry_context.reindex(date_index)
-        out[aligned.columns] = aligned.to_numpy(copy=False)
-    return out
+    sidecar_frames: list[pd.DataFrame] = []
+    for loader in (
+        _load_tushare_fina_indicator_features,
+        _load_tushare_dividend_features,
+        _load_tushare_forecast_features,
+        _load_tushare_express_features,
+        _load_tushare_industry_features,
+    ):
+        frame = loader(symbol, date_index)
+        if frame is None or frame.empty:
+            continue
+        aligned = frame.reindex(date_index).reset_index(drop=True)
+        aligned.index = out.index
+        sidecar_frames.append(aligned)
+    if not sidecar_frames:
+        return out
+    replacement_columns = {column for frame in sidecar_frames for column in frame.columns}
+    base = out.drop(columns=[column for column in replacement_columns if column in out.columns], errors="ignore")
+    return pd.concat([base, *sidecar_frames], axis=1).copy()
 
 
 def _compute_symbol_feat_label(
@@ -1144,6 +1186,7 @@ def _generate_factor_store_from_bucket_source(
     workers: int,
     label_horizons: list[int],
     data_source: str | None,
+    auto_rebuild_stale_tushare_source: bool,
 ) -> dict[str, Any]:
     pdir = Path(parquet_dir)
     out_root = Path(output_dir)
@@ -1160,7 +1203,19 @@ def _generate_factor_store_from_bucket_source(
     source_meta = load_source_store_metadata(pdir) or {}
     source_schema_validation: dict[str, Any] = {"validated": False, "reason": "not_required"}
     if data_source == "tushare":
-        source_schema_validation = _validate_tushare_bucket_source_schema(source_bucket_paths)
+        try:
+            source_schema_validation = _validate_tushare_bucket_source_schema(source_bucket_paths)
+        except ValueError:
+            if not auto_rebuild_stale_tushare_source:
+                raise
+            rebuild_meta = _rebuild_default_tushare_packed_source_if_stale(pdir, workers=workers)
+            if rebuild_meta is None:
+                raise
+            source_bucket_paths = list_bucket_paths(pdir)
+            source_meta = load_source_store_metadata(pdir) or {}
+            source_schema_validation = _validate_tushare_bucket_source_schema(source_bucket_paths)
+            source_schema_validation["auto_rebuilt_stale_source"] = True
+            source_schema_validation["source_rebuild_incremental"] = rebuild_meta.get("incremental")
     workers = max(1, int(workers))
 
     print(
@@ -1299,6 +1354,7 @@ def generate_factor_store(
             workers=workers,
             label_horizons=label_horizons,
             data_source=data_source,
+            auto_rebuild_stale_tushare_source=not incremental,
         )
 
     out_root = Path(output_dir)

@@ -448,6 +448,23 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_std_ratio_60", profile["selected_columns"])
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}fi_ocfps_minus_eps_minus_industry", profile["selected_columns"])
 
+    def test_core_v8_relative_quality_profile_is_registered(self):
+        profile = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v8_relative_quality_v1"},
+            }
+        )
+
+        self.assertTrue(str(profile["profile_path"]).endswith("configs/feature_profiles.yaml::core_v8_relative_quality_v1"))
+        self.assertEqual(profile["data_source"], "tushare")
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_cash_to_eps", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_cash_yield_proxy_minus_industry", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}dividend_yield_ttm_industry_spread_zscore_20", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_crowding_20", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_low_vol_liquidity_60", profile["selected_columns"])
+        self.assertIn(f"{TUSHARE_FACTOR_PREFIX}sem_dividend_cash_quality", profile["selected_columns"])
+
     def test_known_exact_duplicate_groups_cover_core_overlaps(self):
         duplicate_groups = get_known_exact_duplicate_feature_groups()
 

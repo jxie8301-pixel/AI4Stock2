@@ -268,7 +268,10 @@ def _feature_family(feature: str) -> str:
 def summarize_feature_families(runs: dict[str, Path]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for run_name, run_dir in runs.items():
-        frame = _read_csv(run_dir, "feature_importance_gain_mean.csv")
+        try:
+            frame = _read_csv(run_dir, "feature_importance_gain_mean.csv")
+        except FileNotFoundError:
+            continue
         frame["feature_family"] = frame["feature"].astype(str).map(_feature_family)
         frame["importance_gain"] = pd.to_numeric(frame["importance_gain"], errors="coerce").fillna(0.0)
         total = float(frame["importance_gain"].sum())

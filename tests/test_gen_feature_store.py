@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
@@ -134,6 +135,55 @@ class GenFeatureStoreTest(unittest.TestCase):
         self.assertTrue(meta["source_schema_validation"]["validated"])
         self.assertIn("ind_bp_clean_mean", meta["source_schema_validation"]["required_columns"])
         self.assertTrue(meta["source_layout_assumptions"]["tushare_bucket_source_requires_sidecar_context_columns"])
+
+    def test_full_rebuild_refreshes_stale_default_tushare_bucket_source(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source_dir = _write_bucket_source(root, _minimal_bucket_frame())
+            processed_dir = root / "processed"
+            processed_dir.mkdir()
+            _minimal_bucket_frame().to_parquet(processed_dir / "000001.parquet", index=False)
+            calls: list[dict[str, object]] = []
+
+            def rebuild_packed_source(
+                symbols: list[str] | None = None,
+                *,
+                bucket_count: int = 128,
+                workers: int = 8,
+                incremental: bool = True,
+            ) -> dict[str, object]:
+                calls.append(
+                    {
+                        "symbols": symbols,
+                        "bucket_count": bucket_count,
+                        "workers": workers,
+                        "incremental": incremental,
+                    }
+                )
+                _write_bucket_source(root, _minimal_tushare_bucket_frame())
+                return {"incremental": {"rebuilt_buckets": 1, "reused_buckets": 0}}
+
+            from src import collector_tushare as collector_module
+
+            with (
+                patch.object(collector_module, "PACKED_SOURCE_DIR", source_dir),
+                patch.object(collector_module, "PROCESSED_DIR", processed_dir),
+                patch.object(collector_module, "rebuild_packed_source_from_local", rebuild_packed_source),
+            ):
+                meta = generate_factor_store(
+                    parquet_dir=str(source_dir),
+                    output_dir=str(root / "factor_store"),
+                    workers=1,
+                    incremental=False,
+                    label_horizons=[1],
+                    data_source="tushare",
+                )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["symbols"], ["000001"])
+        self.assertTrue(calls[0]["incremental"])
+        self.assertTrue(meta["source_schema_validation"]["validated"])
+        self.assertTrue(meta["source_schema_validation"]["auto_rebuilt_stale_source"])
 
 
 if __name__ == "__main__":

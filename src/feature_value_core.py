@@ -74,6 +74,11 @@ def _safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     return numerator / (denominator.abs() + EPS)
 
 
+def _positive_safe_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
+    safe_denominator = denominator.where(denominator > EPS)
+    return numerator / safe_denominator
+
+
 def _bounded_signal(series: pd.Series | np.ndarray, scale: float) -> pd.Series:
     values = pd.Series(series, dtype=float)
     scale_value = max(float(scale), EPS)
@@ -890,6 +895,12 @@ def compute_tushare_factor_features(
     out["dividend_yield"] = dv_ratio
     out["dividend_yield_ttm"] = dv_ttm
     out["has_dividend"] = np.where(np.isfinite(dv_ttm), (dv_ttm > 0).astype(float), np.nan)
+    dividend_cash_yield_proxy = div_cash_div / close.where(close > EPS)
+    dividend_cash_to_eps = _positive_safe_ratio(div_cash_div, fi_eps)
+    dividend_cash_to_ocfps = _positive_safe_ratio(div_cash_div, fi_ocfps)
+    out["dividend_cash_to_eps"] = dividend_cash_to_eps
+    out["dividend_cash_to_ocfps"] = dividend_cash_to_ocfps
+    out["dividend_cash_yield_proxy"] = dividend_cash_yield_proxy
     out["industry_member_count"] = ind_member_count
     out["industry_daily_ret"] = ind_daily_ret
     out["industry_excess_daily_ret"] = ind_excess_daily_ret
@@ -954,6 +965,8 @@ def compute_tushare_factor_features(
     volume_ratio_std = volume_ratio.rolling(zscore_window, min_periods=1).std()
     dividend_yield_ttm_series = pd.Series(out["dividend_yield_ttm"], index=base.index)
     dividend_yield_ttm_baseline = dividend_yield_ttm_series.rolling(zscore_window, min_periods=1).mean().shift(1)
+    dividend_cash_yield_proxy_series = pd.Series(out["dividend_cash_yield_proxy"], index=base.index, dtype=float)
+    dividend_cash_yield_baseline = dividend_cash_yield_proxy_series.rolling(zscore_window, min_periods=1).mean().shift(1)
     daily_ret = close.pct_change(fill_method=None)
     daily_ret_abs = daily_ret.abs()
     amount_abs = amount.abs()
@@ -973,6 +986,9 @@ def compute_tushare_factor_features(
     out[f"amihud_term_{short_flow_window}_{long_flow_window}"] = amihud_short / (amihud_long + EPS) - 1.0
     out[f"downside_amihud_{long_flow_window}"] = downside_amihud
     out[f"dividend_yield_ttm_surprise_{zscore_window}"] = dividend_yield_ttm_series - dividend_yield_ttm_baseline
+    out[f"dividend_cash_yield_proxy_surprise_{zscore_window}"] = (
+        dividend_cash_yield_proxy_series - dividend_cash_yield_baseline
+    )
     fi_ocf_to_eps = _safe_ratio(fi_ocfps, fi_eps)
     fi_ocfps_minus_eps = fi_ocfps - fi_eps
     fi_ocf_yoy_minus_np_yoy = fi_ocf_yoy - fi_netprofit_yoy
@@ -1068,6 +1084,13 @@ def compute_tushare_factor_features(
     out[f"stock_industry_ret_gap_{mid_industry_window}_{long_industry_window}"] = rel_ret_mid - rel_ret_long
     out[f"stock_relative_strength_quality_{mid_industry_window}"] = rel_ret_mid / (_series(f"ind_std_{mid_industry_window}") + EPS)
     out[f"stock_relative_strength_quality_{long_industry_window}"] = rel_ret_long / (_series(f"ind_std_{long_industry_window}") + EPS)
+
+    def _out_series(name: str) -> pd.Series:
+        value = out.get(name)
+        if value is None:
+            return pd.Series(np.nan, index=base.index, dtype=float)
+        return pd.Series(value, index=base.index, dtype=float)
+
     for window in relative_industry_windows:
         window = int(window)
         own_turnover_mean = turnover.rolling(window, min_periods=1).mean()
@@ -1081,29 +1104,50 @@ def compute_tushare_factor_features(
         own_amplitude_mean = amplitude.rolling(window, min_periods=1).mean()
         own_hit_up_limit_rate = hit_up_limit.rolling(window, min_periods=1).mean()
         own_hit_down_limit_rate = hit_down_limit.rolling(window, min_periods=1).mean()
-        out[f"stock_vs_industry_turnover_ratio_{window}"] = own_turnover_mean / (
-            _series(f"ind_turnover_mean_{window}") + EPS
+        turnover_ratio = own_turnover_mean / (_series(f"ind_turnover_mean_{window}") + EPS)
+        free_turnover_ratio = own_free_turnover_mean / (_series(f"ind_free_turnover_mean_{window}") + EPS)
+        volume_ratio_gap = own_volume_ratio_mean - _series(f"ind_volume_ratio_mean_{window}")
+        amihud_ratio = own_amihud_mean / (_series(f"ind_amihud_mean_{window}") + EPS)
+        downside_amihud_ratio = own_downside_amihud_mean / (_series(f"ind_downside_amihud_mean_{window}") + EPS)
+        amplitude_ratio = own_amplitude_mean / (_series(f"ind_amplitude_mean_{window}") + EPS)
+        hit_up_limit_gap = own_hit_up_limit_rate - _series(f"ind_hit_up_limit_rate_{window}")
+        hit_down_limit_gap = own_hit_down_limit_rate - _series(f"ind_hit_down_limit_rate_{window}")
+        std_ratio = _out_series(f"stock_vs_industry_std_ratio_{window}")
+        out[f"stock_vs_industry_turnover_ratio_{window}"] = turnover_ratio
+        out[f"stock_vs_industry_free_turnover_ratio_{window}"] = free_turnover_ratio
+        out[f"stock_vs_industry_volume_ratio_gap_{window}"] = volume_ratio_gap
+        out[f"stock_vs_industry_amihud_ratio_{window}"] = amihud_ratio
+        out[f"stock_vs_industry_downside_amihud_ratio_{window}"] = downside_amihud_ratio
+        out[f"stock_vs_industry_amplitude_ratio_{window}"] = amplitude_ratio
+        out[f"stock_vs_industry_hit_up_limit_gap_{window}"] = hit_up_limit_gap
+        out[f"stock_vs_industry_hit_down_limit_gap_{window}"] = hit_down_limit_gap
+        out[f"stock_vs_industry_crowding_{window}"] = _weighted_observed_sum(
+            [
+                (0.25, _bounded_signal(turnover_ratio - 1.0, 1.0)),
+                (0.25, _bounded_signal(free_turnover_ratio - 1.0, 1.0)),
+                (0.20, _bounded_signal(volume_ratio_gap, 2.0)),
+                (0.20, _bounded_signal(amplitude_ratio - 1.0, 1.0)),
+                (0.10, _bounded_signal(hit_up_limit_gap - hit_down_limit_gap, 0.50)),
+            ],
+            index=base.index,
         )
-        out[f"stock_vs_industry_free_turnover_ratio_{window}"] = own_free_turnover_mean / (
-            _series(f"ind_free_turnover_mean_{window}") + EPS
+        out[f"stock_vs_industry_liquidity_stress_{window}"] = _weighted_observed_sum(
+            [
+                (0.45, _bounded_signal(downside_amihud_ratio - 1.0, 1.0)),
+                (0.25, _bounded_signal(amihud_ratio - 1.0, 1.0)),
+                (0.20, _bounded_signal(amplitude_ratio - 1.0, 1.0)),
+                (0.10, _bounded_signal(hit_down_limit_gap, 0.50)),
+            ],
+            index=base.index,
         )
-        out[f"stock_vs_industry_volume_ratio_gap_{window}"] = own_volume_ratio_mean - _series(
-            f"ind_volume_ratio_mean_{window}"
-        )
-        out[f"stock_vs_industry_amihud_ratio_{window}"] = own_amihud_mean / (
-            _series(f"ind_amihud_mean_{window}") + EPS
-        )
-        out[f"stock_vs_industry_downside_amihud_ratio_{window}"] = own_downside_amihud_mean / (
-            _series(f"ind_downside_amihud_mean_{window}") + EPS
-        )
-        out[f"stock_vs_industry_amplitude_ratio_{window}"] = own_amplitude_mean / (
-            _series(f"ind_amplitude_mean_{window}") + EPS
-        )
-        out[f"stock_vs_industry_hit_up_limit_gap_{window}"] = own_hit_up_limit_rate - _series(
-            f"ind_hit_up_limit_rate_{window}"
-        )
-        out[f"stock_vs_industry_hit_down_limit_gap_{window}"] = own_hit_down_limit_rate - _series(
-            f"ind_hit_down_limit_rate_{window}"
+        out[f"stock_vs_industry_low_vol_liquidity_{window}"] = _weighted_observed_sum(
+            [
+                (-0.45, _bounded_signal(std_ratio - 1.0, 0.50)),
+                (-0.25, _bounded_signal(amihud_ratio - 1.0, 1.0)),
+                (-0.15, _bounded_signal(downside_amihud_ratio - 1.0, 1.0)),
+                (0.15, _bounded_signal(free_turnover_ratio - 1.0, 1.0)),
+            ],
+            index=base.index,
         )
     out["ep_minus_industry_ep"] = pd.Series(out["ep"], index=base.index, dtype=float) - _series("ind_ep_mean")
     out["sp_minus_industry_sp"] = pd.Series(out["sp"], index=base.index, dtype=float) - _series("ind_sp_mean")
@@ -1121,6 +1165,27 @@ def compute_tushare_factor_features(
     out["dividend_yield_ttm_minus_industry"] = dividend_yield_ttm_series - _series(
         "ind_dividend_yield_ttm_mean"
     )
+    dividend_cash_yield_rel = dividend_cash_yield_proxy_series - _series("ind_dividend_cash_yield_proxy_mean")
+    out["dividend_cash_to_eps_minus_industry"] = pd.Series(dividend_cash_to_eps, index=base.index, dtype=float) - _series(
+        "ind_dividend_cash_to_eps_mean"
+    )
+    out["dividend_cash_to_ocfps_minus_industry"] = pd.Series(
+        dividend_cash_to_ocfps,
+        index=base.index,
+        dtype=float,
+    ) - _series("ind_dividend_cash_to_ocfps_mean")
+    out["dividend_cash_yield_proxy_minus_industry"] = dividend_cash_yield_rel
+    dividend_yield_spread = pd.Series(out["dividend_yield_ttm_minus_industry"], index=base.index, dtype=float)
+    dividend_yield_spread_mean = dividend_yield_spread.rolling(zscore_window, min_periods=1).mean()
+    dividend_yield_spread_std = dividend_yield_spread.rolling(zscore_window, min_periods=1).std()
+    dividend_cash_yield_rel_mean = dividend_cash_yield_rel.rolling(zscore_window, min_periods=1).mean()
+    dividend_cash_yield_rel_std = dividend_cash_yield_rel.rolling(zscore_window, min_periods=1).std()
+    out[f"dividend_yield_ttm_industry_spread_zscore_{zscore_window}"] = (
+        dividend_yield_spread - dividend_yield_spread_mean
+    ) / (dividend_yield_spread_std + EPS)
+    out[f"dividend_cash_yield_industry_spread_zscore_{zscore_window}"] = (
+        dividend_cash_yield_rel - dividend_cash_yield_rel_mean
+    ) / (dividend_cash_yield_rel_std + EPS)
     out["fi_ocf_to_eps_minus_industry"] = pd.Series(out["fi_ocf_to_eps"], index=base.index, dtype=float) - _series(
         "ind_fi_ocf_to_eps_mean"
     )
@@ -1133,12 +1198,6 @@ def compute_tushare_factor_features(
     out["fi_margin_quality_minus_industry"] = pd.Series(out["fi_margin_quality"], index=base.index, dtype=float) - _series(
         "ind_fi_margin_quality_mean"
     )
-
-    def _out_series(name: str) -> pd.Series:
-        value = out.get(name)
-        if value is None:
-            return pd.Series(np.nan, index=base.index, dtype=float)
-        return pd.Series(value, index=base.index, dtype=float)
 
     def _component(series: pd.Series | np.ndarray, scale: float) -> pd.Series:
         return _bounded_signal(_as_indexed_float_series(series, base.index), scale)
@@ -1234,6 +1293,23 @@ def compute_tushare_factor_features(
     out["sem_value_quality"] = value_rel + quality_gate
     out["sem_value_quality_low_vol"] = value_rel + quality_gate - _component(stock_vol_rel_mid - 1.0, 0.50)
     out["sem_dividend_quality"] = dividend_rel * (1.0 + quality_gate.clip(lower=-0.50, upper=0.75))
+    payout_pressure = _weighted_observed_sum(
+        [
+            (0.50, _component(pd.Series(dividend_cash_to_eps, index=base.index, dtype=float) - 0.80, 0.50)),
+            (0.50, _component(pd.Series(dividend_cash_to_ocfps, index=base.index, dtype=float) - 0.60, 0.50)),
+        ],
+        index=base.index,
+        min_valid_weight_ratio=0.25,
+    ).clip(lower=0.0)
+    out["sem_dividend_cash_quality"] = _weighted_observed_sum(
+        [
+            (0.35, _component(dividend_rel, 5.0)),
+            (0.30, _component(dividend_cash_yield_rel, 0.05)),
+            (0.25, quality_gate),
+            (-0.10, payout_pressure),
+        ],
+        index=base.index,
+    )
     out["sem_profitability_resilience"] = quality_gate - _component(stock_vol_rel_mid - 1.0, 0.50)
     out["sem_growth_cash_quality"] = growth_cash_quality
     out[f"sem_growth_cash_quality_accel_{zscore_window}"] = growth_cash_quality - growth_cash_quality.rolling(

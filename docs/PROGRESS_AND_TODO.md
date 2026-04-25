@@ -45,6 +45,7 @@ What is true now:
 - Absolute factor-baseline performance is now a real research constraint: `rankic_weighted_factor` and `rank_zscore_avg_factor` must be treated as hard non-ML baselines, not only as auxiliary diagnostics
 - Latest full-space diagnostics show that `TS_dividend_*` and `TS_stock_vs_industry_*` retain signal best after industry neutralization
 - Latest full-space diagnostics also show that most pure `TS_industry_*` features and several absolute flow/event and valuation signals are largely industry / style exposure rather than clean within-industry stock alpha
+- The next factor-strength source batch now supports dividend cash payout / coverage, industry-relative dividend cash yield, relative crowding, relative liquidity-stress, and low-volatility/liquidity composite factors; packed Tushare source buckets and the factor store still need to be rebuilt before these factors are diagnosable
 - Several `TS_exp_*` / `TS_latest_exp_*` features still have zero effective coverage in the current diagnostics range and should not be treated as validated alpha candidates yet
 - `src/probe_tushare.py` can be used to inspect real Tushare endpoint columns and latency before integrating new tables into the formal pipeline
 
@@ -431,7 +432,7 @@ Detailed implementation plan:
   - coverage / missingness
   - redundancy against already-promoted factors
 - [~] Build the next priority factor batch around stock-vs-industry relative structure instead of adding more absolute state features
-  Current state: first code batch is implemented for `20` / `60` day relative turnover, free-turnover, volume-ratio, Amihud, downside-Amihud, amplitude, and limit-hit deviation; packed source and factor store still need to be rebuilt and diagnosed.
+  Current state: first code batch is implemented for `20` / `60` day relative turnover, free-turnover, volume-ratio, Amihud, downside-Amihud, amplitude, and limit-hit deviation. The second source batch adds relative crowding, relative liquidity-stress, and low-volatility/liquidity composites; packed source and factor store still need to be rebuilt and diagnosed.
   First batch should target:
   - stock-vs-industry turnover ratio
   - stock-vs-industry free-turnover ratio
@@ -461,7 +462,8 @@ Detailed implementation plan:
   - use ratio form for strictly positive intensity variables and gap form for rate / bounded variables
   - after changing industry-context columns, rebuild packed Tushare source buckets before rebuilding the factor store; otherwise the bucket-source path will keep old `ind_*` columns
   - validate this batch using full-space raw diagnostics and full-space industry-neutral diagnostics before adding any model sweep
-- [ ] Build the next priority dividend-quality batch instead of only using dividend yield level
+- [~] Build the next priority dividend-quality batch instead of only using dividend yield level
+  Current state: first feasible source batch is implemented for dividend cash payout / coverage, industry-relative dividend cash yield, dividend cash yield surprise, spread z-scores, and a conservative dividend cash-quality composite; packed source and factor store still need to be rebuilt and diagnosed.
   First batch should target:
   - dividend-to-OCF
   - dividend-to-net-profit

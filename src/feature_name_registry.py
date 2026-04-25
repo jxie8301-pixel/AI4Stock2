@@ -536,6 +536,9 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
             f"stock_vs_industry_amplitude_ratio_{window}",
             f"stock_vs_industry_hit_up_limit_gap_{window}",
             f"stock_vs_industry_hit_down_limit_gap_{window}",
+            f"stock_vs_industry_crowding_{window}",
+            f"stock_vs_industry_liquidity_stress_{window}",
+            f"stock_vs_industry_low_vol_liquidity_{window}",
         ]
     names += [
         "ep_minus_industry_ep",
@@ -548,6 +551,15 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         "bp_clean_minus_industry_bp_clean",
         "dividend_yield_minus_industry",
         "dividend_yield_ttm_minus_industry",
+        "dividend_cash_to_eps",
+        "dividend_cash_to_ocfps",
+        "dividend_cash_yield_proxy",
+        "dividend_cash_to_eps_minus_industry",
+        "dividend_cash_to_ocfps_minus_industry",
+        "dividend_cash_yield_proxy_minus_industry",
+        f"dividend_cash_yield_proxy_surprise_{zscore_window}",
+        f"dividend_yield_ttm_industry_spread_zscore_{zscore_window}",
+        f"dividend_cash_yield_industry_spread_zscore_{zscore_window}",
         "fi_ocf_to_eps_minus_industry",
         "fi_ocfps_minus_eps_minus_industry",
         "fi_roe_quality_gap_minus_industry",
@@ -571,6 +583,7 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
         f"sem_downside_liquidity_relief_{long_flow_window}",
         f"sem_limit_breakout_quality_{long_flow_window}",
         f"sem_low_vol_value_reversal_{short_industry_window}",
+        "sem_dividend_cash_quality",
     ]
     names += [
         "latest_eps",

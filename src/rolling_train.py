@@ -21,12 +21,14 @@ from src.label_utils import (
     transform_training_label_series,
 )
 from src.model_config import get_lgbm_config
-from src.evaluate import build_benchmark_series
+from src.evaluate import build_benchmark_series, compute_signal_metrics
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
+    build_formula_score_predictions,
     build_rank_average_factor_baseline_predictions,
     build_rank_ic_weighted_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
+    normalize_formula_score_mode,
 )
 from src.return_horizon import build_forward_compound_return_series
 from src.rolling_runtime import build_label_series, build_prediction_metadata
@@ -198,6 +200,113 @@ def _prepare_opportunity_training_context(
             horizon=signal_horizon,
         )
     return context
+
+
+def _resolve_formula_score_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    formula_cfg = cfg.get("formula_score") or {}
+    if not isinstance(formula_cfg, dict):
+        raise ValueError("formula_score must be a mapping")
+    return {
+        "mode": normalize_formula_score_mode(formula_cfg.get("mode", "rank_avg")),
+        "min_abs_rank_ic": float(formula_cfg.get("min_abs_rank_ic", 0.0)),
+    }
+
+
+def _empty_validation_topk_summary() -> dict[str, float | int]:
+    return {
+        "valid_topk_days": 0,
+        "valid_top1_label_mean": float("nan"),
+        "valid_top1_positive_rate": float("nan"),
+        "valid_topk_label_mean": float("nan"),
+        "valid_topk_label_median": float("nan"),
+        "valid_topk_min_label_mean": float("nan"),
+        "valid_topk_positive_rate": float("nan"),
+        "valid_topk_excess_mean": float("nan"),
+        "valid_top1_opportunity_rate": float("nan"),
+        "valid_topk_opportunity_rate": float("nan"),
+    }
+
+
+def _run_formula_score_window(
+    cfg: dict[str, Any],
+    runtime_data: RollingRuntimeData,
+    *,
+    train_mask: np.ndarray,
+    valid_mask: np.ndarray,
+    test_mask: np.ndarray,
+    current_test_start: pd.Timestamp,
+    current_test_end: pd.Timestamp,
+    train_start: pd.Timestamp,
+    train_end: pd.Timestamp,
+    valid_start: pd.Timestamp,
+    valid_end: pd.Timestamp,
+    signal_horizon: int,
+) -> tuple[pd.Series | None, dict[str, Any] | None]:
+    formula_cfg = _resolve_formula_score_cfg(cfg)
+    mode = str(formula_cfg["mode"])
+    min_abs_rank_ic = float(formula_cfg["min_abs_rank_ic"])
+    pred_series = build_formula_score_predictions(
+        runtime_data,
+        train_mask=train_mask,
+        score_mask=test_mask,
+        mode=mode,
+        min_abs_rank_ic=min_abs_rank_ic,
+    )
+    valid_pred_series = build_formula_score_predictions(
+        runtime_data,
+        train_mask=train_mask,
+        score_mask=valid_mask,
+        mode=mode,
+        min_abs_rank_ic=min_abs_rank_ic,
+    )
+
+    validation_summary = _empty_validation_topk_summary()
+    signal_metrics = {"IC_mean": float("nan"), "Rank_IC_mean": float("nan")}
+    if valid_pred_series is not None and not valid_pred_series.empty:
+        valid_label_series = _build_window_label_series(
+            runtime_data.y[valid_mask],
+            runtime_data.dt_index[valid_mask],
+            runtime_data.factor_frame.loc[valid_mask, "symbol"],
+        ).sort_index()
+        common_idx = valid_pred_series.index.intersection(valid_label_series.index)
+        if not common_idx.empty:
+            aligned_valid_preds = valid_pred_series.loc[common_idx]
+            aligned_valid_labels = valid_label_series.loc[common_idx]
+            validation_topk = int(
+                cfg.get("lgbm", {}).get("validation_topk")
+                or cfg.get("strategy", {}).get("topk")
+                or 10
+            )
+            validation_summary = _compute_validation_topk_summary(
+                aligned_valid_preds.to_numpy(dtype=float, copy=False),
+                aligned_valid_labels,
+                pd.Series(common_idx.get_level_values("datetime")),
+                topk=validation_topk,
+            )
+            signal_metrics, _ = compute_signal_metrics(aligned_valid_preds, aligned_valid_labels)
+
+    training_summary = {
+        "window_start": str(current_test_start.date()),
+        "window_end": str(current_test_end.date()),
+        "train_start": str(train_start.date()),
+        "train_end": str(train_end.date()),
+        "valid_start": str(valid_start.date()),
+        "valid_end": str(valid_end.date()),
+        "signal_horizon": int(signal_horizon),
+        "formula_score_mode": mode,
+        "formula_score_min_abs_rank_ic": min_abs_rank_ic,
+        "train_rows": int(np.sum(train_mask)),
+        "valid_rows": int(np.sum(valid_mask)),
+        "feature_count": int(len(dict.fromkeys(runtime_data.selected_feature_sources))),
+        "num_iterations": 0,
+        "best_iteration": 0,
+        **validation_summary,
+        "best_valid_daily_ic": signal_metrics.get("IC_mean", float("nan")),
+        "best_valid_daily_rank_ic": signal_metrics.get("Rank_IC_mean", float("nan")),
+        "model_best_valid_daily_ic": signal_metrics.get("IC_mean", float("nan")),
+        "model_best_valid_daily_rank_ic": signal_metrics.get("Rank_IC_mean", float("nan")),
+    }
+    return pred_series, training_summary
 
 
 def _run_lgbm_window(
@@ -559,7 +668,24 @@ def generate_prediction_bundle(
         valid_mask = (runtime_data.dt_index >= valid_start) & (runtime_data.dt_index <= valid_end)
         test_mask = (runtime_data.dt_index >= current_test_start) & (runtime_data.dt_index <= current_test_end)
 
-        if model_name == "lgbm":
+        if model_name == "formula_score":
+            pred_series, training_summary = _run_formula_score_window(
+                cfg,
+                runtime_data,
+                train_mask=train_mask,
+                valid_mask=valid_mask,
+                test_mask=test_mask,
+                current_test_start=current_test_start,
+                current_test_end=current_test_end,
+                train_start=train_start,
+                train_end=train_end,
+                valid_start=valid_start,
+                valid_end=valid_end,
+                signal_horizon=signal_horizon,
+            )
+            if training_summary is not None:
+                training_summary_records.append(training_summary)
+        elif model_name == "lgbm":
             pred_series, importance_df, training_summary = _run_lgbm_window(
                 cfg,
                 runtime_data,

@@ -142,7 +142,7 @@ def build_prediction_metadata(
 ) -> dict[str, Any]:
     opportunity_cfg = resolve_opportunity_label_cfg(cfg)
     rank_exclude_columns = sorted(_resolve_cross_sectional_rank_exclude_columns(cfg))
-    return {
+    metadata = {
         "model_name": model_name,
         "data_source": resolve_data_source_name(cfg),
         "universe": str(cfg.get("universe", "")),
@@ -159,6 +159,11 @@ def build_prediction_metadata(
         "opportunity_threshold": float(opportunity_cfg["threshold"]),
         "opportunity_neutral_band": float(opportunity_cfg["neutral_band"]),
     }
+    if model_name == "formula_score":
+        formula_cfg = cfg.get("formula_score") or {}
+        metadata["formula_score_mode"] = str(formula_cfg.get("mode", "rank_avg"))
+        metadata["formula_score_min_abs_rank_ic"] = float(formula_cfg.get("min_abs_rank_ic", 0.0) or 0.0)
+    return metadata
 
 
 def build_market_data_frame(

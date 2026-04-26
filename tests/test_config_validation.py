@@ -131,6 +131,29 @@ class ConfigValidationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "lgbm.early_stopping_metric must be one of"):
             validate_training_config(cfg, check_paths=False)
 
+    def test_validate_training_config_accepts_formula_score_profile(self):
+        cfg = load_config(
+            "configs/config.yaml",
+            experiment_profile_name="core_v4_lgbm_default_10x20x10",
+            model_profile_name="formula_score_rankic",
+        )
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["model"]["name"], "formula_score")
+        self.assertEqual(validated["formula_score"]["mode"], "rank_ic_weighted")
+
+    def test_validate_training_config_rejects_invalid_formula_score_mode(self):
+        cfg = load_config(
+            "configs/config.yaml",
+            experiment_profile_name="core_v4_lgbm_default_10x20x10",
+            model_profile_name="formula_score_rankic",
+        )
+        cfg["formula_score"]["mode"] = "demo"
+
+        with self.assertRaisesRegex(ValueError, "formula_score.mode must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_accepts_lgbm_validation_topk(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg.setdefault("lgbm", {})

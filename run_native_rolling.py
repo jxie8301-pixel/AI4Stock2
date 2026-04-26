@@ -74,13 +74,14 @@ def run_rolling_pipeline() -> None:
     backtest_label_column = get_label_column_name(1)
     model_name = cfg["model"]["name"]
 
+    model_ext = ".pkl" if model_name == "lgbm" else ".json" if model_name == "formula_score" else ".pt"
     run_store = prepare_run_store(
         cfg,
         args,
         backend="native",
         pipeline="rolling",
         model_name=model_name,
-        model_ext=".pt" if model_name != "lgbm" else ".pkl",
+        model_ext=model_ext,
     )
     paths = build_paths(run_store, model_name)
     ensure_output_dirs(paths, save_models=args.save_models, load_models=args.load_models, model_name=model_name)

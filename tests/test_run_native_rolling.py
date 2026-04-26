@@ -13,6 +13,7 @@ from src.rolling_artifacts import (
 )
 from src.rolling_baselines import (
     build_average_factor_baseline_predictions,
+    build_formula_score_predictions,
     build_rank_average_factor_baseline_predictions,
     build_rank_ic_weighted_factor_baseline_predictions,
     build_sign_aligned_factor_baseline_predictions,
@@ -223,6 +224,49 @@ class RunNativeRollingTest(unittest.TestCase):
         )
 
         preds = build_rank_ic_weighted_factor_baseline_predictions(runtime_data)
+
+        values = preds.to_numpy(dtype=float)
+        self.assertGreater(values[0], values[1])
+        self.assertGreater(values[1], values[2])
+
+    def test_formula_score_rank_ic_uses_supplied_train_window(self):
+        dates = pd.to_datetime(
+            ["2023-12-28"] * 3
+            + ["2023-12-29"] * 3
+            + ["2024-01-02"] * 3
+            + ["2024-01-03"] * 3
+        )
+        runtime_data = RollingRuntimeData(
+            factor_frame=pd.DataFrame(
+                {
+                    "date": dates,
+                    "symbol": ["A", "B", "C"] * 4,
+                    "good": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
+                    "bad": [3.0, 2.0, 1.0, 3.0, 2.0, 1.0, 3.0, 2.0, 1.0, 1.0, 2.0, 3.0],
+                }
+            ),
+            dt_index=pd.Series(dates),
+            y=np.array([2.0, 1.0, 0.0, 2.0, 1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            backtest_y=np.zeros(12, dtype=np.float32),
+            full_calendar=pd.Series(pd.to_datetime(["2023-12-28", "2023-12-29", "2024-01-02", "2024-01-03"])),
+            test_start=pd.Timestamp("2024-01-03"),
+            test_end=pd.Timestamp("2024-01-03"),
+            test_calendar=pd.Series(pd.to_datetime(["2024-01-03"])),
+            selected_feature_names=["good", "bad"],
+            selected_feature_sources=["good", "bad"],
+            finite_feature_mask=np.array([True] * 12),
+            lookback=20,
+            batch_size=3,
+        )
+        train_mask = runtime_data.dt_index == pd.Timestamp("2024-01-02")
+        score_mask = runtime_data.dt_index == pd.Timestamp("2024-01-03")
+
+        preds = build_formula_score_predictions(
+            runtime_data,
+            train_mask=train_mask,
+            score_mask=score_mask,
+            mode="rank_ic_weighted",
+        )
 
         values = preds.to_numpy(dtype=float)
         self.assertGreater(values[0], values[1])

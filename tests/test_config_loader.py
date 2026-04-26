@@ -71,6 +71,14 @@ class ConfigLoaderTest(unittest.TestCase):
         self.assertEqual(profile["config"]["lgbm"]["validation_topk"], 15)
         self.assertEqual(profile["config"]["lgbm"]["early_stopping_metric"], "valid_topk_excess_mean")
 
+    def test_resolve_formula_score_model_profile(self):
+        profile = resolve_model_profile({"model": {"profile": "formula_score_rankic"}})
+
+        self.assertEqual(profile["name"], "formula_score_rankic")
+        self.assertTrue(profile["path"].endswith("configs/models/formula_score_rankic.yaml"))
+        self.assertEqual(profile["config"]["model"]["name"], "formula_score")
+        self.assertEqual(profile["config"]["formula_score"]["mode"], "rank_ic_weighted")
+
     def test_load_config_supports_rankic_experiment_profiles(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_ranker_rankic_10x20x10")
 

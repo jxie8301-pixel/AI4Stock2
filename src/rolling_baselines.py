@@ -8,6 +8,16 @@ import pandas as pd
 from src.evaluate import safe_cross_sectional_corr
 from src.rolling_types import RollingRuntimeData
 
+FORMULA_SCORE_MODES = {"rank_avg", "sign_aligned_rank_avg", "rank_ic_weighted"}
+FORMULA_SCORE_MODE_ALIASES = {
+    "rank_average": "rank_avg",
+    "rank_avg_factor_baseline": "rank_avg",
+    "sign_aligned": "sign_aligned_rank_avg",
+    "sign_aligned_factor_baseline": "sign_aligned_rank_avg",
+    "rank_ic": "rank_ic_weighted",
+    "rank_ic_weighted_factor_baseline": "rank_ic_weighted",
+}
+
 
 def _unique_source_columns(runtime_data: RollingRuntimeData) -> list[str]:
     return list(dict.fromkeys(runtime_data.selected_feature_sources))
@@ -43,8 +53,10 @@ def _cross_sectional_rank_zscore(feature_frame: pd.DataFrame, dates: pd.Series) 
 def _compute_train_rank_ic_weights(
     runtime_data: RollingRuntimeData,
     feature_names: list[str],
+    train_mask: np.ndarray | None = None,
 ) -> pd.Series:
-    train_mask = runtime_data.dt_index < runtime_data.test_start
+    if train_mask is None:
+        train_mask = runtime_data.dt_index < runtime_data.test_start
     if not np.any(train_mask):
         return pd.Series(dtype=float)
 
@@ -73,6 +85,74 @@ def _compute_train_rank_ic_weights(
         mean_rank_ic = float(daily_rank_ic.mean()) if not daily_rank_ic.empty else 0.0
         weights[feature_name] = mean_rank_ic if np.isfinite(mean_rank_ic) else 0.0
     return pd.Series(weights, dtype=float)
+
+
+def normalize_formula_score_mode(mode: str | None) -> str:
+    normalized = str(mode or "rank_avg").strip().lower()
+    normalized = FORMULA_SCORE_MODE_ALIASES.get(normalized, normalized)
+    if normalized not in FORMULA_SCORE_MODES:
+        allowed = ", ".join(sorted(FORMULA_SCORE_MODES | set(FORMULA_SCORE_MODE_ALIASES)))
+        raise ValueError(f"formula_score.mode must be one of: {allowed}")
+    return normalized
+
+
+def _formula_score_weights(
+    runtime_data: RollingRuntimeData,
+    feature_names: list[str],
+    train_mask: np.ndarray,
+    *,
+    mode: str,
+    min_abs_rank_ic: float = 0.0,
+) -> pd.Series:
+    mode = normalize_formula_score_mode(mode)
+    if mode == "rank_avg":
+        return pd.Series(1.0, index=feature_names, dtype=float)
+
+    rank_ic_weights = _compute_train_rank_ic_weights(runtime_data, feature_names, train_mask=train_mask)
+    rank_ic_weights = rank_ic_weights.reindex(feature_names).fillna(0.0)
+    if min_abs_rank_ic > 0.0:
+        rank_ic_weights = rank_ic_weights.where(rank_ic_weights.abs() >= min_abs_rank_ic, 0.0)
+
+    if mode == "sign_aligned_rank_avg":
+        return rank_ic_weights.apply(lambda value: 1.0 if value >= 0.0 else -1.0).where(
+            rank_ic_weights != 0.0,
+            0.0,
+        )
+    return rank_ic_weights
+
+
+def build_formula_score_predictions(
+    runtime_data: RollingRuntimeData,
+    *,
+    train_mask: np.ndarray,
+    score_mask: np.ndarray,
+    mode: str = "rank_avg",
+    min_abs_rank_ic: float = 0.0,
+) -> pd.Series | None:
+    if not np.any(score_mask):
+        return None
+    unique_source_columns = _unique_source_columns(runtime_data)
+    if not unique_source_columns:
+        return None
+
+    weights = _formula_score_weights(
+        runtime_data,
+        unique_source_columns,
+        train_mask,
+        mode=mode,
+        min_abs_rank_ic=min_abs_rank_ic,
+    )
+    weights = weights.reindex(unique_source_columns).fillna(0.0)
+    if weights.abs().sum() <= 0.0:
+        return None
+
+    feature_frame = runtime_data.factor_frame.loc[score_mask, unique_source_columns]
+    score_dates = runtime_data.dt_index[score_mask]
+    ranked_frame = _cross_sectional_rank_zscore(feature_frame, score_dates)
+    weighted_sum = ranked_frame.mul(weights, axis=1).sum(axis=1, skipna=True)
+    available_weight_sum = ranked_frame.notna().mul(weights.abs(), axis=1).sum(axis=1)
+    scores = weighted_sum.divide(available_weight_sum.replace(0.0, np.nan))
+    return _build_prediction_series(scores, runtime_data, score_mask)
 
 
 def build_average_factor_baseline_predictions(

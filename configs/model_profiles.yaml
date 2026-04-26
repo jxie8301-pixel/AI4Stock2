@@ -25,5 +25,14 @@ profiles:
   lgbm_ranker_rankic:
     path: configs/models/lgbm_ranker_rankic.yaml
 
+  formula_score_rank_avg:
+    path: configs/models/formula_score_rank_avg.yaml
+
+  formula_score_sign_aligned:
+    path: configs/models/formula_score_sign_aligned.yaml
+
+  formula_score_rankic:
+    path: configs/models/formula_score_rankic.yaml
+
   lstm_baseline:
     path: configs/models/lstm_baseline.yaml

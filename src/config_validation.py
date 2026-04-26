@@ -91,6 +91,10 @@ TOP_LEVEL_SCHEMA = {
         "eval_metric": None,
         "alpha": None,
     },
+    "formula_score": {
+        "mode": None,
+        "min_abs_rank_ic": None,
+    },
     "label": {
         "signal_horizon": None,
         "horizons": None,
@@ -272,6 +276,15 @@ LGBM_EARLY_STOPPING_METRICS = {
 LGBM_SAMPLE_WEIGHT_MODES = {"none", "opportunity_distance"}
 BUYABILITY_TRAIN_TRANSFORM_MODES = {"buyability_binary", "buyability_margin_binary"}
 BUYABILITY_OPPORTUNITY_MODES = {"positive", "threshold", "industry_excess", "benchmark_excess"}
+FORMULA_SCORE_MODES = {"rank_avg", "sign_aligned_rank_avg", "rank_ic_weighted"}
+FORMULA_SCORE_MODE_ALIASES = {
+    "rank_average": "rank_avg",
+    "rank_avg_factor_baseline": "rank_avg",
+    "sign_aligned": "sign_aligned_rank_avg",
+    "sign_aligned_factor_baseline": "sign_aligned_rank_avg",
+    "rank_ic": "rank_ic_weighted",
+    "rank_ic_weighted_factor_baseline": "rank_ic_weighted",
+}
 
 
 def _format_modes(values: set[str]) -> str:
@@ -385,6 +398,19 @@ def validate_training_config(
         raise ValueError("model.name must be non-empty")
     _expect_positive_int(model_cfg.get("batch_size"), "model.batch_size")
     _expect_positive_int(model_cfg.get("n_jobs"), "model.n_jobs")
+    formula_score_cfg = cfg.get("formula_score")
+    if formula_score_cfg is not None:
+        if not isinstance(formula_score_cfg, dict):
+            raise ValueError("formula_score must be a mapping")
+        formula_mode = str(formula_score_cfg.get("mode", "rank_avg") or "rank_avg").strip().lower()
+        formula_mode = FORMULA_SCORE_MODE_ALIASES.get(formula_mode, formula_mode)
+        if formula_mode not in FORMULA_SCORE_MODES:
+            raise ValueError(f"formula_score.mode must be one of: {_format_modes(FORMULA_SCORE_MODES)}")
+        formula_score_cfg["mode"] = formula_mode
+        formula_score_cfg["min_abs_rank_ic"] = _expect_nonnegative_float(
+            formula_score_cfg.get("min_abs_rank_ic", 0.0),
+            "formula_score.min_abs_rank_ic",
+        )
 
     label_cfg = cfg.get("label", {})
     signal_horizon = _expect_positive_int(

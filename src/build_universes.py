@@ -34,7 +34,7 @@ def _normalize_symbol(value: object) -> str:
     return digits[-6:] if len(digits) >= 6 else digits
 
 
-def fetch_universe_members(index_code: str) -> pd.DataFrame:
+def fetch_universe_members(index_code: str, *, allow_static_membership: bool = False) -> pd.DataFrame:
     import akshare as ak
 
     df = ak.index_stock_cons_csindex(symbol=index_code)
@@ -59,6 +59,12 @@ def fetch_universe_members(index_code: str) -> pd.DataFrame:
         if candidate in df.columns:
             end_col = candidate
             break
+    if (start_col is None or end_col is None) and not allow_static_membership:
+        raise ValueError(
+            "Index constituent table does not expose point-in-time membership intervals. "
+            "Refusing to build a universe file that would silently use static/current membership. "
+            "Pass --allow-static-membership only for explicitly labelled research controls."
+        )
 
     out = pd.DataFrame()
     out["symbol"] = df[symbol_col].map(_normalize_symbol)
@@ -78,7 +84,12 @@ def fetch_universe_members(index_code: str) -> pd.DataFrame:
     return out.sort_values(["symbol", "start_date", "end_date"]).drop_duplicates().reset_index(drop=True)
 
 
-def build_universe_file(universe_name: str, output_dir: str | Path = DEFAULT_UNIVERSE_DIR) -> Path:
+def build_universe_file(
+    universe_name: str,
+    output_dir: str | Path = DEFAULT_UNIVERSE_DIR,
+    *,
+    allow_static_membership: bool = False,
+) -> Path:
     if universe_name not in INDEX_CODE_BY_UNIVERSE:
         raise ValueError(
             f"Unknown universe '{universe_name}'. Available: {', '.join(sorted(INDEX_CODE_BY_UNIVERSE))}"
@@ -88,7 +99,7 @@ def build_universe_file(universe_name: str, output_dir: str | Path = DEFAULT_UNI
     output_root = Path(output_dir)
     output_root.mkdir(parents=True, exist_ok=True)
     index_code = INDEX_CODE_BY_UNIVERSE[universe_name]
-    table = fetch_universe_members(index_code)
+    table = fetch_universe_members(index_code, allow_static_membership=allow_static_membership)
     output_path = output_root / f"{universe_name}.txt"
     table.to_csv(output_path, sep="\t", index=False, header=False)
     return output_path
@@ -102,6 +113,11 @@ def _parse_args() -> argparse.Namespace:
         help="Comma-separated universe names to build (default: csi300,csi500,zz1000).",
     )
     parser.add_argument("--output-dir", default=str(DEFAULT_UNIVERSE_DIR), help="Universe output directory.")
+    parser.add_argument(
+        "--allow-static-membership",
+        action="store_true",
+        help="Allow fallback wide membership intervals when the source endpoint lacks PIT start/end dates.",
+    )
     return parser.parse_args()
 
 
@@ -109,7 +125,11 @@ def main() -> None:
     args = _parse_args()
     universe_names = [name.strip() for name in args.universes.split(",") if name.strip()]
     for universe_name in universe_names:
-        output_path = build_universe_file(universe_name, output_dir=args.output_dir)
+        output_path = build_universe_file(
+            universe_name,
+            output_dir=args.output_dir,
+            allow_static_membership=bool(args.allow_static_membership),
+        )
         print(f"Saved: {output_path}")
 
 

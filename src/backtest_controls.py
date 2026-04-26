@@ -27,6 +27,8 @@ SUPPORTED_INTRAPERIOD_EXIT_MODES = ("none", "score_threshold", "expected_return_
 SUPPORTED_EXIT_SCORE_SOURCES = ("raw", "transformed", "rank_pct", "zscore")
 SUPPORTED_INTRAPERIOD_EXIT_CALIBRATIONS = ("quantile_bins",)
 SUPPORTED_INTRAPERIOD_PRICE_CONFIRM_MODES = ("close_below_ma",)
+INTRAPERIOD_PRICE_CONFIRM_SIGNAL_TIMING = "same_signal_date_close"
+INTRAPERIOD_PRICE_CONFIRM_EXECUTION_TIMING = "next_open"
 
 
 def validate_risk_degree(value: float, field: str) -> float:
@@ -84,6 +86,26 @@ def normalize_intraperiod_exit_config(
             int(price_confirm.get("min_remaining_steps", 0) or 0),
             0,
         )
+        signal_timing = str(
+            price_confirm.get("signal_timing", INTRAPERIOD_PRICE_CONFIRM_SIGNAL_TIMING)
+            or INTRAPERIOD_PRICE_CONFIRM_SIGNAL_TIMING
+        ).strip().lower()
+        execution_timing = str(
+            price_confirm.get("execution_timing", INTRAPERIOD_PRICE_CONFIRM_EXECUTION_TIMING)
+            or INTRAPERIOD_PRICE_CONFIRM_EXECUTION_TIMING
+        ).strip().lower()
+        if signal_timing != INTRAPERIOD_PRICE_CONFIRM_SIGNAL_TIMING:
+            raise ValueError(
+                "intraperiod_exit.price_confirm.signal_timing must be "
+                f"{INTRAPERIOD_PRICE_CONFIRM_SIGNAL_TIMING}"
+            )
+        if execution_timing != INTRAPERIOD_PRICE_CONFIRM_EXECUTION_TIMING:
+            raise ValueError(
+                "intraperiod_exit.price_confirm.execution_timing must be "
+                f"{INTRAPERIOD_PRICE_CONFIRM_EXECUTION_TIMING}"
+            )
+        out["price_confirm_signal_timing"] = signal_timing
+        out["price_confirm_execution_timing"] = execution_timing
         force_exit_threshold = price_confirm.get("force_exit_threshold")
         if force_exit_threshold is not None:
             out["price_confirm_force_exit_threshold"] = float(force_exit_threshold)

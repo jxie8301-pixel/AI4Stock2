@@ -2598,7 +2598,12 @@ def rebuild_packed_source_from_local(
     workers: int = 8,
     incremental: bool = True,
 ) -> dict[str, Any]:
-    from src.gen_feature import _ensure_tushare_industry_context_cache, _get_tushare_industry_context_feature_cols
+    from src.gen_feature import (
+        TUSHARE_EVENT_AVAILABILITY_POLICY,
+        TUSHARE_INDUSTRY_MAPPING_POLICY,
+        _ensure_tushare_industry_context_cache,
+        _get_tushare_industry_context_feature_cols,
+    )
 
     all_symbols = sorted(
         {str(symbol) for symbol in (symbols or []) if str(symbol).strip()}
@@ -2626,6 +2631,12 @@ def rebuild_packed_source_from_local(
             existing_meta = json.load(f)
     required_schema_columns = {"date", "symbol", *_get_tushare_industry_context_feature_cols()}
     existing_schema_columns = {str(col) for col in existing_meta.get("schema_columns") or []}
+    existing_assumptions = existing_meta.get("source_layout_assumptions")
+    existing_event_policy = ""
+    if isinstance(existing_assumptions, dict):
+        existing_event_policy = str(existing_assumptions.get("tushare_event_availability_policy") or "").strip()
+    if not existing_event_policy:
+        existing_event_policy = str(existing_meta.get("tushare_event_availability_policy") or "").strip()
     existing_manifest = pd.DataFrame()
     existing_manifest_lookup: dict[str, dict[str, Any]] = {}
     can_reuse_manifest = (
@@ -2634,6 +2645,7 @@ def rebuild_packed_source_from_local(
         and existing_meta.get("storage_layout") == "bucket_shards"
         and int(existing_meta.get("bucket_count") or 0) == bucket_count
         and required_schema_columns.issubset(existing_schema_columns)
+        and existing_event_policy == TUSHARE_EVENT_AVAILABILITY_POLICY
     )
     if can_reuse_manifest:
         existing_manifest = _load_packed_source_manifest()
@@ -2768,6 +2780,10 @@ def rebuild_packed_source_from_local(
             PACKED_SOURCE_BUCKET_DIR
         ),
         "schema_columns": schema_columns,
+        "source_layout_assumptions": {
+            "tushare_event_availability_policy": TUSHARE_EVENT_AVAILABILITY_POLICY,
+            "tushare_industry_mapping": TUSHARE_INDUSTRY_MAPPING_POLICY,
+        },
         "incremental": {
             "enabled": bool(incremental),
             "reused_buckets": int(len(reused_buckets)),

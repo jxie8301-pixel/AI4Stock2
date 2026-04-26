@@ -67,7 +67,6 @@ Current default model is `lgbm`.
 
 - Experiment profile index: `configs/experiment_profiles.yaml`
 - Experiment profile definitions: `configs/experiments/*.yaml`
-- Single-run entry: `main.py`
 - Rolling entry: `run_native_rolling.py`
 - Experiment/model archive: `src/experiment_store.py`
 
@@ -117,7 +116,6 @@ AI4Stock2/
 │   └── models/
 │       ├── pure_lightgbm.py
 │       └── pure_pytorch_lstm.py
-├── main.py
 ├── run_experiment_batch.py
 └── run_native_rolling.py
 ```

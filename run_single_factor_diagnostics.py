@@ -33,8 +33,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--period",
         choices=["train", "valid", "test", "all"],
-        default="test",
-        help="Configured time split to evaluate. Default: test.",
+        default="train",
+        help="Configured time split to evaluate. Default: train. Use test/all only for research-only diagnostics.",
     )
     parser.add_argument("--date-start", help="Optional explicit start date (overrides --period)")
     parser.add_argument("--date-end", help="Optional explicit end date (overrides --period)")

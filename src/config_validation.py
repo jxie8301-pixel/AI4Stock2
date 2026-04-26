@@ -202,6 +202,8 @@ TOP_LEVEL_SCHEMA = {
                 "ma_window": None,
                 "min_remaining_steps": None,
                 "force_exit_threshold": None,
+                "signal_timing": None,
+                "execution_timing": None,
             },
         },
         "dynamic_risk": {
@@ -264,6 +266,8 @@ INTRAPERIOD_EXIT_MODES = {"none", "score_threshold", "expected_return_threshold"
 INTRAPERIOD_SCORE_SOURCES = {"raw", "transformed", "rank_pct", "zscore"}
 INTRAPERIOD_CALIBRATION_MODES = {"quantile_bins"}
 PRICE_CONFIRM_MODES = {"close_below_ma"}
+PRICE_CONFIRM_SIGNAL_TIMING = "same_signal_date_close"
+PRICE_CONFIRM_EXECUTION_TIMING = "next_open"
 BENCHMARK_MODES = {"cross_section_mean", "file"}
 BENCHMARK_VALUE_TYPES = {"return", "close"}
 LGBM_BINARY_LOSSES = {"binary", "binary_logloss", "cross_entropy", "logloss"}
@@ -838,6 +842,26 @@ def validate_training_config(
                 int(price_confirm_cfg.get("min_remaining_steps", 0) or 0),
                 0,
             )
+            signal_timing = str(
+                price_confirm_cfg.get("signal_timing", PRICE_CONFIRM_SIGNAL_TIMING)
+                or PRICE_CONFIRM_SIGNAL_TIMING
+            ).strip().lower()
+            execution_timing = str(
+                price_confirm_cfg.get("execution_timing", PRICE_CONFIRM_EXECUTION_TIMING)
+                or PRICE_CONFIRM_EXECUTION_TIMING
+            ).strip().lower()
+            if signal_timing != PRICE_CONFIRM_SIGNAL_TIMING:
+                raise ValueError(
+                    "backtest.intraperiod_exit.price_confirm.signal_timing must be "
+                    f"{PRICE_CONFIRM_SIGNAL_TIMING}"
+                )
+            if execution_timing != PRICE_CONFIRM_EXECUTION_TIMING:
+                raise ValueError(
+                    "backtest.intraperiod_exit.price_confirm.execution_timing must be "
+                    f"{PRICE_CONFIRM_EXECUTION_TIMING}"
+                )
+            price_confirm_cfg["signal_timing"] = signal_timing
+            price_confirm_cfg["execution_timing"] = execution_timing
             force_exit_threshold = price_confirm_cfg.get("force_exit_threshold")
             if force_exit_threshold is not None:
                 force_exit_threshold = float(force_exit_threshold)

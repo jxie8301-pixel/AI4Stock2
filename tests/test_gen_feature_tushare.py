@@ -392,7 +392,8 @@ class TushareFeatureTest(unittest.TestCase):
             finally:
                 gen_feature_module.TUSHARE_RAW_FINA_INDICATOR_DIR = original_dir
 
-        self.assertAlmostEqual(float(out.loc[0, "fi_roe"]), 8.0, places=6)
+        self.assertTrue(pd.isna(out.loc[0, "fi_roe"]))
+        self.assertAlmostEqual(float(out.loc[1, "fi_roe"]), 8.0, places=6)
         self.assertAlmostEqual(float(out.loc[2, "fi_roe"]), 9.0, places=6)
         self.assertAlmostEqual(float(out.loc[2, "fi_roe_dt"]), 8.5, places=6)
         self.assertAlmostEqual(float(out.loc[2, "fi_or_yoy"]), 12.0, places=6)
@@ -482,7 +483,8 @@ class TushareFeatureTest(unittest.TestCase):
             finally:
                 gen_feature_module.TUSHARE_RAW_DIVIDEND_DIR = original_dir
 
-        self.assertAlmostEqual(float(out.loc[0, "div_cash_div"]), 0.3, places=6)
+        self.assertTrue(pd.isna(out.loc[0, "div_cash_div"]))
+        self.assertAlmostEqual(float(out.loc[1, "div_cash_div"]), 0.3, places=6)
         self.assertAlmostEqual(float(out.loc[2, "div_cash_div"]), 0.5, places=6)
         self.assertAlmostEqual(float(out.loc[2, "div_stk_div"]), 0.1, places=6)
         self.assertAlmostEqual(float(out.loc[2, "div_stk_bo_rate"]), 0.2, places=6)

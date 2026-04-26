@@ -9,7 +9,6 @@ What is true now:
 - `qlib` runtime code has been removed from the active project
 - `pyqlib` has been removed from project dependencies
 - The main runnable workflows are:
-  - `main.py`
   - `run_native_rolling.py`
   - `src/gen_feature.py`
 - Native feature caches are built from Parquet source data
@@ -194,7 +193,63 @@ system baseline for feature research.
 - [ ] Avoid using a 10-day top-k validation metric as the only training controller unless it beats a more stable controller in out-of-sample rolling comparison
 - [ ] Candidate archives should keep reproducibility artifacts such as `config_snapshot.yaml`, `manifest.json`, `training_summary.csv`, and readable summaries; large model files are not required
 
-### 0D. Code Quality And Reliability Cleanup
+### 0D. Look-Ahead / Future-Function Audit
+
+Audit status on 2026-04-26:
+
+- No obvious feature-side negative shift, centered rolling window, or forward-looking pct/diff was found in the active feature-generation path; negative shifts are concentrated in realized-label construction.
+- The serious risks are not classic feature-side row leakage, but stale single-window training, research-selection leakage, and non-point-in-time data assumptions.
+- Rolling training already uses `label_embargo_days = signal_horizon + 1`; preserve this as a hard invariant.
+
+Priority fixes:
+
+- [x] Remove `main.py` as a research entrypoint:
+  - the removed `main.py` path split train / valid / test by raw date ranges without applying `rolling.label_embargo_days`
+  - with open-to-open labels, validation rows near the test boundary can use future opens inside the test period for early stopping / model selection
+  - delete the entrypoint, remove recommended commands, and keep `run_native_rolling.py` as the only training/backtest entrypoint
+- [x] Treat `--period test` and `--period all` diagnostics as research-only:
+  - single-factor diagnostics now default to `train`
+  - feature prefilter / robust-profile builders refuse `--write-config-profile` outside the training date range unless `--allow-unsafe-profile-write` is passed
+  - profile builders also validate each diagnostics summary / segment artifact's sibling `manifest.json`
+  - unsafe profile writes must be recorded in the generated profile README
+- [ ] Separate discovery, validation, and final OOS reporting:
+  - do not use the same 2022-2025 test span both to choose feature profiles / candidates and to claim final OOS performance
+  - add a promoted-candidate note that states which dates were used for discovery, validation, and final reporting
+- [x] Stop silently building static universe membership:
+  - `build_universes.py` now refuses missing constituent start/end dates by default
+  - if the AkShare constituent endpoint is current-membership-only, CSI universe backtests are survivor-biased
+  - `--allow-static-membership` is only for explicitly labelled research controls
+- [ ] Replace static Tushare industry mapping with a point-in-time industry map, or label the current industry features as current-classification research features:
+  - current symbol cache stores one `industry` per symbol
+  - industry context features and `industry_excess` labels reuse that same mapping across all historical dates
+  - this can backfill future industry reclassifications into past rows
+- [x] Add an event-availability lag for announcement sidecars:
+  - `fina_indicator`, `dividend`, `forecast`, and `express` now become available only from the first trading date strictly after `ann_date`
+  - packed Tushare source metadata records the event-availability policy, and policy mismatch invalidates source/factor-store reuse
+  - rebuild Tushare packed source / factor store after this source change
+- [ ] Keep the research data path on PIT-safe price adjustment semantics:
+  - keep `hfq` as the default and keep `qfq` out of promoted research configs
+  - document whether Tushare `adj_factor` is safe for historical simulation under the chosen signal/execution convention
+  - add a collector/config warning if a promoted run uses `qfq` or an unverified adjustment mode
+- [x] Clarify `intraperiod_exit.price_confirm` execution timing:
+  - current backtest rows represent after-close signal dates and next-open-to-next-open realized returns
+  - same-row close/MA confirmation is allowed only under this explicit after-close / next-open execution contract
+  - keep this timing in trace / metadata so future same-open execution modes cannot reuse it accidentally
+- [ ] Add a lightweight static no-leak check to CI or a local audit script:
+  - flag feature-side `shift(-...)`, `pct_change(-...)`, `diff(-...)`, `rolling(..., center=True)`, and forward/backfill use in `src/`
+  - whitelist only label builders and tests that intentionally construct forward realized returns
+- [ ] Add a data-PIT audit command:
+  - verify universe membership interval coverage
+  - report static industry mappings and symbols whose industry changed if historical mappings become available
+  - summarize event sidecar announcement lag assumptions and price-adjustment mode used by each factor store
+
+Safe controls to preserve:
+
+- [x] Keep rolling `label_embargo_days = signal_horizon + 1` as the default
+- [x] Keep cross-sectional rank transforms date-local; do not add global fit/normalization over train+valid+test
+- [x] Keep rank-IC / sign-aligned non-ML baselines trained only on pre-test windows with the same embargo discipline as model training
+
+### 0E. Code Quality And Reliability Cleanup
 
 - [ ] Treat this cleanup pass as reliability / maintainability work, not performance work
 - [ ] Remove research-critical silent fallback paths:
@@ -206,9 +261,9 @@ system baseline for feature research.
   - industry group loading
   - parquet dataset scan helpers
   - profile inheritance / inline-path resolution helpers where practical
-- [ ] Decide the long-term status of `main.py`:
-  - either mark it as a legacy single-run wrapper
-  - or refactor it to reuse the rolling runtime / evaluation / artifact helpers
+- [x] Remove the obsolete single-window `main.py` surface:
+  - active training/backtest should flow through `run_native_rolling.py`
+  - avoid maintaining a second train/valid/test splitter with weaker embargo semantics
 - [ ] Fix semantic-factor missingness semantics:
   - avoid treating missing components as neutral zero by default
   - add minimum observed-component gates or coverage outputs for composite semantic factors
@@ -229,7 +284,7 @@ Current status:
 
 - [x] Shared forward-return, industry-group, parquet-scan, profile-resolution, and single-factor runtime helpers are extracted
 - [x] Rolling evaluation now records structured warnings for non-fatal fallback paths
-- [x] `main.py` is explicitly marked as the legacy single-window entrypoint
+- [x] `main.py` is removed instead of kept as a legacy single-window entrypoint
 - [x] Semantic Tushare composites preserve missingness and require minimum observed component weight
 - [x] Legacy valuation sentinel columns are preserved, with clean NaN-preserving variants and invalid flags added for migration
 - [x] Tushare bucket-source precondition validation records sidecar/context schema assumptions in metadata
@@ -341,7 +396,7 @@ Current status:
 - [x] Finish a full `--stages all` Tushare backfill to a stable converged state and verify repeated reruns are purely incremental for the currently landed stage set
 - [x] Build the Tushare factor store after raw convergence: `uv run python -m src.gen_feature --data-source tushare --workers 16 --incremental`
 - [x] Run the first Tushare-native rolling baseline before adding more tables
-- [ ] Deduplicate `main.py` and `run_native_rolling.py` into shared training/prediction/evaluation helpers before continuing to add more run modes
+- [x] Remove `main.py` and keep new training/backtest modes on the rolling runtime path
 - [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
 - [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py`, `collector_gm.py`, and `collector_tushare.py` stop diverging
 - [ ] Upgrade training-time transforms from ad-hoc functions to a real fit/transform pipeline before adding more transform combinations

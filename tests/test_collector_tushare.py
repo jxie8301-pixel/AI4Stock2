@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import time
 
@@ -500,6 +501,10 @@ def test_run_tushare_update_pipeline_limits_market_stages_to_lifecycle_scope(mon
     monkeypatch.setattr(
         "src.collector_tushare.precheck_aux_stage_symbols",
         lambda symbols, **kwargs: ([], list(symbols)),
+    )
+    monkeypatch.setattr(
+        "src.collector_tushare.rebuild_packed_source_from_local",
+        lambda symbols=None, **kwargs: {},
     )
 
     run_tushare_update_pipeline(
@@ -1098,6 +1103,7 @@ def test_rebuild_packed_source_from_local_writes_bucket_store(monkeypatch: pytes
     bucket_files = sorted((source_dir / "buckets").glob("part-*.parquet"))
     assert meta["storage_layout"] == "bucket_shards"
     assert meta["num_symbols"] == 1
+    assert meta["source_layout_assumptions"]["tushare_event_availability_policy"]
     assert (source_dir / "manifest.parquet").exists()
     assert (source_dir / "meta.json").exists()
     assert len(bucket_files) == 1
@@ -1180,3 +1186,61 @@ def test_rebuild_packed_source_from_local_reuses_unchanged_buckets(
     assert mtimes_after[changed_bucket] > mtimes_before[changed_bucket]
     if changed_bucket != unchanged_bucket:
         assert mtimes_after[unchanged_bucket] == mtimes_before[unchanged_bucket]
+
+
+def test_rebuild_packed_source_from_local_invalidates_event_policy_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    processed_dir = tmp_path / "processed"
+    source_dir = tmp_path / "source"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "buckets").mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+            "symbol": ["000001", "000001"],
+            "open": [10.0, 11.0],
+            "high": [10.5, 11.5],
+            "low": [9.8, 10.8],
+            "close": [10.0, 11.0],
+            "pre_close": [9.5, 10.0],
+            "volume": [100.0, 120.0],
+            "amount": [1000.0, 1200.0],
+        }
+    ).to_parquet(processed_dir / "000001.parquet", index=False)
+
+    import src.collector_tushare as collector_module
+
+    monkeypatch.setattr(collector_module, "PROCESSED_DIR", processed_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_DIR", source_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_BUCKET_DIR", source_dir / "buckets")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
+    monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
+    monkeypatch.setattr("src.gen_feature._get_tushare_industry_context_feature_cols", lambda: ["ind_member_count"])
+    monkeypatch.setattr(
+        "src.gen_feature._augment_tushare_symbol_frame",
+        lambda df, symbol: df.assign(ind_member_count=1.0),
+    )
+
+    rebuild_packed_source_from_local(["000001"], bucket_count=8, workers=1, incremental=True)
+    meta_path = source_dir / "meta.json"
+    with open(meta_path, encoding="utf-8") as fh:
+        meta = json.load(fh)
+    meta["source_layout_assumptions"]["tushare_event_availability_policy"] = "legacy_same_day_ann_date"
+    with open(meta_path, "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+    monkeypatch.setattr(
+        "src.gen_feature._augment_tushare_symbol_frame",
+        lambda df, symbol: df.assign(ind_member_count=99.0),
+    )
+    rebuilt = rebuild_packed_source_from_local(["000001"], bucket_count=8, workers=1, incremental=True)
+
+    assert rebuilt["incremental"]["reused_buckets"] == 0
+    assert rebuilt["incremental"]["rebuilt_buckets"] == 1
+    bucket_files = sorted((source_dir / "buckets").glob("part-*.parquet"))
+    stored = pd.read_parquet(bucket_files[0])
+    assert stored["ind_member_count"].tolist() == pytest.approx([99.0, 99.0])

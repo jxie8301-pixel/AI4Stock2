@@ -8,10 +8,19 @@ import numpy as np
 import pandas as pd
 
 from src.factor_store import load_factor_frame
-from src.gen_feature import _get_tushare_bucket_source_required_columns, generate_factor_store
+from src.gen_feature import (
+    TUSHARE_EVENT_AVAILABILITY_POLICY,
+    _get_tushare_bucket_source_required_columns,
+    generate_factor_store,
+)
 
 
-def _write_bucket_source(root: Path, frame: pd.DataFrame) -> Path:
+def _write_bucket_source(
+    root: Path,
+    frame: pd.DataFrame,
+    *,
+    event_policy: str = TUSHARE_EVENT_AVAILABILITY_POLICY,
+) -> Path:
     source_dir = root / "source"
     buckets = source_dir / "buckets"
     buckets.mkdir(parents=True, exist_ok=True)
@@ -21,6 +30,10 @@ def _write_bucket_source(root: Path, frame: pd.DataFrame) -> Path:
                 "storage_layout": "bucket_shards",
                 "bucket_ids": [5],
                 "bucket_count": 16,
+                "source_layout_assumptions": {
+                    "tushare_event_availability_policy": event_policy,
+                    "tushare_industry_mapping": "static_symbol_cache_current_classification",
+                },
             },
             f,
         )
@@ -134,6 +147,10 @@ class GenFeatureStoreTest(unittest.TestCase):
 
         self.assertTrue(meta["source_schema_validation"]["validated"])
         self.assertIn("ind_bp_clean_mean", meta["source_schema_validation"]["required_columns"])
+        self.assertEqual(
+            meta["source_schema_validation"]["tushare_event_availability_policy"],
+            TUSHARE_EVENT_AVAILABILITY_POLICY,
+        )
         self.assertTrue(meta["source_layout_assumptions"]["tushare_bucket_source_requires_sidecar_context_columns"])
 
     def test_full_rebuild_refreshes_stale_default_tushare_bucket_source(self):
@@ -184,6 +201,60 @@ class GenFeatureStoreTest(unittest.TestCase):
         self.assertTrue(calls[0]["incremental"])
         self.assertTrue(meta["source_schema_validation"]["validated"])
         self.assertTrue(meta["source_schema_validation"]["auto_rebuilt_stale_source"])
+
+    def test_full_rebuild_refreshes_default_tushare_bucket_source_on_event_policy_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            source_dir = _write_bucket_source(
+                root,
+                _minimal_tushare_bucket_frame(),
+                event_policy="legacy_same_day_ann_date",
+            )
+            processed_dir = root / "processed"
+            processed_dir.mkdir()
+            _minimal_bucket_frame().to_parquet(processed_dir / "000001.parquet", index=False)
+            calls: list[dict[str, object]] = []
+
+            def rebuild_packed_source(
+                symbols: list[str] | None = None,
+                *,
+                bucket_count: int = 128,
+                workers: int = 8,
+                incremental: bool = True,
+            ) -> dict[str, object]:
+                calls.append(
+                    {
+                        "symbols": symbols,
+                        "bucket_count": bucket_count,
+                        "workers": workers,
+                        "incremental": incremental,
+                    }
+                )
+                _write_bucket_source(root, _minimal_tushare_bucket_frame())
+                return {"incremental": {"rebuilt_buckets": 1, "reused_buckets": 0}}
+
+            from src import collector_tushare as collector_module
+
+            with (
+                patch.object(collector_module, "PACKED_SOURCE_DIR", source_dir),
+                patch.object(collector_module, "PROCESSED_DIR", processed_dir),
+                patch.object(collector_module, "rebuild_packed_source_from_local", rebuild_packed_source),
+            ):
+                meta = generate_factor_store(
+                    parquet_dir=str(source_dir),
+                    output_dir=str(root / "factor_store"),
+                    workers=1,
+                    incremental=False,
+                    label_horizons=[1],
+                    data_source="tushare",
+                )
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(meta["source_schema_validation"]["auto_rebuilt_stale_source"])
+        self.assertEqual(
+            meta["source_schema_validation"]["tushare_event_availability_policy"],
+            TUSHARE_EVENT_AVAILABILITY_POLICY,
+        )
 
 
 if __name__ == "__main__":

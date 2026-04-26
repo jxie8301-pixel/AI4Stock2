@@ -21,7 +21,7 @@ from src.override_utils import (
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run native experiments in batch from sweep definitions.")
     parser.add_argument("--config", default="configs/config.yaml", help="Runtime config path")
-    parser.add_argument("--pipeline", choices=["single", "rolling"], default="rolling", help="Target pipeline")
+    parser.add_argument("--pipeline", choices=["rolling"], default="rolling", help="Target pipeline")
     parser.add_argument("--experiment-profile", required=True, help="Base experiment profile")
     parser.add_argument("--model-profile", help="Override model profile")
     parser.add_argument("--feature-profile", help="Override feature profile")
@@ -58,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _build_base_command(args: argparse.Namespace) -> list[str]:
     repo_root = Path(__file__).resolve().parent
-    target_script = repo_root / ("main.py" if args.pipeline == "single" else "run_native_rolling.py")
+    target_script = repo_root / "run_native_rolling.py"
     cmd = [sys.executable, str(target_script), "--config", args.config, "--experiment-profile", args.experiment_profile]
     if args.model_profile:
         cmd += ["--model-profile", args.model_profile]

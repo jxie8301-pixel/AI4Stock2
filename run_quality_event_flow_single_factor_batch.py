@@ -35,8 +35,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--period",
         choices=["train", "valid", "test", "all"],
-        default="all",
-        help="Diagnostics period. Default: all.",
+        default="train",
+        help="Diagnostics period. Default: train. Use all only for research-only split comparison.",
     )
     parser.add_argument("--date-start", help="Optional explicit start date.")
     parser.add_argument("--date-end", help="Optional explicit end date.")

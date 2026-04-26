@@ -102,6 +102,8 @@ TUSHARE_RAW_EXPRESS_DIR = Path("data/tushare/raw/express")
 TUSHARE_RAW_META_DIR = Path("data/tushare/raw/meta")
 TUSHARE_SYMBOL_CACHE_PATH = TUSHARE_RAW_META_DIR / "symbol_cache.parquet"
 TUSHARE_INDUSTRY_CONTEXT_PATH = TUSHARE_RAW_META_DIR / "industry_context.parquet"
+TUSHARE_EVENT_AVAILABILITY_POLICY = "strict_next_trading_day_after_ann_date"
+TUSHARE_INDUSTRY_MAPPING_POLICY = "static_symbol_cache_current_classification"
 SHARD_DIRNAME = "_shards"
 BUCKET_DIRNAME = "buckets"
 BUCKET_MANIFEST_FILENAME = "manifest.parquet"
@@ -257,7 +259,30 @@ def _get_tushare_bucket_source_required_columns() -> list[str]:
     return list(dict.fromkeys(required))
 
 
-def _validate_tushare_bucket_source_schema(source_bucket_paths: list[Path]) -> dict[str, Any]:
+def _get_tushare_source_layout_assumptions() -> dict[str, str]:
+    return {
+        "tushare_event_availability_policy": TUSHARE_EVENT_AVAILABILITY_POLICY,
+        "tushare_industry_mapping": TUSHARE_INDUSTRY_MAPPING_POLICY,
+    }
+
+
+def _extract_tushare_event_availability_policy(metadata: dict[str, Any] | None) -> str:
+    if not isinstance(metadata, dict):
+        return ""
+    assumptions = metadata.get("source_layout_assumptions")
+    if isinstance(assumptions, dict):
+        value = assumptions.get("tushare_event_availability_policy")
+        if value is not None:
+            return str(value).strip()
+    value = metadata.get("tushare_event_availability_policy")
+    return str(value or "").strip()
+
+
+def _validate_tushare_bucket_source_schema(
+    source_bucket_paths: list[Path],
+    *,
+    source_meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     required_columns = _get_tushare_bucket_source_required_columns()
     required_set = set(required_columns)
     missing_by_path: list[tuple[str, list[str]]] = []
@@ -279,10 +304,20 @@ def _validate_tushare_bucket_source_schema(source_bucket_paths: list[Path]) -> d
             f"Missing columns by bucket: {preview}"
         )
 
+    event_policy = _extract_tushare_event_availability_policy(source_meta)
+    if event_policy != TUSHARE_EVENT_AVAILABILITY_POLICY:
+        found = event_policy or "<missing>"
+        raise ValueError(
+            "Tushare bucket source event availability policy mismatch. "
+            f"Expected {TUSHARE_EVENT_AVAILABILITY_POLICY}, found {found}. "
+            "Regenerate the packed source so announcement sidecars are lagged before factor generation."
+        )
+
     return {
         "validated": True,
         "required_columns": required_columns,
         "validated_bucket_count": len(source_bucket_paths),
+        "tushare_event_availability_policy": event_policy,
     }
 
 
@@ -300,7 +335,7 @@ def _rebuild_default_tushare_packed_source_if_stale(
     if not symbols:
         raise FileNotFoundError(f"No processed Tushare parquet files found in {collector_tushare.PROCESSED_DIR}")
 
-    print("[0/3] Tushare packed source schema is stale; rebuilding packed source buckets...")
+    print("[0/3] Tushare packed source schema/policy is stale; rebuilding packed source buckets...")
     return collector_tushare.rebuild_packed_source_from_local(
         symbols,
         workers=max(1, int(workers)),
@@ -623,8 +658,18 @@ def _load_tushare_sidecar_features(
     if frame.empty:
         return None
 
+    trading_dates = pd.DatetimeIndex(pd.to_datetime(date_index)).dropna().unique().sort_values()
+    if trading_dates.empty:
+        return None
+    available_positions = trading_dates.searchsorted(frame["ann_date"], side="right")
+    has_available_date = available_positions < len(trading_dates)
+    frame = frame.loc[has_available_date].copy()
+    if frame.empty:
+        return None
+    frame["available_date"] = trading_dates.take(available_positions[has_available_date])
+
     source_cols = [source for source, _ in available_pairs]
-    right = frame[["ann_date", *source_cols]].copy()
+    right = frame[["available_date", "ann_date", *source_cols]].copy()
     for col in source_cols:
         right[col] = pd.to_numeric(right[col], errors="coerce")
     right = right.rename(columns=dict(available_pairs))
@@ -632,14 +677,14 @@ def _load_tushare_sidecar_features(
     left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
     merged = pd.merge_asof(
         left,
-        right.sort_values("ann_date"),
+        right.sort_values("available_date"),
         left_on="date",
-        right_on="ann_date",
+        right_on="available_date",
         direction="backward",
     )
     if days_since_ann_column is not None:
         merged[days_since_ann_column] = (merged["date"] - merged["ann_date"]).dt.days
-    merged = merged.drop(columns=["ann_date"], errors="ignore").set_index("date")
+    merged = merged.drop(columns=["ann_date", "available_date"], errors="ignore").set_index("date")
     for col in output_cols:
         if col not in merged.columns:
             merged[col] = np.nan
@@ -1204,7 +1249,10 @@ def _generate_factor_store_from_bucket_source(
     source_schema_validation: dict[str, Any] = {"validated": False, "reason": "not_required"}
     if data_source == "tushare":
         try:
-            source_schema_validation = _validate_tushare_bucket_source_schema(source_bucket_paths)
+            source_schema_validation = _validate_tushare_bucket_source_schema(
+                source_bucket_paths,
+                source_meta=source_meta,
+            )
         except ValueError:
             if not auto_rebuild_stale_tushare_source:
                 raise
@@ -1213,7 +1261,10 @@ def _generate_factor_store_from_bucket_source(
                 raise
             source_bucket_paths = list_bucket_paths(pdir)
             source_meta = load_source_store_metadata(pdir) or {}
-            source_schema_validation = _validate_tushare_bucket_source_schema(source_bucket_paths)
+            source_schema_validation = _validate_tushare_bucket_source_schema(
+                source_bucket_paths,
+                source_meta=source_meta,
+            )
             source_schema_validation["auto_rebuilt_stale_source"] = True
             source_schema_validation["source_rebuild_incremental"] = rebuild_meta.get("incremental")
     workers = max(1, int(workers))
@@ -1278,6 +1329,7 @@ def _generate_factor_store_from_bucket_source(
         "source_layout_assumptions": {
             "bucket_source_contains_prejoined_rows": True,
             "tushare_bucket_source_requires_sidecar_context_columns": data_source == "tushare",
+            **(_get_tushare_source_layout_assumptions() if data_source == "tushare" else {}),
         },
         "source_bucket_count": int(source_meta.get("bucket_count") or len(active_bucket_ids)),
         "num_features": len(feature_names),
@@ -1390,6 +1442,10 @@ def generate_factor_store(
         and existing_meta.get("feature_names") == feature_names
         and existing_label_columns == label_columns
         and int(existing_meta.get("bucket_count") or 0) == bucket_count
+        and (
+            data_source != "tushare"
+            or _extract_tushare_event_availability_policy(existing_meta) == TUSHARE_EVENT_AVAILABILITY_POLICY
+        )
     )
     if can_reuse_manifest:
         existing_manifest = _load_bucket_manifest(manifest_path)
@@ -1521,6 +1577,9 @@ def generate_factor_store(
         "factor_space": FULL_FACTOR_SPACE_NAME,
         "data_source": data_source or "",
         "source_parquet_dir": str(pdir),
+        "source_layout_assumptions": {
+            **(_get_tushare_source_layout_assumptions() if data_source == "tushare" else {}),
+        },
         "num_features": len(feature_names),
         "num_rows": total_rows,
         "shape": [total_rows, len(feature_names)],

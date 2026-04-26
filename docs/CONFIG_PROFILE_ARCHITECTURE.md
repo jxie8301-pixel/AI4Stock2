@@ -162,7 +162,6 @@ The preferred entry points should be:
 ```bash
 uv run python -m src.gen_feature
 uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10
-uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10
 ```
 
 `--experiment-profile` should be treated as mandatory for train/backtest entry

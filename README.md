@@ -19,11 +19,7 @@ Run a rolling LightGBM experiment by explicitly naming the experiment profile:
 UV_CACHE_DIR=/tmp/uv-cache uv run python run_native_rolling.py --config configs/config.yaml --experiment-profile core_v4_lgbm_default_10x20x10
 ```
 
-Run a single native experiment:
-
-```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python main.py --config configs/config.yaml --experiment-profile core_v4_lgbm_default_10x20x10
-```
+The old single-window training entrypoint has been removed; use rolling runs for research and reporting.
 
 ## Core Docs
 

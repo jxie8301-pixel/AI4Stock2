@@ -945,6 +945,14 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "holdings"]), 1)
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "trade_sell_list"], [])
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_mode"], "close_below_ma")
+        self.assertEqual(
+            trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_signal_timing"],
+            "same_signal_date_close",
+        )
+        self.assertEqual(
+            trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_execution_timing"],
+            "next_open",
+        )
         self.assertEqual(int(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_required_count"]), 1)
         self.assertEqual(int(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_blocked_count"]), 1)
 
@@ -995,9 +1003,25 @@ class NativeBacktestTest(unittest.TestCase):
         self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_required_count"]), 1)
         self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_blocked_count"]), 0)
         self.assertEqual(int(report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_count"]), 1)
+        self.assertEqual(
+            report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_signal_timing"],
+            "same_signal_date_close",
+        )
+        self.assertEqual(
+            report.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_price_confirm_execution_timing"],
+            "next_open",
+        )
         self.assertEqual(trace.loc[pd.Timestamp("2024-01-03"), "trade_sell_list"], ["A"])
         self.assertTrue(bool(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_events"][0]["price_confirm_required"]))
         self.assertTrue(bool(trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_events"][0]["price_confirm_passed"]))
+        self.assertEqual(
+            trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_events"][0]["price_confirm_signal_timing"],
+            "same_signal_date_close",
+        )
+        self.assertEqual(
+            trace.loc[pd.Timestamp("2024-01-03"), "intraperiod_exit_events"][0]["price_confirm_execution_timing"],
+            "next_open",
+        )
 
     def test_intraperiod_exit_price_confirm_bypasses_on_force_exit_threshold(self):
         index = pd.MultiIndex.from_product(

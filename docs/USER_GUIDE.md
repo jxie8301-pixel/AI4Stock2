@@ -330,7 +330,7 @@ uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10
 如果你不想为了一个小参数改动再复制一份 experiment yaml，现在也可以直接用通用覆写：
 ```bash
 uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --set strategy.topk=20 --set rolling.retrain_step=5
-uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --set label.signal_horizon=10
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --set label.signal_horizon=10
 ```
 
 ### 批量参数扫描
@@ -382,21 +382,9 @@ uv run python run_experiment_batch.py \
 uv run python run_experiment_batch.py --pipeline rolling --experiment-profile core_v4_lgbm_default_10x20x10 --sweep 'rolling.retrain_step=[5,10,15]' --dry-run
 ```
 
-### 单次实验 (研究模式)
-用于快速验证想法：
-```bash
-uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --save-model results/lgbm/model.pkl
-```
+### 训练入口约束
 
-同样支持命令行覆写 profile：
-```bash
-uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --feature-profile alpha158_full --run-tag alpha158_full_single
-```
-
-也可以让系统自动把模型和实验元数据归档到本地实验库：
-```bash
-uv run python main.py --experiment-profile core_v4_lgbm_default_10x20x10 --topk 25 --n-drop 5 --run-tag alpha25
-```
+旧的单窗口训练入口已经移除。快速验证也应使用 `run_native_rolling.py`，必要时通过 experiment profile 或 `--set` 缩短日期窗口、调仓周期和重训周期。
 
 ## 3. 模型复用 (Save & Load)
 
@@ -434,12 +422,12 @@ uv run python run_native_rolling.py \
 
 默认启用本地实验归档，根目录为 `results/experiments/`：
 - 每次运行会生成一个独立目录，保存配置快照、指标清单、结果工件副本。
-- 单次实验在未显式传入 `--save-model` 时，会自动保存模型到该目录。
+- rolling 实验在显式保存模型或预测时，会将可复现工件归档到该目录。
 - 全局对比索引保存在 `results/experiments/experiment_index.csv`，方便同模型不同策略横向比较。
 
 如需关闭：
 ```bash
-uv run python main.py --model lgbm --disable-local-store
+uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10 --disable-local-store
 ```
 
 ## 5. 配置分层
@@ -514,7 +502,7 @@ backtest:
 - 训练入口保持“只消费已有 factor store”，复现性更强，也更容易比较不同模型、不同选列、不同策略。
 - 同一个全量 factor store 可以被很多次训练复用，这正好符合“先生成最全，再按需挑选”的研究方式。
 
-如果后续要进一步提效，推荐新增一个显式模式，例如 `main.py --build-cache-if-missing`，而不是让训练脚本默认偷偷重建 cache。
+如果后续要进一步提效，推荐在 `run_native_rolling.py` 中新增显式模式，例如 `--build-cache-if-missing`，而不是让训练脚本默认偷偷重建 cache。
 
 LightGBM 的训练参数应当优先写进 model profile，而不是硬编码在 Python 中。
 例如：

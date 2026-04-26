@@ -201,10 +201,6 @@ uv run python -m src.gen_feature --mode compact
   - `cache_dir` concept should evolve toward `factor_store_dir`
   - keep backward-compatible field alias during migration
 
-- `main.py`
-  - replace memmap loading with `factor_store.load_factor_frame`
-  - build train/valid/test splits from the loaded frame
-
 - `run_native_rolling.py`
   - replace memmap loading with one preloaded date-range frame
   - keep current rolling-window logic on the in-memory frame
@@ -232,7 +228,7 @@ uv run python -m src.gen_feature --mode compact
 
 ### Phase 2
 
-- Switch `main.py` and `run_native_rolling.py` to read the Parquet factor store
+- Switch `run_native_rolling.py` to read the Parquet factor store
 - Keep memmap generation behind a fallback flag only if needed
 
 ### Phase 3

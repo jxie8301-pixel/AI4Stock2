@@ -23,6 +23,7 @@ from src.feature_prefilter import (
 )
 from src.feature_profiles import get_native_factor_store_dir
 from src.label_utils import get_label_column_name, resolve_signal_horizon
+from src.research_safety import check_config_profile_write_safety
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 
 
@@ -82,6 +83,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Write the generated profile into configs/features/<profile-name>.yaml",
     )
+    parser.add_argument(
+        "--allow-unsafe-profile-write",
+        action="store_true",
+        help=(
+            "Allow --write-config-profile outside the training range. "
+            "This records a research-selection-leakage warning in the output README."
+        ),
+    )
     parser.add_argument("--output-dir", help="Optional diagnostics artifact directory for this filtering run.")
     return parser
 
@@ -135,6 +144,17 @@ def main() -> None:
         raise ValueError("No factors remained after exact-duplicate pruning.")
 
     date_start, date_end = _resolve_period_dates(cfg, args)
+    profile_write_safe = True
+    profile_write_warning = None
+    if args.write_config_profile:
+        profile_write_safe, profile_write_warning = check_config_profile_write_safety(
+            cfg,
+            date_start=date_start,
+            date_end=date_end,
+            allow_unsafe=bool(args.allow_unsafe_profile_write),
+            tool_name="run_build_prefiltered_profile.py",
+            diagnostics_paths=[args.diagnostics_summary, args.segment_comparison],
+        )
     factor_frame = load_factor_frame(
         store_dir=factor_store_dir,
         columns=kept_exact["feature"].tolist(),
@@ -197,6 +217,8 @@ def main() -> None:
         f"- period: `{args.period}`",
         f"- date_start: `{date_start}`",
         f"- date_end: `{date_end}`",
+        f"- write_config_profile: `{args.write_config_profile}`",
+        f"- profile_write_safety: `{'training_only' if profile_write_safe else 'unsafe_override'}`",
         f"- min_coverage_pct: `{args.min_coverage_pct}`",
         f"- min_abs_rank_ic: `{args.min_abs_rank_ic}`",
         f"- min_abs_rank_ic_ir: `{args.min_abs_rank_ic_ir}`",
@@ -219,6 +241,15 @@ def main() -> None:
         "",
         *[f"- `{name}`" for name in selected_columns],
     ]
+    if profile_write_warning:
+        readme_lines.extend(
+            [
+                "",
+                "## Safety Warning",
+                "",
+                f"- {profile_write_warning}",
+            ]
+        )
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write("\n".join(readme_lines).strip() + "\n")
 

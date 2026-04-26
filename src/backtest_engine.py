@@ -476,6 +476,12 @@ def run_native_backtest(
                             "price_confirm_required": bool(price_confirm_required),
                             "price_confirm_passed": bool(price_confirm_passed),
                             "price_confirm_bypass_reason": price_confirm_bypass_reason,
+                            "price_confirm_signal_timing": None
+                            if intraperiod_exit_cfg is None
+                            else intraperiod_exit_cfg.get("price_confirm_signal_timing"),
+                            "price_confirm_execution_timing": None
+                            if intraperiod_exit_cfg is None
+                            else intraperiod_exit_cfg.get("price_confirm_execution_timing"),
                         }
                     )
                 if intraperiod_exit_residual_samples:
@@ -518,6 +524,12 @@ def run_native_backtest(
                 "intraperiod_exit_price_confirm_blocked_count": intraperiod_exit_price_confirm_blocked_count,
                 "intraperiod_exit_price_confirm_bypassed_remaining_steps_count": intraperiod_exit_price_confirm_bypassed_remaining_steps_count,
                 "intraperiod_exit_price_confirm_bypassed_force_exit_count": intraperiod_exit_price_confirm_bypassed_force_exit_count,
+                "intraperiod_exit_price_confirm_signal_timing": None
+                if intraperiod_exit_cfg is None
+                else intraperiod_exit_cfg.get("price_confirm_signal_timing"),
+                "intraperiod_exit_price_confirm_execution_timing": None
+                if intraperiod_exit_cfg is None
+                else intraperiod_exit_cfg.get("price_confirm_execution_timing"),
                 "intraperiod_exit_remaining_steps": intraperiod_exit_remaining_steps,
                 "intraperiod_exit_signal_mean": intraperiod_exit_signal_mean,
                 "intraperiod_exit_signal_min": intraperiod_exit_signal_min,
@@ -565,6 +577,8 @@ def run_native_backtest(
                     "intraperiod_exit_price_confirm_ma_window": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg.get("price_confirm_ma_window"),
                     "intraperiod_exit_price_confirm_min_remaining_steps": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg.get("price_confirm_min_remaining_steps"),
                     "intraperiod_exit_price_confirm_force_exit_threshold": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg.get("price_confirm_force_exit_threshold"),
+                    "intraperiod_exit_price_confirm_signal_timing": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg.get("price_confirm_signal_timing"),
+                    "intraperiod_exit_price_confirm_execution_timing": None if intraperiod_exit_cfg is None else intraperiod_exit_cfg.get("price_confirm_execution_timing"),
                     "intraperiod_exit_count": int(intraperiod_exit_count),
                     "intraperiod_exit_score_candidate_count": int(intraperiod_exit_score_candidate_count),
                     "intraperiod_exit_price_confirm_required_count": int(intraperiod_exit_price_confirm_required_count),

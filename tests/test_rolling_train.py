@@ -6,7 +6,7 @@ import tempfile
 import numpy as np
 import pandas as pd
 
-from src.rolling_train import _compute_validation_topk_summary, generate_prediction_bundle
+from src.rolling_train import _compute_rolling_window_indices, _compute_validation_topk_summary, generate_prediction_bundle
 from src.rolling_types import RollingPaths, RollingRuntimeData
 
 
@@ -46,6 +46,20 @@ class RollingTrainTest(unittest.TestCase):
 
         self.assertEqual(summary["valid_topk_days"], 0)
         self.assertTrue(np.isnan(summary["valid_topk_label_mean"]))
+
+    def test_compute_rolling_window_indices_applies_label_embargo(self):
+        calendar = pd.Series(pd.to_datetime([f"2024-01-{day:02d}" for day in range(1, 9)]))
+
+        bounds = _compute_rolling_window_indices(
+            calendar,
+            pd.Timestamp("2024-01-08"),
+            train_days=2,
+            valid_days=2,
+            label_embargo_days=3,
+        )
+
+        self.assertEqual(bounds, (0, 1, 2, 3))
+        self.assertLess(3 + 2 + 1, int(calendar.searchsorted(pd.Timestamp("2024-01-08"))))
 
     def test_generate_prediction_bundle_supports_formula_score_model(self):
         dates = pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3 + ["2024-01-03"] * 3)
@@ -105,6 +119,7 @@ class RollingTrainTest(unittest.TestCase):
                 train_days=1,
                 valid_days=1,
                 signal_horizon=10,
+                label_embargo_days=0,
                 model_name="formula_score",
             )
 
@@ -112,6 +127,8 @@ class RollingTrainTest(unittest.TestCase):
         self.assertGreater(values[0], values[1])
         self.assertGreater(values[1], values[2])
         self.assertEqual(bundle.metadata["model_name"], "formula_score")
+        self.assertEqual(bundle.metadata["label_embargo_days"], 0)
+        self.assertEqual(bundle.training_summary_records[0]["label_embargo_days"], 0)
         self.assertEqual(bundle.training_summary_records[0]["formula_score_mode"], "rank_ic_weighted")
 
 

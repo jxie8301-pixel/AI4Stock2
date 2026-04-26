@@ -16,6 +16,7 @@ from src.industry_groups import load_instrument_industry_groups
 from src.label_utils import (
     build_opportunity_target_series,
     get_label_column_name,
+    resolve_label_embargo_days,
     resolve_opportunity_label_cfg,
     resolve_signal_horizon,
 )
@@ -147,6 +148,9 @@ def evaluate_prediction_bundle(
         save_period_summary,
     )
     signal_horizon = int(bundle.metadata.get("signal_horizon", resolve_signal_horizon(cfg)))
+    label_embargo_days = int(
+        bundle.metadata.get("label_embargo_days", resolve_label_embargo_days(cfg, signal_horizon=signal_horizon))
+    )
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
     runtime_data_cache = None
     run_warnings: list[dict[str, Any]] = []
@@ -161,6 +165,7 @@ def evaluate_prediction_bundle(
                 valid_days=int(cfg.get("rolling", {}).get("valid_days", 10)),
                 label_column=get_label_column_name(signal_horizon),
                 backtest_label_column=get_label_column_name(1),
+                label_embargo_days=label_embargo_days,
                 extra_columns=needed_extra,
             )
             return runtime_data_cache
@@ -172,6 +177,7 @@ def evaluate_prediction_bundle(
                 valid_days=int(cfg.get("rolling", {}).get("valid_days", 10)),
                 label_column=get_label_column_name(signal_horizon),
                 backtest_label_column=get_label_column_name(1),
+                label_embargo_days=label_embargo_days,
                 extra_columns=needed_extra,
             )
         return runtime_data_cache
@@ -519,6 +525,7 @@ def evaluate_prediction_bundle(
             "signal_horizon": bundle.metadata.get("signal_horizon", resolve_signal_horizon(cfg)),
             "train_days": bundle.metadata.get("train_days", ""),
             "valid_days": bundle.metadata.get("valid_days", ""),
+            "label_embargo_days": bundle.metadata.get("label_embargo_days", label_embargo_days),
             "test_start": bundle.metadata.get("test_start", cfg.get("time", {}).get("test", ["", ""])[0]),
             "test_end": bundle.metadata.get("test_end", cfg.get("time", {}).get("test", ["", ""])[1]),
             "selected_features": bundle.selected_feature_names,

@@ -16,7 +16,7 @@ from src.feature_selection import (
     materialize_selected_feature_frame,
     resolve_selected_feature_columns,
 )
-from src.label_utils import resolve_opportunity_label_cfg, sanitize_label_series
+from src.label_utils import resolve_label_embargo_days, resolve_opportunity_label_cfg, sanitize_label_series
 from src.rolling_types import RollingRuntimeData
 from src.source_store import load_source_frame
 
@@ -28,6 +28,7 @@ def load_rolling_runtime_data(
     valid_days: int,
     label_column: str,
     backtest_label_column: str,
+    label_embargo_days: int | None = None,
     extra_columns: list[str] | None = None,
 ) -> RollingRuntimeData:
     factor_store_dir = get_native_factor_store_dir(cfg)
@@ -58,7 +59,12 @@ def load_rolling_runtime_data(
 
     first_test_start = test_calendar.iloc[0]
     first_test_idx = int(full_calendar.searchsorted(first_test_start))
-    earliest_idx = max(0, first_test_idx - train_days - valid_days)
+    if label_embargo_days is None:
+        label_embargo_days = resolve_label_embargo_days(cfg)
+    label_embargo_days = int(label_embargo_days)
+    if label_embargo_days < 0:
+        raise ValueError("label_embargo_days must be >= 0")
+    earliest_idx = max(0, first_test_idx - label_embargo_days - train_days - valid_days)
     load_start = full_calendar.iloc[earliest_idx]
     extra_columns = list(extra_columns or [])
     load_columns = list(
@@ -137,11 +143,14 @@ def build_prediction_metadata(
     retrain_step: int,
     train_days: int,
     valid_days: int,
+    label_embargo_days: int | None = None,
     runtime_data: RollingRuntimeData,
     model_name: str,
 ) -> dict[str, Any]:
     opportunity_cfg = resolve_opportunity_label_cfg(cfg)
     rank_exclude_columns = sorted(_resolve_cross_sectional_rank_exclude_columns(cfg))
+    if label_embargo_days is None:
+        label_embargo_days = resolve_label_embargo_days(cfg, signal_horizon=signal_horizon)
     metadata = {
         "model_name": model_name,
         "data_source": resolve_data_source_name(cfg),
@@ -150,6 +159,7 @@ def build_prediction_metadata(
         "retrain_step": int(retrain_step),
         "train_days": int(train_days),
         "valid_days": int(valid_days),
+        "label_embargo_days": int(label_embargo_days),
         "test_start": str(runtime_data.test_start.date()),
         "test_end": str(runtime_data.test_end.date()),
         "selected_feature_count": int(len(runtime_data.selected_feature_names)),

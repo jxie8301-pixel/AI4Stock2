@@ -16,6 +16,7 @@ from src.industry_groups import load_instrument_industry_groups
 from src.label_utils import (
     build_opportunity_target_series,
     compute_opportunity_sample_weights,
+    resolve_label_embargo_days,
     resolve_opportunity_label_cfg,
     resolve_train_label_transform_cfg,
     transform_training_label_series,
@@ -225,6 +226,24 @@ def _empty_validation_topk_summary() -> dict[str, float | int]:
         "valid_top1_opportunity_rate": float("nan"),
         "valid_topk_opportunity_rate": float("nan"),
     }
+
+
+def _compute_rolling_window_indices(
+    full_calendar: pd.Series,
+    current_test_start: pd.Timestamp,
+    *,
+    train_days: int,
+    valid_days: int,
+    label_embargo_days: int,
+) -> tuple[int, int, int, int] | None:
+    full_start_idx = int(full_calendar.searchsorted(current_test_start))
+    valid_end_idx = full_start_idx - 1 - int(label_embargo_days)
+    valid_start_idx = valid_end_idx - int(valid_days) + 1
+    train_end_idx = valid_start_idx - 1
+    train_start_idx = train_end_idx - int(train_days) + 1
+    if valid_end_idx < 0 or valid_start_idx < 0 or train_end_idx < 0 or train_start_idx < 0:
+        return None
+    return train_start_idx, train_end_idx, valid_start_idx, valid_end_idx
 
 
 def _run_formula_score_window(
@@ -625,7 +644,13 @@ def generate_prediction_bundle(
     valid_days: int,
     signal_horizon: int,
     model_name: str,
+    label_embargo_days: int | None = None,
 ) -> PredictionBundle:
+    if label_embargo_days is None:
+        label_embargo_days = resolve_label_embargo_days(cfg, signal_horizon=signal_horizon)
+    label_embargo_days = int(label_embargo_days)
+    if label_embargo_days < 0:
+        raise ValueError("label_embargo_days must be >= 0")
     rolling_steps = range(0, len(runtime_data.test_calendar), retrain_step)
     all_predictions: list[pd.Series] = []
     feature_importance_frames: list[pd.DataFrame] = []
@@ -639,23 +664,31 @@ def generate_prediction_bundle(
     print(
         f"\n[Rolling Setup] Testing from {runtime_data.test_start.date()} to {runtime_data.test_end.date()} "
         f"| retrain_step={retrain_step}d | signal_horizon={signal_horizon}d | "
+        f"label_embargo={label_embargo_days}d | "
         f"rebalance={resolve_rebalance_freq(cfg, args)}d"
     )
+    if label_embargo_days < int(signal_horizon) + 1:
+        print(
+            "    [warning] rolling.label_embargo_days is shorter than signal_horizon + 1; "
+            "validation labels may overlap the test window."
+        )
     device = f"cuda:{args.gpu}" if args.gpu >= 0 and torch.cuda.is_available() else "cpu"
 
     for i, start_idx in enumerate(rolling_steps):
         current_test_start = runtime_data.test_calendar.iloc[start_idx]
         end_idx = min(start_idx + retrain_step - 1, len(runtime_data.test_calendar) - 1)
         current_test_end = runtime_data.test_calendar.iloc[end_idx]
-        full_start_idx = int(runtime_data.full_calendar.searchsorted(current_test_start))
-
-        valid_end_idx = full_start_idx - 1
-        valid_start_idx = valid_end_idx - valid_days + 1
-        train_end_idx = valid_start_idx - 1
-        train_start_idx = train_end_idx - train_days + 1
-        if valid_end_idx < 0 or valid_start_idx < 0 or train_end_idx < 0 or train_start_idx < 0:
+        window_indices = _compute_rolling_window_indices(
+            runtime_data.full_calendar,
+            current_test_start,
+            train_days=train_days,
+            valid_days=valid_days,
+            label_embargo_days=label_embargo_days,
+        )
+        if window_indices is None:
             print("    Skipping window: insufficient trading-day history for requested train/valid lengths.")
             continue
+        train_start_idx, train_end_idx, valid_start_idx, valid_end_idx = window_indices
 
         train_start = runtime_data.full_calendar.iloc[train_start_idx]
         train_end = runtime_data.full_calendar.iloc[train_end_idx]
@@ -684,6 +717,7 @@ def generate_prediction_bundle(
                 signal_horizon=signal_horizon,
             )
             if training_summary is not None:
+                training_summary["label_embargo_days"] = int(label_embargo_days)
                 training_summary_records.append(training_summary)
         elif model_name == "lgbm":
             pred_series, importance_df, training_summary = _run_lgbm_window(
@@ -708,6 +742,7 @@ def generate_prediction_bundle(
             if importance_df is not None:
                 feature_importance_frames.append(importance_df)
             if training_summary is not None:
+                training_summary["label_embargo_days"] = int(label_embargo_days)
                 training_summary_records.append(training_summary)
         else:
             pred_series = _run_lstm_window(
@@ -750,6 +785,7 @@ def generate_prediction_bundle(
             retrain_step=retrain_step,
             train_days=train_days,
             valid_days=valid_days,
+            label_embargo_days=label_embargo_days,
             runtime_data=runtime_data,
             model_name=model_name,
         ),

@@ -28,6 +28,28 @@ class ConfigValidationTest(unittest.TestCase):
 
             self.assertEqual(validated["experiment"]["profile"], "core_v4_lgbm_default_10x20x10")
 
+    def test_validate_training_config_defaults_label_embargo_to_label_exit_offset(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["rolling"]["label_embargo_days"], validated["label"]["signal_horizon"] + 1)
+
+    def test_validate_training_config_accepts_zero_label_embargo_for_legacy_runs(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["rolling"]["label_embargo_days"] = 0
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["rolling"]["label_embargo_days"], 0)
+
+    def test_validate_training_config_rejects_negative_label_embargo(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["rolling"]["label_embargo_days"] = -1
+
+        with self.assertRaisesRegex(ValueError, "rolling.label_embargo_days must be >= 0"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_rejects_invalid_strategy_shape(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["strategy"]["topk"] = 5

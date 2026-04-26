@@ -8,7 +8,7 @@ from src.experiment_store import (
     prepare_run_store,
     resolve_retrain_step,
 )
-from src.label_utils import get_label_column_name, resolve_signal_horizon
+from src.label_utils import get_label_column_name, resolve_label_embargo_days, resolve_signal_horizon
 from src.rolling_artifacts import (
     build_paths,
     ensure_output_dirs,
@@ -70,6 +70,7 @@ def run_rolling_pipeline() -> None:
     train_days = int(cfg.get("rolling", {}).get("train_days", args.train_days or 242))
     valid_days = int(cfg.get("rolling", {}).get("valid_days", args.valid_days or 10))
     signal_horizon = int(resolve_signal_horizon(cfg))
+    label_embargo_days = int(resolve_label_embargo_days(cfg, signal_horizon=signal_horizon))
     label_column = get_label_column_name(signal_horizon)
     backtest_label_column = get_label_column_name(1)
     model_name = cfg["model"]["name"]
@@ -97,6 +98,7 @@ def run_rolling_pipeline() -> None:
             valid_days=valid_days,
             label_column=label_column,
             backtest_label_column=backtest_label_column,
+            label_embargo_days=label_embargo_days,
         )
         bundle = generate_prediction_bundle(
             cfg,
@@ -107,6 +109,7 @@ def run_rolling_pipeline() -> None:
             train_days=train_days,
             valid_days=valid_days,
             signal_horizon=signal_horizon,
+            label_embargo_days=label_embargo_days,
             model_name=model_name,
         )
         if args.save_predictions:

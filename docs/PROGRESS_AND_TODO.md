@@ -33,8 +33,7 @@ What is true now:
 - The Tushare path currently stores symbol cache, trade calendar, raw market tables, and a first-pass normalized `hfq` combined parquet under `data/tushare/`
 - The Tushare collector now supports symbol-level incremental updates, lifecycle-aware completion checks, segmented long-history backfill, and stage cooldown after rate-limit errors
 - The native training/feature pipeline now accepts `data.source: tushare` and stores its factor cache under `data/factor_store/tushare_*`
-- The latest diagnosed Tushare full-factor store contains `432` factors, including `173` `TS_*` factors across flow/event, industry, dividend, valuation, quality, forecast, and express themes
-- The first two relative-factor batches expand generated Tushare full-factor space to `459` factors, including `200` `TS_*` factors, after the factor store is rebuilt
+- The current rebuilt Tushare full-factor store contains `517` factors across legacy, temporal, technical, Tushare, semantic, relative, dividend-quality, crowding, and low-volatility/liquidity themes
 - A first Tushare-specific feature family now exists, covering涨跌停结构, 自由流通占比, 自由换手, 市销率倒数, and股息率
 - Tushare side-input raw stages now include `fina_indicator`, `dividend`, `forecast`, and `express`
 - Tushare side-input features now include latest announced snapshots from `fina_indicator`, `dividend`, `forecast`, and `express`
@@ -45,7 +44,7 @@ What is true now:
 - Absolute factor-baseline performance is now a real research constraint: `rankic_weighted_factor` and `rank_zscore_avg_factor` must be treated as hard non-ML baselines, not only as auxiliary diagnostics
 - Latest full-space diagnostics show that `TS_dividend_*` and `TS_stock_vs_industry_*` retain signal best after industry neutralization
 - Latest full-space diagnostics also show that most pure `TS_industry_*` features and several absolute flow/event and valuation signals are largely industry / style exposure rather than clean within-industry stock alpha
-- The next factor-strength source batch now supports dividend cash payout / coverage, industry-relative dividend cash yield, relative crowding, relative liquidity-stress, and low-volatility/liquidity composite factors; packed Tushare source buckets and the factor store still need to be rebuilt before these factors are diagnosable
+- The factor-strength v8 source/factor-store batch is now rebuilt and diagnosable; promotion should depend on raw diagnostics, industry-neutral diagnostics, yearly stability, and whether simple non-ML sleeves can use the signal
 - Several `TS_exp_*` / `TS_latest_exp_*` features still have zero effective coverage in the current diagnostics range and should not be treated as validated alpha candidates yet
 - `src/probe_tushare.py` can be used to inspect real Tushare endpoint columns and latency before integrating new tables into the formal pipeline
 
@@ -177,7 +176,25 @@ system baseline for feature research.
 - [ ] Fix or quarantine `TS_sem_express_growth_quality_fresh` before using the full semantic profile; current diagnostics indicate the value path can collapse to all-zero / NaN-effective behavior
 - [ ] Keep `results/` ignored; preserve reproducibility through profile/config/source changes and use copied summary artifacts only when promoting to `candidate`
 
-### 0C. Code Quality And Reliability Cleanup
+### 0C. Candidate Training Health
+
+- [ ] Treat model-training health as a separate candidate gate from training target, feature set, and portfolio conversion
+- [ ] Add or maintain a compact training-health summary for each candidate:
+  - distribution of `best_iteration`
+  - share of windows with `best_iteration <= 10`, `<= 20`, and `<= 50`
+  - share of windows stopped before `100` and `200` iterations
+  - early-stopping metric name, `valid_days`, `early_stop`, `min_boost_round`, and `num_boost_round`
+  - duplicate `training_id` / reused model runs across candidate wrappers
+- [ ] Re-test the current `parent_rankic` / `filter_t55` family with training-only controls before changing objectives:
+  - current `valid_days = 10`, `early_stop = 10`, `min_boost_round = 0`
+  - wider validation windows such as `valid_days = 20` and `40`
+  - guarded boosting such as `min_boost_round = 50` or `100`
+  - lower learning rate only after the validation-window noise is understood
+- [ ] Stop treating very early stopping as automatically good or bad; require a follow-up check for whether it reflects stable validation saturation or noisy validation selection
+- [ ] Avoid using a 10-day top-k validation metric as the only training controller unless it beats a more stable controller in out-of-sample rolling comparison
+- [ ] Candidate archives should keep reproducibility artifacts such as `config_snapshot.yaml`, `manifest.json`, `training_summary.csv`, and readable summaries; large model files are not required
+
+### 0D. Code Quality And Reliability Cleanup
 
 - [ ] Treat this cleanup pass as reliability / maintainability work, not performance work
 - [ ] Remove research-critical silent fallback paths:
@@ -224,80 +241,6 @@ Current status:
 - [ ] Hidden legacy CLI flag cleanup is deferred until compatibility aliases are no longer needed
 - [x] Low-risk unused imports are removed without adding a lint dependency
 - [ ] Lint gate remains deferred until code movement stabilizes
-
-Detailed implementation plan:
-
-1. Silent fallback cleanup
-   - files: `src/rolling_evaluate.py`, `src/rolling_train.py`
-   - collect baseline reconstruction failures and opportunity-label failures into structured warnings
-   - expose warning records in run artifacts / manifests instead of only printing
-   - keep non-critical baseline reconstruction non-fatal at first, but make configured required paths explicit
-2. Industry group loading cleanup
-   - files: `src/rolling_train.py`, `src/rolling_evaluate.py`, `run_single_factor_diagnostics.py`
-   - add `src/industry_groups.py`
-   - centralize symbol-cache path resolution, industry parquet loading, and required-vs-optional behavior
-   - fail-fast when industry-neutral diagnostics are requested and groups cannot be loaded
-3. Forward horizon return cleanup
-   - files: `src/rolling_train.py`, `src/rolling_evaluate.py`, `run_single_factor_diagnostics.py`
-   - add `src/return_horizon.py`
-   - centralize `t+1 ... t+horizon` compound-return construction
-   - add tests for short input, NaN windows, index sorting, and horizon-one behavior
-4. Parquet dataset scan cleanup
-   - files: `src/factor_store.py`, `src/source_store.py`
-   - add `src/parquet_io.py`
-   - move shared Arrow dataset scan logic without changing scan parameters
-   - keep layout and manifest-specific decisions in factor/source store modules
-5. Profile resolution cleanup
-   - files: `src/feature_profiles.py`, `src/experiment_profiles.py`
-   - add a small shared profile helper only for inline path / inheritance mechanics
-   - leave feature-specific add/drop/repeat mutation local in `feature_profiles.py`
-6. `main.py` status cleanup
-   - files: `main.py`, `src/rolling_evaluate.py`
-   - first mark `main.py` as a legacy single-run entrypoint
-   - then extract common backtest kwargs / plot-report helpers so single and rolling paths do not drift
-7. Semantic factor missingness cleanup
-   - file: `src/feature_value_core.py`
-   - replace missing-as-neutral-zero composite components with explicit observed-component gating
-   - avoid adding new feature columns in the first pass unless tests show the coverage signal is necessary
-8. Valuation sentinel cleanup
-   - files: `src/feature_value_core.py`, `src/gen_feature.py`
-   - keep legacy `-1.0` columns initially for reproducibility
-   - add explicit invalid flags and clean NaN-preserving valuation variants before moving profiles to the clean variants
-9. Tushare bucket-source precondition cleanup
-   - file: `src/gen_feature.py`
-   - validate packed source schema before bucket-source factor generation
-   - record source-layout and sidecar assumptions in factor-store metadata
-10. Single-factor diagnostics runtime cleanup
-    - files: `run_single_factor_diagnostics.py`, `run_single_factor_diagnostics_batch.py`
-    - move period/segment/label-space/industry-neutral helpers into a `src/` module
-    - stop importing private helper functions from runnable scripts
-11. Candidate diagnostics shared utilities
-    - files: `run_candidate_pool_diagnostics.py`, `run_strategy_pair_diagnostics.py`, `src/candidate_profiles.py`
-    - centralize artifact readers, metric extraction, bucket shape, and feature-family classification
-12. Collector common parquet utilities
-    - files: `src/collector_tushare.py`, `src/collector_gm.py`, `src/collector_akshare.py`
-    - first extract only schema-neutral parquet / atomic-write helpers
-    - defer lifecycle and symbol-cache extraction until the low-level utility layer is stable
-13. Config validation split
-    - file: `src/config_validation.py`
-    - first centralize supported-mode constants
-    - later split domain validators while preserving `validate_training_config` as the public mutating entrypoint
-14. Backtest wrapper boundary cleanup
-    - files: `src/backtest_engine.py`, `src/native_backtest.py`, `src/backtest.py`, `main.py`, `src/rolling_evaluate.py`
-    - keep wrappers for compatibility
-    - keep canonical engine return column as `net_return`
-    - restrict legacy `return` aliasing to wrapper/report-preparation boundaries
-15. Legacy CLI / compatibility import cleanup
-    - files: `run_native_rolling.py`, `src/runtime_cli.py`, tests
-    - migrate tests away from underscored `run_native_rolling.py` aliases
-    - keep hidden legacy flags until test imports and documented commands no longer depend on them
-16. Unused import cleanup
-    - clean low-risk imports after shared helpers land
-    - do not run broad auto-formatting in this pass
-17. Lint gate
-    - defer dependency changes
-    - add `ruff` later only after code movement stabilizes
-    - start with unused import / broad exception / import sorting checks before considering format enforcement
 
 ### 1. Relative-Opportunity Research Track
 
@@ -432,7 +375,7 @@ Detailed implementation plan:
   - coverage / missingness
   - redundancy against already-promoted factors
 - [~] Build the next priority factor batch around stock-vs-industry relative structure instead of adding more absolute state features
-  Current state: first code batch is implemented for `20` / `60` day relative turnover, free-turnover, volume-ratio, Amihud, downside-Amihud, amplitude, and limit-hit deviation. The second source batch adds relative crowding, relative liquidity-stress, and low-volatility/liquidity composites; packed source and factor store still need to be rebuilt and diagnosed.
+  Current state: first code batch is implemented for `20` / `60` day relative turnover, free-turnover, volume-ratio, Amihud, downside-Amihud, amplitude, and limit-hit deviation. The second source batch adds relative crowding, relative liquidity-stress, and low-volatility/liquidity composites; packed source and factor store have been rebuilt, so the remaining work is diagnostics interpretation and profile curation.
   First batch should target:
   - stock-vs-industry turnover ratio
   - stock-vs-industry free-turnover ratio
@@ -463,7 +406,7 @@ Detailed implementation plan:
   - after changing industry-context columns, rebuild packed Tushare source buckets before rebuilding the factor store; otherwise the bucket-source path will keep old `ind_*` columns
   - validate this batch using full-space raw diagnostics and full-space industry-neutral diagnostics before adding any model sweep
 - [~] Build the next priority dividend-quality batch instead of only using dividend yield level
-  Current state: first feasible source batch is implemented for dividend cash payout / coverage, industry-relative dividend cash yield, dividend cash yield surprise, spread z-scores, and a conservative dividend cash-quality composite; packed source and factor store still need to be rebuilt and diagnosed.
+  Current state: first feasible source batch is implemented for dividend cash payout / coverage, industry-relative dividend cash yield, dividend cash yield surprise, spread z-scores, and a conservative dividend cash-quality composite; packed source and factor store have been rebuilt, so the remaining work is diagnostics interpretation and profile curation.
   First batch should target:
   - dividend-to-OCF
   - dividend-to-net-profit
@@ -479,7 +422,7 @@ Detailed implementation plan:
     - `dividend_yield_minus_industry_20`
   - defer true multi-year consistency / cut / resume factors until dividend event history is carried as an event-series feature instead of only a latest snapshot
 - [~] Replace absolute valuation emphasis with industry-relative valuation factors
-  Current state: first code batch is implemented for industry-relative `ep`, `sp`, `sp_ttm`, `bp`, `dividend_yield`, and `dividend_yield_ttm`; packed source and factor store still need to be rebuilt and diagnosed.
+  Current state: first code batch is implemented for industry-relative `ep`, `sp`, `sp_ttm`, `bp`, `dividend_yield`, and `dividend_yield_ttm`; packed source and factor store have been rebuilt, so the remaining work is diagnostics interpretation and profile curation.
   First batch should target:
   - `ep - industry_ep`
   - `sp - industry_sp`
@@ -582,7 +525,7 @@ Detailed implementation plan:
 - [ ] Add higher-slippage sensitivity experiments
 - [~] Add risk control experiments for lower turnover and lower drawdown
   Current state: signal-strength and benchmark-aware risk control modes are implemented and already in the current shortlist; realism and attribution work still remains.
-- [ ] Add embargo / gap controls between train, valid, and test windows to reduce boundary leakage in rolling runs
+- [x] Add rolling label embargo so validation labels must finish before the test window by default
 
 ### 11. Strategy Layer
 

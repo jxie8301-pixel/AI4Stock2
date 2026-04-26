@@ -451,6 +451,24 @@ def resolve_signal_horizon(cfg: dict | None = None) -> int:
     return normalize_signal_horizon(value, default=DEFAULT_SIGNAL_HORIZON)
 
 
+def resolve_label_embargo_days(cfg: dict | None = None, *, signal_horizon: int | None = None) -> int:
+    """Resolve the rolling label embargo needed for open-to-open labels."""
+    cfg = cfg or {}
+    if signal_horizon is None:
+        signal_horizon = resolve_signal_horizon(cfg)
+    rolling_cfg = cfg.get("rolling", {}) or {}
+    value = rolling_cfg.get("label_embargo_days")
+    if value is None:
+        return int(signal_horizon) + 1
+    try:
+        out = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("rolling.label_embargo_days must be an integer") from exc
+    if out < 0:
+        raise ValueError("rolling.label_embargo_days must be >= 0")
+    return out
+
+
 def resolve_label_horizons(cfg: dict | None = None) -> list[int]:
     """Resolve all realized-return horizons that should be materialized in factor storage."""
     cfg = cfg or {}

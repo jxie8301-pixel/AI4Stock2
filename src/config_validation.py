@@ -116,6 +116,7 @@ TOP_LEVEL_SCHEMA = {
         "retrain_step": None,
         "train_days": None,
         "valid_days": None,
+        "label_embargo_days": None,
     },
     "strategy": {
         "topk": None,
@@ -470,10 +471,16 @@ def validate_training_config(
             raise ValueError("label.train_transform.min_scale must be > 0")
         train_transform_cfg["min_scale"] = min_scale
 
-    rolling_cfg = cfg.get("rolling", {})
+    rolling_cfg = cfg.setdefault("rolling", {})
     retrain_step = _expect_positive_int(rolling_cfg.get("retrain_step"), "rolling.retrain_step")
     _expect_positive_int(rolling_cfg.get("train_days"), "rolling.train_days")
     _expect_positive_int(rolling_cfg.get("valid_days"), "rolling.valid_days")
+    label_embargo_days = rolling_cfg.get("label_embargo_days")
+    if label_embargo_days is None:
+        label_embargo_days = signal_horizon + 1
+    else:
+        label_embargo_days = _expect_nonnegative_int(label_embargo_days, "rolling.label_embargo_days")
+    rolling_cfg["label_embargo_days"] = label_embargo_days
 
     strategy_cfg = cfg.get("strategy", {})
     topk = _expect_positive_int(strategy_cfg.get("topk"), "strategy.topk")

@@ -104,6 +104,7 @@ Typical contents:
 - `rolling.retrain_step`
 - `rolling.train_days`
 - `rolling.valid_days`
+- `rolling.label_embargo_days`
 - `strategy.topk`
 - `strategy.n_drop`
 - `backtest.rebalance_freq`
@@ -126,6 +127,7 @@ To remove ambiguity, the following names are canonical:
 - `signal_horizon`: how far ahead the model predicts
 - `retrain_step`: how often the rolling model is retrained
 - `rebalance_freq`: how often the portfolio is rebalanced
+- `label_embargo_days`: how many trading days to leave between validation labels and the test window
 
 The name `horizon` by itself is ambiguous and should not be used in new configs,
 new CLI flags, manifests, or docs.

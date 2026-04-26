@@ -16,6 +16,7 @@ data-bk/
 # Results
 results/
 shortlists/
+.mpl-cache/
 *.log
 *.parquet
 *.csv

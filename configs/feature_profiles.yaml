@@ -363,6 +363,18 @@ profiles:
       - TS_stock_vs_industry_low_vol_liquidity_60
       - TS_sem_dividend_cash_quality
 
+  core_v8_dividend_cash_quality_sleeve_v1:
+    selected_columns:
+      - TS_sem_dividend_cash_quality
+      - TS_dividend_cash_yield_proxy
+      - TS_dividend_cash_yield_proxy_minus_industry
+      - TS_dividend_cash_to_eps
+
+  core_v8_crowding_guard_sleeve_v1:
+    selected_columns:
+      - TS_stock_vs_industry_crowding_20
+      - TS_stock_vs_industry_crowding_60
+
   core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_plus_relative_alpha_v1:
     extends: core_v4_techlite_tushare_plus_industry_excess_flow_value_slim_b_v1
     add_columns:

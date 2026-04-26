@@ -465,6 +465,37 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_low_vol_liquidity_60", profile["selected_columns"])
         self.assertIn(f"{TUSHARE_FACTOR_PREFIX}sem_dividend_cash_quality", profile["selected_columns"])
 
+    def test_core_v8_sleeve_profiles_are_registered(self):
+        dividend = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v8_dividend_cash_quality_sleeve_v1"},
+            }
+        )
+        crowding = resolve_feature_profile(
+            {
+                "data": {"source": "tushare"},
+                "features": {"profile": "core_v8_crowding_guard_sleeve_v1"},
+            }
+        )
+
+        self.assertEqual(
+            dividend["selected_columns"],
+            [
+                f"{TUSHARE_FACTOR_PREFIX}sem_dividend_cash_quality",
+                f"{TUSHARE_FACTOR_PREFIX}dividend_cash_yield_proxy",
+                f"{TUSHARE_FACTOR_PREFIX}dividend_cash_yield_proxy_minus_industry",
+                f"{TUSHARE_FACTOR_PREFIX}dividend_cash_to_eps",
+            ],
+        )
+        self.assertEqual(
+            crowding["selected_columns"],
+            [
+                f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_crowding_20",
+                f"{TUSHARE_FACTOR_PREFIX}stock_vs_industry_crowding_60",
+            ],
+        )
+
     def test_known_exact_duplicate_groups_cover_core_overlaps(self):
         duplicate_groups = get_known_exact_duplicate_feature_groups()
 

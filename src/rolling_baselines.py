@@ -27,6 +27,18 @@ def _global_test_mask(runtime_data: RollingRuntimeData) -> np.ndarray:
     return (runtime_data.dt_index >= runtime_data.test_start) & (runtime_data.dt_index <= runtime_data.test_end)
 
 
+def _label_embargo_train_mask(runtime_data: RollingRuntimeData, *, label_embargo_days: int = 0) -> np.ndarray:
+    label_embargo_days = int(label_embargo_days)
+    if label_embargo_days < 0:
+        raise ValueError("label_embargo_days must be >= 0")
+    test_start_idx = int(runtime_data.full_calendar.searchsorted(runtime_data.test_start))
+    train_end_idx = test_start_idx - 1 - label_embargo_days
+    if train_end_idx < 0:
+        return np.zeros(len(runtime_data.dt_index), dtype=bool)
+    train_end = runtime_data.full_calendar.iloc[train_end_idx]
+    return runtime_data.dt_index <= train_end
+
+
 def _build_prediction_series(
     scores: pd.Series,
     runtime_data: RollingRuntimeData,
@@ -169,13 +181,14 @@ def build_average_factor_baseline_predictions(
 
 def build_sign_aligned_factor_baseline_predictions(
     runtime_data: RollingRuntimeData,
+    *,
+    label_embargo_days: int = 0,
 ) -> pd.Series | None:
     unique_source_columns = _unique_source_columns(runtime_data)
     if not unique_source_columns:
         return None
 
-    train_end = runtime_data.test_start - pd.Timedelta(days=1)
-    train_mask = runtime_data.dt_index <= train_end
+    train_mask = _label_embargo_train_mask(runtime_data, label_embargo_days=label_embargo_days)
     if not np.any(train_mask):
         return None
     global_test_mask = _global_test_mask(runtime_data)
@@ -239,6 +252,8 @@ def build_rank_average_factor_baseline_predictions(
 
 def build_rank_ic_weighted_factor_baseline_predictions(
     runtime_data: RollingRuntimeData,
+    *,
+    label_embargo_days: int = 0,
 ) -> pd.Series | None:
     global_test_mask = _global_test_mask(runtime_data)
     if not np.any(global_test_mask):
@@ -247,7 +262,8 @@ def build_rank_ic_weighted_factor_baseline_predictions(
     if not unique_source_columns:
         return None
 
-    weights = _compute_train_rank_ic_weights(runtime_data, unique_source_columns)
+    train_mask = _label_embargo_train_mask(runtime_data, label_embargo_days=label_embargo_days)
+    weights = _compute_train_rank_ic_weights(runtime_data, unique_source_columns, train_mask=train_mask)
     weights = weights.reindex(unique_source_columns).fillna(0.0)
     if weights.abs().sum() <= 0.0:
         return None

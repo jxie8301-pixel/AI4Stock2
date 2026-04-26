@@ -202,7 +202,10 @@ def evaluate_prediction_bundle(
     if sign_aligned_factor_baseline_predictions is None:
         try:
             runtime_data = _ensure_runtime_data()
-            sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(runtime_data)
+            sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(
+                runtime_data,
+                label_embargo_days=label_embargo_days,
+            )
         except Exception as exc:
             _append_run_warning(
                 run_warnings,
@@ -230,6 +233,7 @@ def evaluate_prediction_bundle(
             runtime_data = _ensure_runtime_data()
             rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(
                 runtime_data,
+                label_embargo_days=label_embargo_days,
             )
         except Exception as exc:
             _append_run_warning(

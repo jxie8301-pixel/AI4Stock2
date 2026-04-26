@@ -769,9 +769,15 @@ def generate_prediction_bundle(
     final_predictions = pd.concat(all_predictions).sort_index()
     label_series, backtest_label_series = build_label_series(runtime_data)
     avg_factor_baseline_predictions = build_average_factor_baseline_predictions(runtime_data)
-    sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(runtime_data)
+    sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(
+        runtime_data,
+        label_embargo_days=label_embargo_days,
+    )
     rank_avg_factor_baseline_predictions = build_rank_average_factor_baseline_predictions(runtime_data)
-    rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(runtime_data)
+    rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(
+        runtime_data,
+        label_embargo_days=label_embargo_days,
+    )
     return PredictionBundle(
         final_predictions=final_predictions,
         label_series=label_series,

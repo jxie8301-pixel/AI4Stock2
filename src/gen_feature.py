@@ -616,6 +616,15 @@ def _ensure_tushare_industry_context_cache(parquet_dir: Path) -> Path:
     return _build_tushare_industry_context_cache(parquet_dir)
 
 
+def _as_datetime64ns_index(values: object) -> pd.DatetimeIndex:
+    return pd.DatetimeIndex(pd.to_datetime(values, errors="coerce")).astype("datetime64[ns]")
+
+
+def _as_datetime64ns_series(values: object, *, name: str = "date") -> pd.Series:
+    series = pd.Series(pd.to_datetime(values, errors="coerce"), name=name)
+    return series.astype("datetime64[ns]")
+
+
 def _load_tushare_sidecar_features(
     symbol: str,
     date_index: pd.DatetimeIndex,
@@ -653,12 +662,12 @@ def _load_tushare_sidecar_features(
         return None
 
     frame = frame.copy()
-    frame["ann_date"] = pd.to_datetime(frame["ann_date"], errors="coerce")
+    frame["ann_date"] = _as_datetime64ns_series(frame["ann_date"], name="ann_date")
     frame = frame.dropna(subset=["ann_date"]).sort_values("ann_date")
     if frame.empty:
         return None
 
-    trading_dates = pd.DatetimeIndex(pd.to_datetime(date_index)).dropna().unique().sort_values()
+    trading_dates = _as_datetime64ns_index(date_index).dropna().unique().sort_values()
     if trading_dates.empty:
         return None
     available_positions = trading_dates.searchsorted(frame["ann_date"], side="right")
@@ -674,7 +683,7 @@ def _load_tushare_sidecar_features(
         right[col] = pd.to_numeric(right[col], errors="coerce")
     right = right.rename(columns=dict(available_pairs))
 
-    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
+    left = pd.DataFrame({"date": _as_datetime64ns_series(date_index)}).sort_values("date")
     merged = pd.merge_asof(
         left,
         right.sort_values("available_date"),
@@ -740,7 +749,12 @@ def _load_tushare_industry_features(symbol: str, date_index: pd.DatetimeIndex) -
         return None
     if right.empty:
         return None
-    left = pd.DataFrame({"date": pd.to_datetime(date_index)}).sort_values("date")
+    right = right.copy()
+    right["date"] = _as_datetime64ns_series(right["date"])
+    right = right.dropna(subset=["date"]).sort_values("date")
+    if right.empty:
+        return None
+    left = pd.DataFrame({"date": _as_datetime64ns_series(date_index)}).sort_values("date")
     merged = pd.merge_asof(left, right, on="date", direction="backward")
     merged = merged.set_index("date")
     columns = _get_tushare_industry_context_feature_cols()
@@ -758,7 +772,7 @@ def _augment_tushare_symbol_frame(
     out = df.copy()
     if "date" not in out.columns:
         return out
-    date_index = pd.DatetimeIndex(pd.to_datetime(out["date"]))
+    date_index = _as_datetime64ns_index(out["date"])
     sidecar_frames: list[pd.DataFrame] = []
     for loader in (
         _load_tushare_fina_indicator_features,

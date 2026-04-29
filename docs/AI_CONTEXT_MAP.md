@@ -20,8 +20,7 @@ The stable research path today is:
 At the same time, the data layer is actively being migrated:
 
 1. `src/collector_tushare.py` is the leading replacement candidate for daily market data
-2. `src/collector_gm.py` remains an isolated raw-retention + normalization path for comparison and backup coverage
-3. Tushare is not yet the default research source because the canonical normalized schema and formal workflow wiring are still in progress
+2. Tushare is not yet the default research source because the canonical normalized schema and formal workflow wiring are still in progress
 
 ## Active Workflow
 
@@ -29,7 +28,6 @@ At the same time, the data layer is actively being migrated:
 
 - Stable source of truth today: `data/processed/combined/*.parquet`
 - Stable updater today: `src/collector_akshare.py`
-- Isolated GM path: `data/gm/raw/*` -> `data/gm/processed/combined/*.parquet`
 - Isolated Tushare path: `data/tushare/raw/*` -> `data/tushare/processed/combined/*.parquet`
 - Migration target: promote one canonical Tushare-normalized `combined` schema into the formal research workflow
 - Native feature-cache builder: `src/gen_feature.py`
@@ -37,7 +35,6 @@ At the same time, the data layer is actively being migrated:
 Current collector roles:
 
 - `src/collector_akshare.py`: legacy Eastmoney-compatible update path for the current default research dataset
-- `src/collector_gm.py`: GM raw endpoint preservation plus second-pass normalization
 - `src/collector_tushare.py`: lifecycle-aware symbol-by-symbol incremental collector with segmented backfill and stage cooldown scheduling
 - `src/probe_tushare.py`: endpoint probe for schema/latency inspection before formal integration
 
@@ -98,7 +95,6 @@ AI4Stock2/
 │   └── USER_GUIDE.md
 ├── src/
 │   ├── collector_akshare.py
-│   ├── collector_gm.py
 │   ├── collector_tushare.py
 │   ├── config_loader.py
 │   ├── data_source.py
@@ -139,7 +135,7 @@ AI4Stock2/
 - If you change feature profile, you do not rebuild the cache.
 - If you only change model profile, you do not rebuild the cache.
 - `gen_feature.py` should remain detached from feature/model/experiment profiles.
-- When validating GM or Tushare, keep their normalized parquet under their own directories until the canonical schema switch is finished.
+- When validating Tushare, keep its normalized parquet under its own directory until the canonical schema switch is finished.
 - Use this document for structure.
 - Use `docs/CONFIG_PROFILE_ARCHITECTURE.md` for the canonical layering rules.
 - Use `docs/USER_GUIDE.md` for commands.

@@ -185,6 +185,70 @@ class ConfigValidationTest(unittest.TestCase):
 
         self.assertEqual(validated["lgbm"]["validation_topk"], 12)
 
+    def test_validate_training_config_accepts_lgbm_cuda_params(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"].update(
+            {
+                "device_type": "CUDA",
+                "max_bin": 63,
+                "gpu_device_id": 0,
+                "num_gpu": 1,
+                "is_enable_sparse": "false",
+                "num_threads": 3,
+            }
+        )
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["lgbm"]["device_type"], "cuda")
+        self.assertEqual(validated["lgbm"]["max_bin"], 63)
+        self.assertEqual(validated["lgbm"]["gpu_device_id"], 0)
+        self.assertEqual(validated["lgbm"]["num_gpu"], 1)
+        self.assertIs(validated["lgbm"]["is_enable_sparse"], False)
+        self.assertEqual(validated["lgbm"]["num_threads"], 3)
+
+    def test_validate_training_config_accepts_lgbm_cuda_fast_profile(self):
+        cfg = load_config(
+            "configs/config.yaml",
+            experiment_profile_name="core_v4_lgbm_default_10x20x10",
+            model_profile_name="lgbm_cuda_fast",
+        )
+
+        validated = validate_training_config(cfg, check_paths=False)
+
+        self.assertEqual(validated["model"]["profile"], "lgbm_cuda_fast")
+        self.assertEqual(validated["lgbm"]["device_type"], "cuda")
+        self.assertEqual(validated["lgbm"]["num_threads"], 3)
+        self.assertEqual(validated["lgbm"]["max_bin"], 63)
+        self.assertIs(validated["lgbm"]["is_enable_sparse"], False)
+
+    def test_validate_training_config_rejects_invalid_lgbm_device_type(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg.setdefault("lgbm", {})
+        cfg["lgbm"]["device_type"] = "demo"
+
+        with self.assertRaisesRegex(ValueError, "lgbm.device_type must be one of"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_requires_explicit_gpu_max_bin(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["lgbm"]["device_type"] = "cuda"
+        cfg["lgbm"]["num_threads"] = 3
+        cfg["lgbm"].pop("max_bin", None)
+
+        with self.assertRaisesRegex(ValueError, "lgbm.max_bin must be set explicitly"):
+            validate_training_config(cfg, check_paths=False)
+
+    def test_validate_training_config_rejects_high_cuda_threads(self):
+        cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
+        cfg["lgbm"]["device_type"] = "cuda"
+        cfg["lgbm"]["max_bin"] = 63
+        cfg["lgbm"]["num_threads"] = 24
+
+        with self.assertRaisesRegex(ValueError, "lgbm.num_threads must be <= 8"):
+            validate_training_config(cfg, check_paths=False)
+
     def test_validate_training_config_accepts_validation_metric_risk_control(self):
         cfg = load_config("configs/config.yaml", experiment_profile_name="core_v4_lgbm_default_10x20x10")
         cfg["backtest"]["risk_control"] = {

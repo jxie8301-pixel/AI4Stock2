@@ -1,6 +1,7 @@
 # Python-generated files
 __pycache__/
 *.py[oc]
+.pytest_cache/
 build/
 dist/
 wheels/
@@ -8,6 +9,7 @@ wheels/
 
 # Virtual environments
 .venv
+.uv-cache/
 
 # Data files
 data/
@@ -38,3 +40,6 @@ fetch_fails_v2.log
 check_dataset.py
 mlruns/
 GEMINI.md
+# pixi environments
+.pixi/*
+!.pixi/config.toml

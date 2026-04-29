@@ -2,10 +2,9 @@
 
 ## 1. 数据准备 (Data Preparation)
 
-本项目当前同时保留三条数据源路径：
+本项目当前保留两条数据源路径：
 
 - `akshare` / 东财：历史主路径，当前仍可用于旧数据兼容
-- `GM`：独立 raw 保留 + 二次规范化路径
 - `Tushare`：新的主替代候选，当前已经可以独立抓取和增量更新
 
 你需要手动执行数据同步。
@@ -16,11 +15,7 @@
 
 两种方案不要混用；每次运行只选其一。
 
-如果你要试验 GM 数据源，当前建议走“全量 raw 保留 + 二次规范化”的独立目录，不要和东财数据混写。GM 路径当前使用：
-- raw: `data/gm/raw/...`
-- normalized parquet: `data/gm/processed/combined/...`
-
-如果你要试验或逐步切换到 Tushare，当前同样建议走独立目录，不要和东财 / GM 混写。Tushare 路径当前使用：
+如果你要试验或逐步切换到 Tushare，当前建议走独立目录，不要和东财混写。Tushare 路径当前使用：
 - raw: `data/tushare/raw/...`
 - normalized parquet: `data/tushare/processed/combined/...`
 
@@ -98,44 +93,6 @@ uv run python -m src.collector_akshare --rebuild-processed --workers 8
 如需构建或刷新常用股票池文件：
 ```bash
 uv run python -m src.build_universes
-```
-
-### GM 数据采集
-GM 路径会先保留各个 endpoint 的完整原始字段，再输出一份给 native pipeline 使用的规范化 parquet。
-
-运行前先在 shell 里注入 token：
-```bash
-export GM_TOKEN=<YOUR_TOKEN>
-```
-
-全量或缓存股票池更新：
-```bash
-uv run python -m src.collector_gm --all --workers 8 --end-date 2026-03-31
-```
-
-只刷新 GM 股票列表缓存：
-```bash
-uv run python -m src.collector_gm --refresh-symbols-only
-```
-
-只用本地 raw 重建 GM 规范化 parquet：
-```bash
-uv run python -m src.collector_gm --rebuild-processed --workers 8
-```
-
-GM raw 目录当前拆分为：
-- `data/gm/raw/bars_raw/`
-- `data/gm/raw/symbol_day/`
-- `data/gm/raw/daily_basic/`
-- `data/gm/raw/daily_mktvalue/`
-- `data/gm/raw/daily_valuation/`
-
-当前默认 GM 路径只依赖你已验证可用的免费接口。
-`stk_get_adj_factor` 属于付费增值接口，因此当前 collector 不再把它作为必需步骤；免费 `get_history_symbol` 返回的 `adj_factor` 会保留在 `symbol_day` 和规范化 parquet 里。
-
-如果你要基于 GM 的规范化 parquet 生成因子库，直接显式指定输入目录：
-```bash
-uv run python -m src.gen_feature --parquet-dir data/gm/processed/combined --output-dir data/factor_store/gm_full_factor_space --workers 8
 ```
 
 ### Tushare 数据采集

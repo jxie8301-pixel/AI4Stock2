@@ -10,6 +10,9 @@ profiles:
   lgbm_fast:
     path: configs/models/lgbm_fast.yaml
 
+  lgbm_cuda_fast:
+    path: configs/models/lgbm_cuda_fast.yaml
+
   lgbm_regularized:
     path: configs/models/lgbm_regularized.yaml
 

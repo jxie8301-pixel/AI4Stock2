@@ -27,7 +27,6 @@ What is true now:
 - Valuation, share-count, and `当日涨跌幅` coverage begins around `2018-01-02` in the current Eastmoney parquet sample
 - The current collector downcasts `int64 -> int32` blindly; some Eastmoney share-count fields already overflow to negative values and must be fixed before direct use
 - The current research default should stay on `hfq`; `qfq` should not be the default because it can leak future corporate-action adjustments into historical rows
-- A first GM data path should preserve full raw endpoint fields first, then derive normalized parquet as a second step
 - A first Tushare-native collector now exists under `src/collector_tushare.py`
 - The Tushare path currently stores symbol cache, trade calendar, raw market tables, and a first-pass normalized `hfq` combined parquet under `data/tushare/`
 - The Tushare collector now supports symbol-level incremental updates, lifecycle-aware completion checks, segmented long-history backfill, and stage cooldown after rate-limit errors
@@ -58,7 +57,7 @@ What is true now:
 Active migration note:
 
 - `src/collector_tushare.py` is now the active research data path for the native pipeline.
-- `akshare` and `gm` should remain selectable comparison / fallback sources until the shared collector utility layer is cleaned up.
+- `akshare` should remain the compatibility source while `tushare` is the active research data path.
 
 ## Current Technical Priorities
 
@@ -398,7 +397,7 @@ Current status:
 - [x] Run the first Tushare-native rolling baseline before adding more tables
 - [x] Remove `main.py` and keep new training/backtest modes on the rolling runtime path
 - [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
-- [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py`, `collector_gm.py`, and `collector_tushare.py` stop diverging
+- [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py` and `collector_tushare.py` stop diverging
 - [ ] Upgrade training-time transforms from ad-hoc functions to a real fit/transform pipeline before adding more transform combinations
 
 ### 7. LightGBM Feature Research
@@ -555,11 +554,7 @@ Current status:
 
 ### 9. Native Data Quality
 
-- [x] Stand up a GM-native collector that stores full raw endpoint fields under `data/gm/raw/` before any schema reduction
-- [x] Add GM lifecycle-aware precheck with `effective_end_date` so delisted symbols do not stay pending forever
 - [x] Harden collector parquet writes with atomic replace and safe reads for broken/zero-byte files
-- [ ] Define the canonical GM-to-native mapping for `circ_mv`, `circ_share`, `pb`, `pcf`, and `ps`
-- [ ] Compare GM vs Eastmoney coverage, freshness, and field stability over the same sample
 - [ ] Add a feature coverage report during cache generation
 - [ ] Add per-feature NaN / inf diagnostics to `meta.json`
 - [ ] Add a cache validation command for shape, names, coverage, and label sanity

@@ -25,7 +25,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experiment-profile", required=True, help="Base experiment profile")
     parser.add_argument("--model-profile", help="Override model profile")
     parser.add_argument("--feature-profile", help="Override feature profile")
-    parser.add_argument("--data-source", choices=["akshare", "gm", "tushare"], help="Override data source")
+    parser.add_argument("--data-source", choices=["akshare", "tushare"], help="Override data source")
     parser.add_argument(
         "--set",
         action="append",

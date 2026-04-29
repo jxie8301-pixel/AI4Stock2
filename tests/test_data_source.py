@@ -27,12 +27,11 @@ class DataSourceTest(unittest.TestCase):
             "data/factor_store/tushare_full_factor_space",
         )
 
-    def test_gm_defaults_resolve_expected_paths(self):
-        self.assertEqual(get_default_parquet_dir("gm"), "data/gm/processed/combined")
-        self.assertEqual(
-            get_default_factor_store_dir("gm", "full_factor_space"),
-            "data/factor_store/gm_full_factor_space",
-        )
+    def test_gm_is_no_longer_a_supported_data_source(self):
+        with self.assertRaisesRegex(ValueError, "Unsupported data source"):
+            get_default_parquet_dir("gm")
+        with self.assertRaisesRegex(ValueError, "Unsupported data source"):
+            get_default_factor_store_dir("gm", "full_factor_space")
 
 
 if __name__ == "__main__":

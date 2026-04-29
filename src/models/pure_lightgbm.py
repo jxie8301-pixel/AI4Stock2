@@ -349,6 +349,17 @@ def _should_use_direct_ranking_relevance_labels(
     return 2 <= unique_values.size <= int(max_unique_values)
 
 
+_LGBM_PASSTHROUGH_PARAMS = {
+    "device_type",
+    "max_bin",
+    "gpu_platform_id",
+    "gpu_device_id",
+    "gpu_use_dp",
+    "num_gpu",
+    "is_enable_sparse",
+}
+
+
 class NativeLGBM:
     """Native LightGBM wrapper mimicking the interface expected by our pipeline."""
 
@@ -433,6 +444,9 @@ class NativeLGBM:
             "verbosity": -1,
             "seed": seed,
         }
+        for param_name in _LGBM_PASSTHROUGH_PARAMS:
+            if kwargs.get(param_name) is not None:
+                self.params[param_name] = kwargs[param_name]
         if objective == "huber":
             self.params["alpha"] = alpha
         self.early_stop = early_stop
@@ -729,6 +743,18 @@ class NativeLGBM:
     def get_training_summary(self) -> dict[str, Any]:
         """Return a compact summary of the recorded training history."""
         summary: dict[str, Any] = {}
+        for param_name in (
+            "device_type",
+            "max_bin",
+            "gpu_platform_id",
+            "gpu_device_id",
+            "gpu_use_dp",
+            "num_gpu",
+            "is_enable_sparse",
+            "num_threads",
+        ):
+            if param_name in self.params:
+                summary[f"lgbm_{param_name}"] = self.params[param_name]
         history = self.get_training_history_frame()
         if not history.empty:
             summary["num_iterations"] = int(history["iteration"].iloc[-1])

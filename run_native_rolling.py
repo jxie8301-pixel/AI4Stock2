@@ -35,7 +35,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--horizon", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--train-days", type=int, help="Training window length in trading days. If omitted, use config value.")
     parser.add_argument("--valid-days", type=int, help="Validation window length in trading days. If omitted, use config value.")
-    parser.add_argument("--gpu", type=int, default=0, help="GPU device id")
+    parser.add_argument(
+        "--torch-gpu",
+        dest="torch_gpu",
+        type=int,
+        default=0,
+        help="CUDA device id for native LSTM only. LightGBM GPU/CUDA is configured through lgbm.device_type.",
+    )
+    parser.add_argument("--gpu", dest="torch_gpu", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
     parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step")
     parser.add_argument(

@@ -1,0 +1,27 @@
+model:
+  name: lgbm
+  batch_size: 4096
+  n_jobs: 1
+
+lgbm:
+  loss: huber
+  learning_rate: 0.10
+  num_boost_round: 400
+  early_stop: 20
+  early_stopping_min_delta: 0.0
+  log_evaluation_period: 50
+  colsample_bytree: 0.85
+  subsample: 0.85
+  subsample_freq: 1
+  lambda_l1: 1.0
+  lambda_l2: 1.0
+  max_depth: 6
+  num_leaves: 31
+  min_data_in_leaf: 150
+  num_threads: 3
+  device_type: cuda
+  max_bin: 63
+  gpu_device_id: 0
+  num_gpu: 1
+  is_enable_sparse: false
+  seed: 42

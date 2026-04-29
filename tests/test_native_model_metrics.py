@@ -77,6 +77,24 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(rank_model.params["objective"], "rank_xendcg")
         self.assertEqual(custom_model.params["metric"], "rmse")
 
+    def test_native_lgbm_passes_device_params_to_lightgbm(self):
+        model = NativeLGBM(
+            loss="mse",
+            device_type="cuda",
+            max_bin=63,
+            gpu_device_id=0,
+            num_gpu=1,
+            is_enable_sparse=False,
+            num_threads=4,
+        )
+
+        self.assertEqual(model.params["device_type"], "cuda")
+        self.assertEqual(model.params["max_bin"], 63)
+        self.assertEqual(model.params["gpu_device_id"], 0)
+        self.assertEqual(model.params["num_gpu"], 1)
+        self.assertIs(model.params["is_enable_sparse"], False)
+        self.assertEqual(model.params["num_threads"], 4)
+
     def test_daily_rank_ic_metric_uses_cross_sectional_spearman_mean(self):
         predictions = np.array([1.0, 2.0, 1.0, 2.0], dtype=np.float32)
         labels = np.array([1.0, 2.0, 2.0, 1.0], dtype=np.float32)
@@ -400,6 +418,16 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(lgbm_cfg["num_threads"], 6)
         self.assertEqual(lgbm_cfg["validation_topk"], 7)
         self.assertEqual(lgbm_cfg["early_stop"], 12)
+
+    def test_get_lgbm_config_does_not_inherit_model_n_jobs(self):
+        cfg = {
+            "model": {"early_stop": 12, "n_jobs": 24},
+            "lgbm": {"loss": "huber"},
+        }
+
+        lgbm_cfg = get_lgbm_config(cfg)
+
+        self.assertNotIn("num_threads", lgbm_cfg)
 
     def test_align_prediction_label_pairs_drops_nan_rows(self):
         index = pd.MultiIndex.from_tuples(

@@ -37,8 +37,8 @@ def load_universe_table(universe_name: str, universe_dir: str | Path = DEFAULT_U
 
     if table.shape[1] == 1:
         table.columns = ["symbol"]
-        table["start_date"] = pd.Timestamp.min.normalize()
-        table["end_date"] = pd.Timestamp.max.normalize()
+        table["start_date"] = pd.NaT
+        table["end_date"] = pd.NaT
     elif table.shape[1] >= 3:
         table = table.iloc[:, :3].copy()
         table.columns = ["symbol", "start_date", "end_date"]
@@ -47,9 +47,15 @@ def load_universe_table(universe_name: str, universe_dir: str | Path = DEFAULT_U
 
     table["symbol"] = table["symbol"].map(_normalize_symbol)
     table = table[table["symbol"] != ""].copy()
-    table["start_date"] = pd.to_datetime(table["start_date"], errors="coerce").fillna(pd.Timestamp.min.normalize())
-    table["end_date"] = pd.to_datetime(table["end_date"], errors="coerce").fillna(pd.Timestamp.max.normalize())
+    table["start_date"] = pd.to_datetime(table["start_date"], errors="coerce")
+    table["end_date"] = pd.to_datetime(table["end_date"], errors="coerce")
     return table
+
+
+def _timestamp_ns_or_none(value: object) -> int | None:
+    if pd.isna(value):
+        return None
+    return int(pd.Timestamp(value).value)
 
 
 def build_universe_mask(
@@ -67,11 +73,11 @@ def build_universe_mask(
     for sym_key, sid in symbol_to_id.items():
         normalized_symbol_to_ids.setdefault(_normalize_symbol(sym_key), []).append(int(sid))
 
-    intervals_by_sid: dict[int, list[tuple[int, int]]] = {}
+    intervals_by_sid: dict[int, list[tuple[int | None, int | None]]] = {}
     for _, row in table.iterrows():
         symbol = row["symbol"]
-        start_ns = int(pd.Timestamp(row["start_date"]).value)
-        end_ns = int(pd.Timestamp(row["end_date"]).value)
+        start_ns = _timestamp_ns_or_none(row["start_date"])
+        end_ns = _timestamp_ns_or_none(row["end_date"])
         for sid in normalized_symbol_to_ids.get(symbol, []):
             intervals_by_sid.setdefault(sid, []).append((start_ns, end_ns))
 
@@ -86,7 +92,12 @@ def build_universe_mask(
         sid_dates = dates_ns[sid_mask]
         sid_valid = np.zeros(sid_dates.shape[0], dtype=bool)
         for start_ns, end_ns in intervals:
-            sid_valid |= (sid_dates >= start_ns) & (sid_dates <= end_ns)
+            interval_valid = np.ones(sid_dates.shape[0], dtype=bool)
+            if start_ns is not None:
+                interval_valid &= sid_dates >= start_ns
+            if end_ns is not None:
+                interval_valid &= sid_dates <= end_ns
+            sid_valid |= interval_valid
         mask[sid_mask] = sid_valid
 
     return mask
@@ -117,7 +128,12 @@ def build_universe_frame_mask(
         symbol_dates = dates_arr[symbol_mask]
         symbol_valid = np.zeros(symbol_dates.shape[0], dtype=bool)
         for start_date, end_date in intervals:
-            symbol_valid |= (symbol_dates >= start_date) & (symbol_dates <= end_date)
+            interval_valid = np.ones(symbol_dates.shape[0], dtype=bool)
+            if not pd.isna(start_date):
+                interval_valid &= symbol_dates >= start_date
+            if not pd.isna(end_date):
+                interval_valid &= symbol_dates <= end_date
+            symbol_valid |= interval_valid
         mask[np.where(symbol_mask)[0]] = symbol_valid
 
     if not np.any(mask):

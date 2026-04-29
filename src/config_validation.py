@@ -87,6 +87,13 @@ TOP_LEVEL_SCHEMA = {
         "num_leaves": None,
         "min_data_in_leaf": None,
         "num_threads": None,
+        "device_type": None,
+        "max_bin": None,
+        "gpu_platform_id": None,
+        "gpu_device_id": None,
+        "gpu_use_dp": None,
+        "num_gpu": None,
+        "is_enable_sparse": None,
         "seed": None,
         "eval_metric": None,
         "alpha": None,
@@ -279,6 +286,7 @@ LGBM_EARLY_STOPPING_METRICS = {
     "valid_topk_excess_mean",
 }
 LGBM_SAMPLE_WEIGHT_MODES = {"none", "opportunity_distance"}
+LGBM_DEVICE_TYPES = {"cpu", "gpu", "cuda"}
 BUYABILITY_TRAIN_TRANSFORM_MODES = {"buyability_binary", "buyability_margin_binary"}
 BUYABILITY_OPPORTUNITY_MODES = {"positive", "threshold", "industry_excess", "benchmark_excess"}
 FORMULA_SCORE_MODES = {"rank_avg", "sign_aligned_rank_avg", "rank_ic_weighted"}
@@ -347,6 +355,18 @@ def _expect_positive_float(value: Any, field: str) -> float:
     if out <= 0:
         raise ValueError(f"{field} must be > 0")
     return out
+
+
+def _expect_bool(value: Any, field: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    raise ValueError(f"{field} must be a boolean")
 
 
 def _expect_split_dates(value: Any, field: str) -> tuple[pd.Timestamp, pd.Timestamp]:
@@ -975,7 +995,39 @@ def validate_training_config(
         if validation_topk is not None:
             lgbm_cfg["validation_topk"] = _expect_positive_int(validation_topk, "lgbm.validation_topk")
         _expect_positive_int(lgbm_cfg.get("log_evaluation_period"), "lgbm.log_evaluation_period")
-        _expect_positive_int(lgbm_cfg.get("num_threads"), "lgbm.num_threads")
+        num_threads = _expect_positive_int(lgbm_cfg.get("num_threads"), "lgbm.num_threads")
+        lgbm_cfg["num_threads"] = num_threads
+        device_type = lgbm_cfg.get("device_type")
+        if device_type is not None:
+            device_type = str(device_type).strip().lower()
+            if device_type not in LGBM_DEVICE_TYPES:
+                raise ValueError(f"lgbm.device_type must be one of: {_format_modes(LGBM_DEVICE_TYPES)}")
+            lgbm_cfg["device_type"] = device_type
+        if device_type in {"gpu", "cuda"} and lgbm_cfg.get("max_bin") is None:
+            raise ValueError("lgbm.max_bin must be set explicitly when lgbm.device_type is gpu or cuda")
+        if device_type == "cuda" and num_threads > 8:
+            raise ValueError("lgbm.num_threads must be <= 8 when lgbm.device_type == 'cuda'")
+        if lgbm_cfg.get("max_bin") is not None:
+            lgbm_cfg["max_bin"] = _expect_positive_int(lgbm_cfg["max_bin"], "lgbm.max_bin")
+        if lgbm_cfg.get("gpu_platform_id") is not None:
+            lgbm_cfg["gpu_platform_id"] = _expect_nonnegative_int(
+                lgbm_cfg["gpu_platform_id"],
+                "lgbm.gpu_platform_id",
+            )
+        if lgbm_cfg.get("gpu_device_id") is not None:
+            lgbm_cfg["gpu_device_id"] = _expect_nonnegative_int(
+                lgbm_cfg["gpu_device_id"],
+                "lgbm.gpu_device_id",
+            )
+        if lgbm_cfg.get("gpu_use_dp") is not None:
+            lgbm_cfg["gpu_use_dp"] = _expect_bool(lgbm_cfg["gpu_use_dp"], "lgbm.gpu_use_dp")
+        if lgbm_cfg.get("num_gpu") is not None:
+            lgbm_cfg["num_gpu"] = _expect_positive_int(lgbm_cfg["num_gpu"], "lgbm.num_gpu")
+        if lgbm_cfg.get("is_enable_sparse") is not None:
+            lgbm_cfg["is_enable_sparse"] = _expect_bool(
+                lgbm_cfg["is_enable_sparse"],
+                "lgbm.is_enable_sparse",
+            )
         _expect_positive_int(lgbm_cfg.get("num_leaves"), "lgbm.num_leaves")
         _expect_positive_int(lgbm_cfg.get("min_data_in_leaf"), "lgbm.min_data_in_leaf")
         _expect_positive_int(max(1, lookback), "features.lookback")

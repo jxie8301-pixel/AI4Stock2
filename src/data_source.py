@@ -7,11 +7,10 @@ from typing import Any
 
 
 DEFAULT_DATA_SOURCE = "akshare"
-SUPPORTED_DATA_SOURCES = ("akshare", "gm", "tushare")
+SUPPORTED_DATA_SOURCES = ("akshare", "tushare")
 
 SOURCE_PARQUET_DIRS = {
     "akshare": "data/processed/combined",
-    "gm": "data/gm/processed/combined",
     "tushare": "data/tushare/source",
 }
 

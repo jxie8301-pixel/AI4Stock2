@@ -160,8 +160,8 @@ They are resolved separately and used only for factor-store selection.
 The preferred entry points should be:
 
 ```bash
-uv run python -m src.gen_feature
-uv run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10
+pixi run python -m src.gen_feature
+pixi run python run_native_rolling.py --experiment-profile core_v4_lgbm_default_10x20x10
 ```
 
 `--experiment-profile` should be treated as mandatory for train/backtest entry
@@ -170,7 +170,7 @@ points. There should be no implicit default experiment profile.
 Optional overrides are allowed, but named profiles should be the default workflow:
 
 ```bash
-uv run python run_native_rolling.py \
+pixi run python run_native_rolling.py \
   --experiment-profile core_v4_lgbm_default_10x20x10 \
   --feature-profile core_v4_techlite \
   --model-profile lgbm_fast
@@ -179,7 +179,7 @@ uv run python run_native_rolling.py \
 For one-off comparisons, prefer generic dotted overrides over cloning many yaml files:
 
 ```bash
-uv run python run_native_rolling.py \
+pixi run python run_native_rolling.py \
   --experiment-profile core_v4_lgbm_default_10x20x10 \
   --set strategy.topk=20 \
   --set rolling.retrain_step=5
@@ -188,7 +188,7 @@ uv run python run_native_rolling.py \
 For batch sweeps, prefer one base experiment plus a sweep runner:
 
 ```bash
-uv run python run_experiment_batch.py \
+pixi run python run_experiment_batch.py \
   --pipeline rolling \
   --experiment-profile core_v4_lgbm_default_10x20x10 \
   --sweep 'rolling.retrain_step=[5,10,15]'

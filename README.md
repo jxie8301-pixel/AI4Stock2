@@ -10,13 +10,13 @@ The current stable path is still AkShare / Eastmoney-compatible data; Tushare us
 Generate the factor store for the active config:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python -m src.gen_feature --workers 8
+pixi run python -m src.gen_feature --workers 8
 ```
 
 Run a rolling LightGBM experiment by explicitly naming the experiment profile:
 
 ```bash
-UV_CACHE_DIR=/tmp/uv-cache uv run python run_native_rolling.py --config configs/config.yaml --experiment-profile core_v4_lgbm_default_10x20x10
+pixi run python run_native_rolling.py --config configs/config.yaml --experiment-profile core_v4_lgbm_default_10x20x10
 ```
 
 The old single-window training entrypoint has been removed; use rolling runs for research and reporting.

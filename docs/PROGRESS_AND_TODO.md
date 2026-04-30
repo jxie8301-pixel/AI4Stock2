@@ -251,7 +251,7 @@ Safe controls to preserve:
 ### 0E. Code Quality And Reliability Cleanup
 
 - [ ] Treat this cleanup pass as reliability / maintainability work, not performance work
-- [ ] Remove research-critical silent fallback paths:
+- [x] Remove research-critical silent fallback paths:
   - baseline reconstruction failures should be recorded in manifest warnings or fail in strict mode
   - opportunity-label derivation failures should not silently disable buyability diagnostics
   - missing industry mapping should be explicit when `industry_excess` or `max_industry_weight` is configured
@@ -273,7 +273,7 @@ Safe controls to preserve:
 - [ ] Move diagnostics script helper logic out of runnable scripts and into `src/` modules
 - [ ] Split collector common parquet / lifecycle / symbol-cache utilities out of data-source-specific collectors
 - [ ] Clean compatibility and dead-code surfaces after the shared helpers are in place:
-  - hidden legacy CLI flags
+  - [x] hidden legacy CLI flags
   - wrapper-only re-exports
   - unused imports
   - duplicated artifact readers and feature-family classifiers
@@ -288,11 +288,13 @@ Current status:
 - [x] Legacy valuation sentinel columns are preserved, with clean NaN-preserving variants and invalid flags added for migration
 - [x] Tushare bucket-source precondition validation records sidecar/context schema assumptions in metadata
 - [x] Collector common parquet write/read and numeric-dtype utilities are extracted behind compatibility wrappers
+- [x] Optional parquet readers now return `None` only for missing/empty files; corrupt parquet and missing requested columns surface as errors
+- [x] Source shard, Tushare sidecar, and Tushare industry-context inputs now fail fast on invalid schemas instead of filling silent NA fallbacks
+- [x] The hidden rolling `--gpu` alias is removed; LSTM device selection uses `--torch-gpu`, while LightGBM GPU/CUDA stays under `lgbm.device_type`
 - [x] Candidate diagnostics share artifact readers, metric extraction, bucket-shape, and feature-family helpers
 - [x] Config validation supported-mode constants are centralized while keeping `validate_training_config` as the public entrypoint
 - [x] Backtest wrapper/report boundaries use shared native-to-legacy return helpers while keeping engine `net_return` canonical
 - [x] `run_native_rolling.py` no longer re-exports underscored artifact/baseline helpers only for tests
-- [ ] Hidden legacy CLI flag cleanup is deferred until compatibility aliases are no longer needed
 - [x] Low-risk unused imports are removed without adding a lint dependency
 - [ ] Lint gate remains deferred until code movement stabilizes
 
@@ -393,7 +395,7 @@ Current status:
   Current state: `fina_indicator`, `dividend`, `forecast`, `express` are already wired; next batch should be `income`, `balancesheet`, `cashflow`, then `fina_audit`, `fina_mainbz`
 - [ ] Design the second Tushare factor layer around financial/event tables instead of only daily market tables
 - [x] Finish a full `--stages all` Tushare backfill to a stable converged state and verify repeated reruns are purely incremental for the currently landed stage set
-- [x] Build the Tushare factor store after raw convergence: `uv run python -m src.gen_feature --data-source tushare --workers 16 --incremental`
+- [x] Build the Tushare factor store after raw convergence: `pixi run python -m src.gen_feature --data-source tushare --workers 16 --incremental`
 - [x] Run the first Tushare-native rolling baseline before adding more tables
 - [x] Remove `main.py` and keep new training/backtest modes on the rolling runtime path
 - [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder

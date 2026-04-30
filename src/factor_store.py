@@ -22,7 +22,7 @@ def load_factor_store_metadata(store_dir: str | Path) -> dict[str, Any]:
     if not meta_path.exists():
         raise FileNotFoundError(
             f"Parquet factor store metadata missing: {meta_path}. "
-            "Please run `uv run python -m src.gen_feature --workers 24` first."
+            "Please run `pixi run python -m src.gen_feature --workers 24` first."
         )
     with open(meta_path, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -37,7 +37,7 @@ def _get_symbol_shards_dir(store_dir: str | Path) -> Path:
     if not shards_dir.exists():
         raise FileNotFoundError(
             f"Parquet factor store shard directory missing: {shards_dir}. "
-            "Please run `uv run python -m src.gen_feature --workers 24` first."
+            "Please run `pixi run python -m src.gen_feature --workers 24` first."
         )
     return shards_dir
 
@@ -47,7 +47,7 @@ def _get_bucket_shards_dir(store_dir: str | Path) -> Path:
     if not bucket_dir.exists():
         raise FileNotFoundError(
             f"Parquet factor store bucket directory missing: {bucket_dir}. "
-            "Please run `uv run python -m src.gen_feature --workers 24` first."
+            "Please run `pixi run python -m src.gen_feature --workers 24` first."
         )
     return bucket_dir
 
@@ -57,7 +57,7 @@ def _get_bucket_manifest_path(store_dir: str | Path) -> Path:
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"Parquet factor store bucket manifest missing: {manifest_path}. "
-            "Please run `uv run python -m src.gen_feature --workers 24` first."
+            "Please run `pixi run python -m src.gen_feature --workers 24` first."
         )
     return manifest_path
 

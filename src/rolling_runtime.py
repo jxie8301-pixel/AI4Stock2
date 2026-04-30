@@ -12,11 +12,17 @@ from src.factor_store import load_available_dates, load_factor_frame, load_facto
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import (
     _resolve_cross_sectional_rank_exclude_columns,
+    apply_cross_sectional_rank,
     compute_finite_feature_mask_frame,
     materialize_selected_feature_frame,
     resolve_selected_feature_columns,
 )
-from src.label_utils import resolve_label_embargo_days, resolve_opportunity_label_cfg, sanitize_label_series
+from src.label_utils import (
+    resolve_label_embargo_days,
+    resolve_opportunity_label_cfg,
+    resolve_train_label_transform_cfg,
+    sanitize_label_series,
+)
 from src.rolling_types import RollingRuntimeData
 from src.source_store import load_source_frame
 
@@ -100,6 +106,14 @@ def load_rolling_runtime_data(
         backtest_y = y.copy()
     dt_index = pd.to_datetime(factor_frame["date"])
     finite_feature_mask = compute_finite_feature_mask_frame(factor_frame, selected_feature_names)
+    ranked_training_feature_frame = _precompute_ranked_training_feature_frame(
+        cfg,
+        factor_frame=factor_frame,
+        dt_index=dt_index,
+        y=y,
+        selected_feature_names=selected_feature_names,
+        finite_feature_mask=finite_feature_mask,
+    )
     return RollingRuntimeData(
         factor_frame=factor_frame,
         dt_index=dt_index,
@@ -114,7 +128,47 @@ def load_rolling_runtime_data(
         finite_feature_mask=finite_feature_mask,
         lookback=lookback,
         batch_size=batch_size,
+        ranked_training_feature_frame=ranked_training_feature_frame,
     )
+
+
+def _precompute_ranked_training_feature_frame(
+    cfg: dict[str, Any],
+    *,
+    factor_frame: pd.DataFrame,
+    dt_index: pd.Series,
+    y: np.ndarray,
+    selected_feature_names: list[str],
+    finite_feature_mask: np.ndarray,
+) -> pd.DataFrame | None:
+    transforms_cfg = cfg.get("features", {}).get("transforms", {}) or {}
+    if str(cfg.get("model", {}).get("name", "")).strip().lower() != "lgbm":
+        return None
+    enabled_transforms = {
+        str(name)
+        for name, value in transforms_cfg.items()
+        if name != "cross_sectional_rank_exclude_columns" and bool(value)
+    }
+    if enabled_transforms != {"cross_sectional_rank"}:
+        return None
+
+    train_label_transform = resolve_train_label_transform_cfg(cfg)
+    if str(train_label_transform["mode"]) == "buyability_margin_binary":
+        return None
+
+    ranked_frame = factor_frame.loc[:, selected_feature_names].astype(np.float32, copy=True)
+    eligible_mask = finite_feature_mask & np.isfinite(y)
+    if not np.any(eligible_mask):
+        return ranked_frame
+
+    rank_exclude_columns = _resolve_cross_sectional_rank_exclude_columns(cfg)
+    ranked_subset = apply_cross_sectional_rank(
+        ranked_frame.loc[eligible_mask, selected_feature_names],
+        dt_index[eligible_mask],
+        exclude_columns=rank_exclude_columns,
+    ).astype(np.float32, copy=False)
+    ranked_frame.loc[eligible_mask, selected_feature_names] = ranked_subset
+    return ranked_frame
 
 
 def build_label_series(

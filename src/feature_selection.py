@@ -84,7 +84,10 @@ def materialize_selected_feature_frame(frame, selected_columns: list[str], sourc
     if len(selected_columns) != len(source_columns):
         raise ValueError("selected_columns and source_columns must have the same length")
     if frame.empty or not selected_columns:
-        return frame.copy()
+        return frame
+
+    if all(selected_name == source_name for selected_name, source_name in zip(selected_columns, source_columns)):
+        return frame
 
     expanded = frame.copy()
     for selected_name, source_name in zip(selected_columns, source_columns):

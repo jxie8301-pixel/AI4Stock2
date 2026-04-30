@@ -46,6 +46,7 @@ class RollingRuntimeData:
     finite_feature_mask: np.ndarray
     lookback: int
     batch_size: int
+    ranked_training_feature_frame: pd.DataFrame | None = None
 
 
 @dataclass(frozen=True)

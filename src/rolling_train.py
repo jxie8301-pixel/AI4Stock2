@@ -376,13 +376,21 @@ def _run_lgbm_window(
         return None, None, None
 
     feature_names = runtime_data.selected_feature_names
-    X_train_df = runtime_data.factor_frame.loc[valid_train_mask, feature_names].reset_index(drop=True)
-    train_dates = pd.to_datetime(runtime_data.dt_index[valid_train_mask]).reset_index(drop=True)
+    ranked_training_feature_frame = runtime_data.ranked_training_feature_frame
+    training_feature_frame = (
+        ranked_training_feature_frame
+        if ranked_training_feature_frame is not None
+        else runtime_data.factor_frame
+    )
+    use_precomputed_train_features = ranked_training_feature_frame is not None
+    use_precomputed_valid_features = ranked_training_feature_frame is not None
+    X_train_df = training_feature_frame.loc[valid_train_mask, feature_names].reset_index(drop=True)
+    train_dates = runtime_data.dt_index[valid_train_mask].reset_index(drop=True)
     train_symbols = runtime_data.factor_frame.loc[valid_train_mask, "symbol"].astype(str).reset_index(drop=True)
     raw_y_train_series = _build_window_label_series(runtime_data.y[valid_train_mask], train_dates, train_symbols)
     y_train_series = raw_y_train_series.copy()
-    X_valid_df = runtime_data.factor_frame.loc[valid_valid_mask, feature_names].reset_index(drop=True)
-    valid_dates = pd.to_datetime(runtime_data.dt_index[valid_valid_mask]).reset_index(drop=True)
+    X_valid_df = training_feature_frame.loc[valid_valid_mask, feature_names].reset_index(drop=True)
+    valid_dates = runtime_data.dt_index[valid_valid_mask].reset_index(drop=True)
     valid_symbols = runtime_data.factor_frame.loc[valid_valid_mask, "symbol"].astype(str).reset_index(drop=True)
     raw_y_valid_series = _build_window_label_series(runtime_data.y[valid_valid_mask], valid_dates, valid_symbols)
     y_valid_series = raw_y_valid_series.copy()
@@ -415,18 +423,26 @@ def _run_lgbm_window(
         return None, None, None
 
     if not train_keep_mask.all():
+        if use_precomputed_train_features:
+            X_train_df = runtime_data.factor_frame.loc[valid_train_mask, feature_names].reset_index(drop=True)
+            use_precomputed_train_features = False
         X_train_df = X_train_df.loc[train_keep_mask].reset_index(drop=True)
         raw_y_train_series = raw_y_train_series.iloc[train_keep_mask]
         y_train_series = y_train_series.iloc[train_keep_mask]
         train_dates = train_dates.loc[train_keep_mask].reset_index(drop=True)
     if not valid_keep_mask.all():
+        if use_precomputed_valid_features:
+            X_valid_df = runtime_data.factor_frame.loc[valid_valid_mask, feature_names].reset_index(drop=True)
+            use_precomputed_valid_features = False
         X_valid_df = X_valid_df.loc[valid_keep_mask].reset_index(drop=True)
         raw_y_valid_series = raw_y_valid_series.iloc[valid_keep_mask]
         y_valid_series = y_valid_series.iloc[valid_keep_mask]
         valid_dates = valid_dates.loc[valid_keep_mask].reset_index(drop=True)
 
-    X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
-    X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
+    if not use_precomputed_train_features:
+        X_train_df = apply_feature_transforms(X_train_df, train_dates, cfg)
+    if not use_precomputed_valid_features:
+        X_valid_df = apply_feature_transforms(X_valid_df, valid_dates, cfg)
 
     lgbm_config = get_lgbm_config(cfg)
     train_sample_weight = _build_buyability_sample_weight_series(
@@ -525,11 +541,12 @@ def _run_lgbm_window(
     if not np.any(test_valid_mask):
         print("    Skipping window: no valid LightGBM test rows.")
         return None, importance_df, training_summary
-    X_test_df = runtime_data.factor_frame.loc[test_valid_mask, feature_names].reset_index(drop=True)
-    test_dates = pd.to_datetime(runtime_data.dt_index[test_valid_mask]).reset_index(drop=True)
-    X_test_df = apply_feature_transforms(X_test_df, test_dates, cfg)
+    X_test_df = training_feature_frame.loc[test_valid_mask, feature_names].reset_index(drop=True)
+    test_dates = runtime_data.dt_index[test_valid_mask].reset_index(drop=True)
+    if ranked_training_feature_frame is None:
+        X_test_df = apply_feature_transforms(X_test_df, test_dates, cfg)
     preds_arr = model.predict(X_test_df)
-    pred_dates = pd.to_datetime(runtime_data.dt_index[test_valid_mask]).reset_index(drop=True)
+    pred_dates = runtime_data.dt_index[test_valid_mask].reset_index(drop=True)
     pred_symbols = runtime_data.factor_frame.loc[test_valid_mask, "symbol"].reset_index(drop=True)
     return _prediction_series_from_arrays(preds_arr, pred_dates, pred_symbols), importance_df, training_summary
 

@@ -6,8 +6,28 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 import pandas as pd
-from src.evaluate import safe_cross_sectional_corr
 from src.models.utils.losses import PearsonLoss, CCCLoss
+
+
+def _as_datetime64_ns(values: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values)
+    if np.issubdtype(arr.dtype, np.datetime64):
+        return arr.astype("datetime64[ns]", copy=False)
+    return pd.to_datetime(arr).to_numpy(dtype="datetime64[ns]", copy=False)
+
+
+def _pearson_corr(xs: np.ndarray, ys: np.ndarray) -> float:
+    if xs.size < 2 or ys.size < 2:
+        return float("nan")
+    xs = xs.astype(np.float64, copy=False)
+    ys = ys.astype(np.float64, copy=False)
+    xs_centered = xs - xs.mean()
+    ys_centered = ys - ys.mean()
+    xs_ss = float(np.dot(xs_centered, xs_centered))
+    ys_ss = float(np.dot(ys_centered, ys_centered))
+    if not np.isfinite(xs_ss) or not np.isfinite(ys_ss) or xs_ss <= 0.0 or ys_ss <= 0.0:
+        return float("nan")
+    return float(np.dot(xs_centered, ys_centered) / np.sqrt(xs_ss * ys_ss))
 
 
 def compute_daily_ic(predictions: np.ndarray, labels: np.ndarray, dates: np.ndarray) -> float:
@@ -15,24 +35,36 @@ def compute_daily_ic(predictions: np.ndarray, labels: np.ndarray, dates: np.ndar
     if len(predictions) == 0:
         return 0.0
 
-    frame = pd.DataFrame(
-        {
-            "pred": np.asarray(predictions, dtype=np.float32),
-            "label": np.asarray(labels, dtype=np.float32),
-            "date": pd.to_datetime(np.asarray(dates)),
-        }
-    ).dropna()
-    if frame.empty:
+    pred_arr = np.asarray(predictions, dtype=np.float32)
+    label_arr = np.asarray(labels, dtype=np.float32)
+    date_arr = _as_datetime64_ns(dates)
+    if len(pred_arr) != len(label_arr) or len(pred_arr) != len(date_arr):
+        raise ValueError("predictions, labels, and dates must have the same length")
+
+    valid_mask = np.isfinite(pred_arr) & np.isfinite(label_arr) & ~np.isnat(date_arr)
+    if not valid_mask.any():
         return 0.0
 
-    daily_ic = frame.groupby("date", sort=True).apply(
-        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="pearson"),
-        include_groups=False,
-    )
-    daily_ic = daily_ic.dropna()
-    if daily_ic.empty:
+    pred_arr = pred_arr[valid_mask]
+    label_arr = label_arr[valid_mask]
+    date_arr = date_arr[valid_mask]
+    order = np.argsort(date_arr, kind="stable")
+    pred_sorted = pred_arr[order]
+    label_sorted = label_arr[order]
+    date_sorted = date_arr[order]
+
+    boundaries = np.flatnonzero(date_sorted[1:] != date_sorted[:-1]) + 1
+    starts = np.r_[0, boundaries]
+    ends = np.r_[boundaries, len(date_sorted)]
+
+    values: list[float] = []
+    for start, end in zip(starts, ends, strict=False):
+        corr = _pearson_corr(pred_sorted[start:end], label_sorted[start:end])
+        if np.isfinite(corr):
+            values.append(float(corr))
+    if not values:
         return 0.0
-    return float(daily_ic.mean())
+    return float(np.mean(values))
 
 
 class NativeStockDataset(Dataset):

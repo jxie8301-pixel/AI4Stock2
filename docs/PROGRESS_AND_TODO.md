@@ -200,6 +200,11 @@ Audit status on 2026-04-26:
 - The serious risks are not classic feature-side row leakage, but stale single-window training, research-selection leakage, and non-point-in-time data assumptions.
 - Rolling training already uses `label_embargo_days = signal_horizon + 1`; preserve this as a hard invariant.
 
+Reviewer follow-up captured on 2026-04-30:
+
+- [x] Invalidate Tushare packed-source / factor-store reuse when the event-availability policy is missing or differs from `strict_next_trading_day_after_ann_date`.
+- [x] Validate every diagnostics summary / segment artifact's sibling `manifest.json` before allowing diagnostics-driven config profile writes; `--period test` / `--period all` evidence must require `--allow-unsafe-profile-write`.
+
 Priority fixes:
 
 - [x] Remove `main.py` as a research entrypoint:
@@ -303,8 +308,9 @@ Current status:
 Audit status on 2026-04-30:
 
 - The active performance-critical path is still `run_native_rolling.py` -> `src/rolling_runtime.py` -> `src/rolling_train.py` -> `src/models/pure_lightgbm.py` / `src/models/pure_pytorch_lstm.py` -> `src/rolling_evaluate.py`.
-- The largest likely training-time costs are repeated date-local feature transforms, pandas-heavy LightGBM custom validation metrics, and LSTM sequence data rebuilding inside every rolling window.
+- The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
 - Non-training runtime can still be dominated by factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
+- LSTM sequence context is now prepared once per rolling run, but each rolling window still rebuilds `Dataset` / `DataLoader` wrappers and computes validation IC through pandas.
 
 Completed optimization slices:
 
@@ -363,10 +369,14 @@ Priority fixes:
   - prediction
   - non-ML baseline construction
   - backtest / report generation
-- [ ] Cache or precompute date-local cross-sectional rank transforms once per loaded runtime frame when `features.transforms.cross_sectional_rank` is enabled:
+- [x] Cache or precompute date-local cross-sectional rank transforms once per loaded runtime frame when `features.transforms.cross_sectional_rank` is enabled:
   - preserve strict per-date semantics
   - avoid reranking overlapping train windows on every rolling step
   - avoid separate train / valid / test rank passes when the transform is identical for the same date rows
+  - implemented for LightGBM train/valid frames when `cross_sectional_rank` is the only active feature transform
+  - benchmark slice: `core_v4_lgbm_default_10x20x10` + `lgbm_fast`, 2024-01-02 to 2024-02-29, 8 windows, 46 features
+  - mean total time: `12.01s` before -> `10.34s` after (`1.16x`)
+  - mean train bundle time: `6.06s` before -> `2.85s` after (`2.12x`)
 - [x] Rewrite LightGBM custom validation metrics to avoid pandas work inside every boosting round:
   - precompute valid-date group boundaries once before `lgb.train`
   - compute daily IC / RankIC from arrays
@@ -376,15 +386,22 @@ Priority fixes:
   - allow skipping average / sign-aligned / rank-average / rank-IC-weighted baselines when only model training time is under test
   - cache train-window rank-IC weights where repeated formula-score / baseline paths use the same feature set and embargo
   - vectorize per-feature rank-IC calculations before using all-factor profiles as baselines
-- [ ] Move LSTM sequence preparation out of `_run_lstm_window`:
-  - sort / factorize symbols once per runtime load
-  - build the full feature tensor once
-  - apply NaN / inf fill and clipping once instead of in every `Dataset.__getitem__`
+- [ ] Remove avoidable full-frame copies before training windows are built:
+  - [x] make `materialize_selected_feature_frame` return the loaded frame unchanged when `selected_columns == source_columns`
+  - avoid copying all selected features just to build alias columns; add only the alias columns that are actually needed
+  - [x] downcast the precomputed rank frame to `float32` after percentile ranking unless a downstream comparison proves `float64` is required
+- [ ] Finish LSTM loader and validation-metric optimization:
+  - [x] sort / factorize symbols once per rolling run
+  - [x] build the full feature tensor once per rolling run
+  - [x] apply NaN / inf fill and clipping once instead of in every `Dataset.__getitem__`
   - make `DataLoader` worker count configurable and enable `persistent_workers` when workers are used
   - use `pin_memory` only when the selected device is CUDA
+  - [x] replace pandas `groupby(...).apply(...)` validation IC with an array implementation
 - [ ] Reduce pandas copy and sort pressure in the LightGBM window path:
   - avoid repeated `reset_index(drop=True)` copies where array masks are sufficient
   - pass NumPy arrays to LightGBM after one validated feature-column ordering step
+  - [x] reuse precomputed date-local rank features for LightGBM test/prediction frames
+  - [x] avoid repeated datetime conversion for LGBM train / valid / test window date slices
   - avoid writing per-window feature-importance / training-history CSVs when a speed-only benchmark disables artifacts
 - [ ] Benchmark CPU LightGBM profiles against `lgbm_cuda_fast` on the same rolling slice:
   - record model profile, `num_threads`, `device_type`, `max_bin`, rows, features, best iteration, and wall time

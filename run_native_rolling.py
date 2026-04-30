@@ -56,6 +56,14 @@ def build_parser() -> argparse.ArgumentParser:
             f"Accepts either a run directory or a direct {PREDICTION_ARTIFACT_DIRNAME}/ path."
         ),
     )
+    parser.add_argument(
+        "--skip-reference-baselines",
+        action="store_true",
+        help=(
+            "Skip factor-baseline prediction construction/reconstruction during training-speed runs. "
+            "Portfolio output will omit reference-baseline comparisons."
+        ),
+    )
     return parser
 
 

@@ -254,7 +254,13 @@ class RollingTrainTest(unittest.TestCase):
             "strategy": {"topk": 1},
             "backtest": {"rebalance_freq": 1},
         }
-        args = Namespace(torch_gpu=-1, load_models=False, save_models=False, rebalance_freq=None)
+        args = Namespace(
+            torch_gpu=-1,
+            load_models=False,
+            save_models=False,
+            rebalance_freq=None,
+            skip_reference_baselines=False,
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             paths = RollingPaths(
@@ -285,6 +291,75 @@ class RollingTrainTest(unittest.TestCase):
         self.assertEqual(bundle.metadata["label_embargo_days"], 0)
         self.assertEqual(bundle.training_summary_records[0]["label_embargo_days"], 0)
         self.assertEqual(bundle.training_summary_records[0]["formula_score_mode"], "rank_ic_weighted")
+
+    def test_generate_prediction_bundle_can_skip_reference_baselines(self):
+        dates = pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3 + ["2024-01-03"] * 3)
+        runtime_data = RollingRuntimeData(
+            factor_frame=pd.DataFrame(
+                {
+                    "date": dates,
+                    "symbol": ["A", "B", "C"] * 3,
+                    "good": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0, 3.0, 2.0, 1.0],
+                    "bad": [3.0, 2.0, 1.0, 3.0, 2.0, 1.0, 1.0, 2.0, 3.0],
+                }
+            ),
+            dt_index=pd.Series(dates),
+            y=np.array([0.0, 1.0, 2.0, 0.0, 1.0, 2.0, 0.0, 0.0, 0.0], dtype=np.float32),
+            backtest_y=np.zeros(9, dtype=np.float32),
+            full_calendar=pd.Series(pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])),
+            test_start=pd.Timestamp("2024-01-03"),
+            test_end=pd.Timestamp("2024-01-03"),
+            test_calendar=pd.Series(pd.to_datetime(["2024-01-03"])),
+            selected_feature_names=["good", "bad"],
+            selected_feature_sources=["good", "bad"],
+            finite_feature_mask=np.array([True] * 9),
+            lookback=20,
+            batch_size=3,
+        )
+        cfg = {
+            "data": {"source": "tushare"},
+            "universe": "csi300",
+            "features": {"transforms": {"cross_sectional_rank": False}},
+            "model": {"name": "formula_score"},
+            "formula_score": {"mode": "rank_avg", "min_abs_rank_ic": 0.0},
+            "strategy": {"topk": 1},
+            "backtest": {"rebalance_freq": 1},
+        }
+        args = Namespace(
+            torch_gpu=-1,
+            load_models=False,
+            save_models=False,
+            rebalance_freq=None,
+            skip_reference_baselines=True,
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            paths = RollingPaths(
+                results_dir=base,
+                models_dir=base / "models",
+                importance_dir=base / "feature_importance",
+                training_history_dir=base / "training_history",
+                prediction_artifact_dir=base / "prediction_artifacts",
+            )
+
+            bundle = generate_prediction_bundle(
+                cfg,
+                args,
+                runtime_data,
+                paths,
+                retrain_step=1,
+                train_days=1,
+                valid_days=1,
+                signal_horizon=10,
+                label_embargo_days=0,
+                model_name="formula_score",
+            )
+
+        self.assertFalse(bundle.metadata["reference_baselines_enabled"])
+        self.assertIsNone(bundle.avg_factor_baseline_predictions)
+        self.assertIsNone(bundle.sign_aligned_factor_baseline_predictions)
+        self.assertIsNone(bundle.rank_avg_factor_baseline_predictions)
+        self.assertIsNone(bundle.rank_ic_weighted_factor_baseline_predictions)
 
 
 if __name__ == "__main__":

@@ -486,10 +486,10 @@ def _run_lgbm_window(
             with open(model_path, "wb") as f:
                 pickle.dump(model, f)
 
-    importance_path = paths.importance_dir / f"feature_importance_{current_test_start.strftime('%Y-%m-%d')}.csv"
-    model.save_feature_importance(importance_path)
     importance_df = model.get_feature_importance_frame("gain").rename(columns={"gain": "importance_gain"})
     importance_df["window_start"] = current_test_start.strftime("%Y-%m-%d")
+    importance_path = paths.importance_dir / f"feature_importance_{current_test_start.strftime('%Y-%m-%d')}.csv"
+    model.save_feature_importance(importance_path)
 
     history_path = paths.training_history_dir / f"training_history_{current_test_start.strftime('%Y-%m-%d')}.csv"
     saved_history_path = model.save_training_history(history_path)
@@ -837,16 +837,34 @@ def generate_prediction_bundle(
 
     final_predictions = pd.concat(all_predictions).sort_index()
     label_series, backtest_label_series = build_label_series(runtime_data)
-    avg_factor_baseline_predictions = build_average_factor_baseline_predictions(runtime_data)
-    sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(
-        runtime_data,
+    skip_reference_baselines = bool(getattr(args, "skip_reference_baselines", False))
+    if skip_reference_baselines:
+        avg_factor_baseline_predictions = None
+        sign_aligned_factor_baseline_predictions = None
+        rank_avg_factor_baseline_predictions = None
+        rank_ic_weighted_factor_baseline_predictions = None
+    else:
+        avg_factor_baseline_predictions = build_average_factor_baseline_predictions(runtime_data)
+        sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(
+            runtime_data,
+            label_embargo_days=label_embargo_days,
+        )
+        rank_avg_factor_baseline_predictions = build_rank_average_factor_baseline_predictions(runtime_data)
+        rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(
+            runtime_data,
+            label_embargo_days=label_embargo_days,
+        )
+    metadata = build_prediction_metadata(
+        cfg,
+        signal_horizon=signal_horizon,
+        retrain_step=retrain_step,
+        train_days=train_days,
+        valid_days=valid_days,
         label_embargo_days=label_embargo_days,
+        runtime_data=runtime_data,
+        model_name=model_name,
     )
-    rank_avg_factor_baseline_predictions = build_rank_average_factor_baseline_predictions(runtime_data)
-    rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(
-        runtime_data,
-        label_embargo_days=label_embargo_days,
-    )
+    metadata["reference_baselines_enabled"] = not skip_reference_baselines
     return PredictionBundle(
         final_predictions=final_predictions,
         label_series=label_series,
@@ -854,16 +872,7 @@ def generate_prediction_bundle(
         avg_factor_baseline_predictions=avg_factor_baseline_predictions,
         sign_aligned_factor_baseline_predictions=sign_aligned_factor_baseline_predictions,
         selected_feature_names=list(runtime_data.selected_feature_names),
-        metadata=build_prediction_metadata(
-            cfg,
-            signal_horizon=signal_horizon,
-            retrain_step=retrain_step,
-            train_days=train_days,
-            valid_days=valid_days,
-            label_embargo_days=label_embargo_days,
-            runtime_data=runtime_data,
-            model_name=model_name,
-        ),
+        metadata=metadata,
         feature_importance_frames=feature_importance_frames,
         training_summary_records=training_summary_records,
         rank_avg_factor_baseline_predictions=rank_avg_factor_baseline_predictions,

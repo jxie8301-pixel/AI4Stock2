@@ -380,18 +380,13 @@ def compute_opportunity_sample_weights(
         date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
         if len(date_series) != len(clean):
             raise ValueError("labels and dates must have the same length")
-        weight_series = pd.Series(weights, index=clean.index, dtype=float)
-        for _, idx in date_series.groupby(date_series, sort=False).groups.items():
-            group_idx = np.asarray(idx, dtype=np.int64)
-            group_values = weight_series.iloc[group_idx].to_numpy(dtype=np.float64, copy=False)
-            group_finite = np.isfinite(group_values)
-            if not group_finite.any():
-                continue
-            group_mean = float(np.mean(group_values[group_finite]))
-            if np.isfinite(group_mean) and group_mean > 0:
-                group_values[group_finite] = group_values[group_finite] / group_mean
-                weight_series.iloc[group_idx] = group_values
-        weights = weight_series.to_numpy(dtype=np.float64, copy=False)
+        positional_weights = pd.Series(weights, dtype=float)
+        date_mean = positional_weights.groupby(date_series, sort=False).transform("mean")
+        weight_values = positional_weights.to_numpy(dtype=np.float64, copy=False)
+        date_mean_values = date_mean.to_numpy(dtype=np.float64, copy=False)
+        normalize_mask = np.isfinite(weight_values) & np.isfinite(date_mean_values) & (date_mean_values > 0)
+        weights = weights.copy()
+        weights[normalize_mask] = weights[normalize_mask] / date_mean_values[normalize_mask]
 
     finite_weight_mask = np.isfinite(weights)
     if finite_weight_mask.any():

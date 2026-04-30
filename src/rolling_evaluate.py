@@ -186,7 +186,8 @@ def evaluate_prediction_bundle(
     sign_aligned_factor_baseline_predictions = bundle.sign_aligned_factor_baseline_predictions
     rank_avg_factor_baseline_predictions = bundle.rank_avg_factor_baseline_predictions
     rank_ic_weighted_factor_baseline_predictions = bundle.rank_ic_weighted_factor_baseline_predictions
-    if avg_factor_baseline_predictions is None:
+    skip_reference_baselines = bool(getattr(args, "skip_reference_baselines", False))
+    if avg_factor_baseline_predictions is None and not skip_reference_baselines:
         try:
             runtime_data = _ensure_runtime_data()
             avg_factor_baseline_predictions = build_average_factor_baseline_predictions(runtime_data)
@@ -199,7 +200,7 @@ def evaluate_prediction_bundle(
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-    if sign_aligned_factor_baseline_predictions is None:
+    if sign_aligned_factor_baseline_predictions is None and not skip_reference_baselines:
         try:
             runtime_data = _ensure_runtime_data()
             sign_aligned_factor_baseline_predictions = build_sign_aligned_factor_baseline_predictions(
@@ -215,7 +216,7 @@ def evaluate_prediction_bundle(
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-    if rank_avg_factor_baseline_predictions is None:
+    if rank_avg_factor_baseline_predictions is None and not skip_reference_baselines:
         try:
             runtime_data = _ensure_runtime_data()
             rank_avg_factor_baseline_predictions = build_rank_average_factor_baseline_predictions(runtime_data)
@@ -228,7 +229,7 @@ def evaluate_prediction_bundle(
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-    if rank_ic_weighted_factor_baseline_predictions is None:
+    if rank_ic_weighted_factor_baseline_predictions is None and not skip_reference_baselines:
         try:
             runtime_data = _ensure_runtime_data()
             rank_ic_weighted_factor_baseline_predictions = build_rank_ic_weighted_factor_baseline_predictions(

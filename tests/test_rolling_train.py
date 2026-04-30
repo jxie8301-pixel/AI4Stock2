@@ -135,7 +135,7 @@ class RollingTrainTest(unittest.TestCase):
             "strategy": {"topk": 1},
             "backtest": {"rebalance_freq": 1},
         }
-        args = Namespace(gpu=-1, load_models=False, save_models=False, rebalance_freq=None)
+        args = Namespace(torch_gpu=-1, load_models=False, save_models=False, rebalance_freq=None)
         with tempfile.TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)
             paths = RollingPaths(

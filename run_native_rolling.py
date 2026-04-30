@@ -42,7 +42,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="CUDA device id for native LSTM only. LightGBM GPU/CUDA is configured through lgbm.device_type.",
     )
-    parser.add_argument("--gpu", dest="torch_gpu", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--save-models", action="store_true", help="Save models for each rolling step")
     parser.add_argument("--load-models", action="store_true", help="Load existing models for each rolling step")
     parser.add_argument(

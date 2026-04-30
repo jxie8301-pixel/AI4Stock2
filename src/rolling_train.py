@@ -669,7 +669,7 @@ def generate_prediction_bundle(
             "    [warning] rolling.label_embargo_days is shorter than signal_horizon + 1; "
             "validation labels may overlap the test window."
         )
-    torch_gpu = int(getattr(args, "torch_gpu", getattr(args, "gpu", 0)))
+    torch_gpu = int(getattr(args, "torch_gpu", 0))
     device = f"cuda:{torch_gpu}" if torch_gpu >= 0 and torch.cuda.is_available() else "cpu"
 
     for i, start_idx in enumerate(rolling_steps):

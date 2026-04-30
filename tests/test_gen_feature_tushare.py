@@ -16,6 +16,7 @@ from src.gen_feature import (
     _clear_tushare_context_caches,
     _augment_tushare_symbol_frame,
     _build_tushare_industry_context_cache,
+    _load_tushare_sidecar_features,
     compute_all_factor_features,
     compute_tushare_factor_features,
     get_all_factor_feature_names,
@@ -398,6 +399,19 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(out.loc[2, "fi_roe_dt"]), 8.5, places=6)
         self.assertAlmostEqual(float(out.loc[2, "fi_or_yoy"]), 12.0, places=6)
         self.assertAlmostEqual(float(out.loc[2, "fi_netprofit_yoy"]), 18.0, places=6)
+
+    def test_tushare_sidecar_loader_propagates_invalid_parquet_errors(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            raw_dir = Path(tmpdir)
+            (raw_dir / "000001.parquet").write_text("not a parquet file", encoding="utf-8")
+
+            with self.assertRaises(Exception):
+                _load_tushare_sidecar_features(
+                    "000001",
+                    pd.DatetimeIndex(pd.to_datetime(["2026-04-01"])),
+                    raw_dir=raw_dir,
+                    column_pairs=[("roe", "fi_roe")],
+                )
 
     def test_compute_all_factor_features_uses_side_loaded_fina_indicator_columns(self):
         df = pd.DataFrame(
@@ -782,6 +796,39 @@ class TushareFeatureTest(unittest.TestCase):
         self.assertAlmostEqual(float(latest["ind_fi_ocfps_minus_eps_mean"]), 1.0, places=6)
         self.assertAlmostEqual(float(latest["ind_fi_roe_quality_gap_mean"]), -1.0, places=6)
         self.assertAlmostEqual(float(latest["ind_fi_margin_quality_mean"]), 20.0, places=6)
+
+    def test_build_tushare_industry_context_cache_requires_core_price_columns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            parquet_dir = root / "processed"
+            meta_dir = root / "meta"
+            parquet_dir.mkdir()
+            meta_dir.mkdir()
+            symbol_cache_path = meta_dir / "symbol_cache.parquet"
+            industry_context_path = meta_dir / "industry_context.parquet"
+            pd.DataFrame({"local_symbol": ["000001"], "industry": ["银行"]}).to_parquet(symbol_cache_path, index=False)
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2026-03-30"]),
+                    "symbol": ["000001"],
+                    "open": [10.0],
+                }
+            ).to_parquet(parquet_dir / "000001.parquet", index=False)
+
+            from src import gen_feature as gen_feature_module
+
+            original_symbol_cache_path = gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH
+            original_industry_context_path = gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH
+            gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = symbol_cache_path
+            gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = industry_context_path
+            gen_feature_module._clear_tushare_context_caches()
+            try:
+                with self.assertRaisesRegex(ValueError, "missing required columns"):
+                    _build_tushare_industry_context_cache(parquet_dir)
+            finally:
+                gen_feature_module.TUSHARE_SYMBOL_CACHE_PATH = original_symbol_cache_path
+                gen_feature_module.TUSHARE_INDUSTRY_CONTEXT_PATH = original_industry_context_path
+                gen_feature_module._clear_tushare_context_caches()
 
     def test_compute_all_factor_features_uses_side_loaded_forecast_and_express_columns(self):
         df = pd.DataFrame(

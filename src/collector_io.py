@@ -45,6 +45,7 @@ def write_optimized_parquet_atomic(df: pd.DataFrame, path: Path) -> None:
 
 
 def read_parquet_safe(path: Path, columns: list[str] | None = None) -> pd.DataFrame | None:
+    """Read an optional parquet file, returning None only when the file is absent or empty."""
     if not path.exists():
         return None
     try:
@@ -52,7 +53,4 @@ def read_parquet_safe(path: Path, columns: list[str] | None = None) -> pd.DataFr
             return None
     except OSError:
         return None
-    try:
-        return pd.read_parquet(path, columns=columns)
-    except Exception:
-        return None
+    return pd.read_parquet(path, columns=columns)

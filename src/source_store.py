@@ -108,17 +108,18 @@ def _load_symbol_shard_frame(
         path = store_dir / f"{symbol}.parquet"
         if not path.exists():
             continue
-        try:
-            schema_names = set(pq.read_schema(path).names)
-        except Exception:
-            schema_names = set()
-        read_columns = [col for col in selected_columns if col != "symbol" and (not schema_names or col in schema_names)]
-        if "date" not in read_columns:
-            continue
-        try:
-            frame = pd.read_parquet(path, columns=read_columns)
-        except Exception:
-            frame = pd.read_parquet(path)
+        schema_names = set(pq.read_schema(path).names)
+        if "date" not in schema_names:
+            raise ValueError(f"Source shard missing required column 'date': {path}")
+        missing_columns = [
+            col
+            for col in selected_columns
+            if col != "symbol" and col not in schema_names
+        ]
+        if missing_columns:
+            raise ValueError(f"Source shard missing requested columns {missing_columns}: {path}")
+        read_columns = [col for col in selected_columns if col != "symbol"]
+        frame = pd.read_parquet(path, columns=read_columns)
         if frame.empty:
             continue
         if "symbol" not in frame.columns:

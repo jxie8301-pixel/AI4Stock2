@@ -409,13 +409,13 @@ def _build_tushare_industry_context_cache(parquet_dir: Path) -> Path:
             "dv_ratio",
             "dv_ttm",
         ]
-        try:
-            schema_names = set(pq.read_schema(file_path).names)
-            read_columns = [col for col in required_columns if col in schema_names]
-            frame = pd.read_parquet(file_path, columns=read_columns)
-        except Exception:
-            frame = pd.read_parquet(file_path)
-        if frame.empty or "date" not in frame.columns or "close" not in frame.columns:
+        schema_names = set(pq.read_schema(file_path).names)
+        missing_required = [col for col in ("date", "close") if col not in schema_names]
+        if missing_required:
+            raise ValueError(f"Tushare processed parquet missing required columns {missing_required}: {file_path}")
+        read_columns = [col for col in required_columns if col in schema_names]
+        frame = pd.read_parquet(file_path, columns=read_columns)
+        if frame.empty:
             continue
         frame = frame.copy()
         frame["date"] = pd.to_datetime(frame["date"], errors="coerce")
@@ -642,21 +642,13 @@ def _load_tushare_sidecar_features(
         output_cols.append(days_since_ann_column)
     available_pairs: list[tuple[str, str]]
 
-    try:
-        schema_names = set(pq.read_schema(path).names)
-        if "ann_date" not in schema_names:
-            return None
-        available_pairs = [(source, target) for source, target in column_pairs if source in schema_names]
-        if not available_pairs:
-            return None
-        frame = pd.read_parquet(path, columns=["ann_date", *(source for source, _ in available_pairs)])
-    except Exception:
-        frame = pd.read_parquet(path)
-        if frame.empty or "ann_date" not in frame.columns:
-            return None
-        available_pairs = [(source, target) for source, target in column_pairs if source in frame.columns]
-        if not available_pairs:
-            return None
+    schema_names = set(pq.read_schema(path).names)
+    if "ann_date" not in schema_names:
+        return None
+    available_pairs = [(source, target) for source, target in column_pairs if source in schema_names]
+    if not available_pairs:
+        return None
+    frame = pd.read_parquet(path, columns=["ann_date", *(source for source, _ in available_pairs)])
 
     if frame.empty:
         return None

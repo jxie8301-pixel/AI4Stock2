@@ -2,11 +2,17 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
 
-from src.rolling_train import _compute_rolling_window_indices, _compute_validation_topk_summary, generate_prediction_bundle
+from src.rolling_train import (
+    _compute_rolling_window_indices,
+    _compute_validation_topk_summary,
+    _prepare_opportunity_training_context,
+    generate_prediction_bundle,
+)
 from src.rolling_types import RollingPaths, RollingRuntimeData
 
 
@@ -60,6 +66,36 @@ class RollingTrainTest(unittest.TestCase):
 
         self.assertEqual(bounds, (0, 1, 2, 3))
         self.assertLess(3 + 2 + 1, int(calendar.searchsorted(pd.Timestamp("2024-01-08"))))
+
+    def test_prepare_opportunity_training_context_requires_industry_groups(self):
+        dates = pd.to_datetime(["2024-01-01", "2024-01-01"])
+        runtime_data = RollingRuntimeData(
+            factor_frame=pd.DataFrame({"date": dates, "symbol": ["A", "B"], "f1": [1.0, 2.0]}),
+            dt_index=pd.Series(dates),
+            y=np.array([0.01, -0.01], dtype=np.float32),
+            backtest_y=np.array([0.01, -0.01], dtype=np.float32),
+            full_calendar=pd.Series(pd.to_datetime(["2024-01-01"])),
+            test_start=pd.Timestamp("2024-01-01"),
+            test_end=pd.Timestamp("2024-01-01"),
+            test_calendar=pd.Series(pd.to_datetime(["2024-01-01"])),
+            selected_feature_names=["f1"],
+            selected_feature_sources=["f1"],
+            finite_feature_mask=np.array([True, True]),
+            lookback=20,
+            batch_size=2,
+        )
+        cfg = {
+            "data": {"source": "tushare"},
+            "label": {"opportunity": {"mode": "industry_excess"}},
+        }
+
+        with patch(
+            "src.rolling_train.load_instrument_industry_groups",
+            side_effect=ValueError("Industry group mapping unavailable"),
+        ) as load_groups:
+            with self.assertRaisesRegex(ValueError, "Industry group mapping unavailable"):
+                _prepare_opportunity_training_context(cfg, runtime_data, signal_horizon=10)
+        self.assertTrue(load_groups.call_args.kwargs["required"])
 
     def test_generate_prediction_bundle_supports_formula_score_model(self):
         dates = pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3 + ["2024-01-03"] * 3)

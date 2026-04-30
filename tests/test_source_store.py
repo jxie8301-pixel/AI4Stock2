@@ -85,6 +85,36 @@ class SourceStoreTest(unittest.TestCase):
             self.assertEqual(loaded["symbol"].tolist(), ["000002"])
             self.assertEqual(loaded["close"].tolist(), [20.0])
 
+    def test_load_source_frame_symbol_shards_require_date(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            pd.DataFrame({"symbol": ["000001"], "close": [10.0]}).to_parquet(root / "000001.parquet", index=False)
+
+            with self.assertRaisesRegex(ValueError, "missing required column 'date'"):
+                load_source_frame(
+                    store_dir=root,
+                    columns=["close"],
+                    symbols=["000001"],
+                )
+
+    def test_load_source_frame_symbol_shards_require_requested_columns(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02"]),
+                    "symbol": ["000001"],
+                    "open": [9.5],
+                }
+            ).to_parquet(root / "000001.parquet", index=False)
+
+            with self.assertRaisesRegex(ValueError, "missing requested columns"):
+                load_source_frame(
+                    store_dir=root,
+                    columns=["close"],
+                    symbols=["000001"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

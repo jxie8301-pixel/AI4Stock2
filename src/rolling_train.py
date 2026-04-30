@@ -192,6 +192,7 @@ def _prepare_opportunity_training_context(
         context["instrument_groups"] = load_instrument_industry_groups(
             cfg,
             instruments=runtime_data.factor_frame["symbol"].astype(str).drop_duplicates(),
+            required=True,
         )
     elif mode == "benchmark_excess":
         runtime_labels = _build_full_runtime_label_series(runtime_data)
@@ -461,16 +462,12 @@ def _run_lgbm_window(
 
     history_path = paths.training_history_dir / f"training_history_{current_test_start.strftime('%Y-%m-%d')}.csv"
     saved_history_path = model.save_training_history(history_path)
-    valid_opportunity_labels: pd.Series | None = None
-    try:
-        valid_opportunity_labels = build_opportunity_target_series(
-            raw_y_valid_series,
-            opportunity_cfg=opportunity_cfg,
-            instrument_groups=opportunity_instrument_groups,
-            benchmark_forward_returns=benchmark_forward_returns,
-        )
-    except Exception:
-        valid_opportunity_labels = None
+    valid_opportunity_labels = build_opportunity_target_series(
+        raw_y_valid_series,
+        opportunity_cfg=opportunity_cfg,
+        instrument_groups=opportunity_instrument_groups,
+        benchmark_forward_returns=benchmark_forward_returns,
+    )
     valid_topk_summary = _compute_validation_topk_summary(
         model.predict(X_valid_df),
         raw_y_valid_series,

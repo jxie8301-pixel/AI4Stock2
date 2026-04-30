@@ -63,6 +63,27 @@ from src.collector_tushare import (
 from src.source_store import stable_bucket_id
 
 
+def _patch_packed_source_dependency_paths(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Path]:
+    sidecar_root = tmp_path / "sidecars"
+    paths = {
+        "fina_indicator": sidecar_root / "fina_indicator",
+        "dividend": sidecar_root / "dividend",
+        "forecast": sidecar_root / "forecast",
+        "express": sidecar_root / "express",
+    }
+    for path in paths.values():
+        path.mkdir(parents=True, exist_ok=True)
+    industry_context_path = tmp_path / "raw_meta" / "industry_context.parquet"
+    industry_context_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("src.gen_feature.TUSHARE_RAW_FINA_INDICATOR_DIR", paths["fina_indicator"])
+    monkeypatch.setattr("src.gen_feature.TUSHARE_RAW_DIVIDEND_DIR", paths["dividend"])
+    monkeypatch.setattr("src.gen_feature.TUSHARE_RAW_FORECAST_DIR", paths["forecast"])
+    monkeypatch.setattr("src.gen_feature.TUSHARE_RAW_EXPRESS_DIR", paths["express"])
+    monkeypatch.setattr("src.gen_feature.TUSHARE_INDUSTRY_CONTEXT_PATH", industry_context_path)
+    paths["industry_context"] = industry_context_path
+    return paths
+
+
 def test_symbol_conversion_round_trip_for_a_share_codes() -> None:
     assert local_symbol_to_ts("600000") == "600000.SH"
     assert local_symbol_to_ts("000001") == "000001.SZ"
@@ -1091,6 +1112,7 @@ def test_rebuild_packed_source_from_local_writes_bucket_store(monkeypatch: pytes
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_BUCKET_DIR", source_dir / "buckets")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
+    _patch_packed_source_dependency_paths(monkeypatch, tmp_path)
     monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
     monkeypatch.setattr("src.gen_feature._get_tushare_industry_context_feature_cols", lambda: ["ind_member_count"])
     monkeypatch.setattr(
@@ -1148,6 +1170,7 @@ def test_rebuild_packed_source_from_local_reuses_unchanged_buckets(
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_BUCKET_DIR", source_dir / "buckets")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
+    _patch_packed_source_dependency_paths(monkeypatch, tmp_path)
     monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
     monkeypatch.setattr("src.gen_feature._get_tushare_industry_context_feature_cols", lambda: ["ind_member_count"])
     monkeypatch.setattr(
@@ -1188,6 +1211,67 @@ def test_rebuild_packed_source_from_local_reuses_unchanged_buckets(
         assert mtimes_after[unchanged_bucket] == mtimes_before[unchanged_bucket]
 
 
+def test_rebuild_packed_source_from_local_invalidates_sidecar_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    processed_dir = tmp_path / "processed"
+    source_dir = tmp_path / "source"
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    (source_dir / "buckets").mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2026-03-30", "2026-03-31"]),
+            "symbol": ["000001", "000001"],
+            "open": [10.0, 11.0],
+            "high": [10.5, 11.5],
+            "low": [9.8, 10.8],
+            "close": [10.0, 11.0],
+            "pre_close": [9.5, 10.0],
+            "volume": [100.0, 120.0],
+            "amount": [1000.0, 1200.0],
+        }
+    ).to_parquet(processed_dir / "000001.parquet", index=False)
+
+    import src.collector_tushare as collector_module
+
+    monkeypatch.setattr(collector_module, "PROCESSED_DIR", processed_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_DIR", source_dir)
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_BUCKET_DIR", source_dir / "buckets")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
+    monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
+    dependency_paths = _patch_packed_source_dependency_paths(monkeypatch, tmp_path)
+    monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
+    monkeypatch.setattr("src.gen_feature._get_tushare_industry_context_feature_cols", lambda: ["ind_member_count"])
+
+    dividend_path = dependency_paths["dividend"] / "000001.parquet"
+    pd.DataFrame({"cash_div": [1.0]}).to_parquet(dividend_path, index=False)
+
+    def augment_from_dividend(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        cash_div = float(pd.read_parquet(dependency_paths["dividend"] / f"{symbol}.parquet")["cash_div"].iloc[0])
+        return df.assign(ind_member_count=cash_div)
+
+    monkeypatch.setattr("src.gen_feature._augment_tushare_symbol_frame", augment_from_dividend)
+
+    rebuild_packed_source_from_local(["000001"], bucket_count=8, workers=1, incremental=True)
+    manifest_first = pd.read_parquet(source_dir / "manifest.parquet")
+    first_signature = str(manifest_first.loc[0, "dependency_signature"])
+
+    time.sleep(0.01)
+    pd.DataFrame({"cash_div": [2.0]}).to_parquet(dividend_path, index=False)
+
+    rebuilt = rebuild_packed_source_from_local(["000001"], bucket_count=8, workers=1, incremental=True)
+    manifest_second = pd.read_parquet(source_dir / "manifest.parquet")
+    second_signature = str(manifest_second.loc[0, "dependency_signature"])
+    stored = pd.read_parquet(sorted((source_dir / "buckets").glob("part-*.parquet"))[0])
+
+    assert rebuilt["incremental"]["reused_buckets"] == 0
+    assert rebuilt["incremental"]["rebuilt_buckets"] == 1
+    assert second_signature != first_signature
+    assert stored["ind_member_count"].tolist() == pytest.approx([2.0, 2.0])
+
+
 def test_rebuild_packed_source_from_local_invalidates_event_policy_mismatch(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1218,6 +1302,7 @@ def test_rebuild_packed_source_from_local_invalidates_event_policy_mismatch(
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_BUCKET_DIR", source_dir / "buckets")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_MANIFEST_PATH", source_dir / "manifest.parquet")
     monkeypatch.setattr(collector_module, "PACKED_SOURCE_META_PATH", source_dir / "meta.json")
+    _patch_packed_source_dependency_paths(monkeypatch, tmp_path)
     monkeypatch.setattr("src.gen_feature._ensure_tushare_industry_context_cache", lambda parquet_dir: parquet_dir)
     monkeypatch.setattr("src.gen_feature._get_tushare_industry_context_feature_cols", lambda: ["ind_member_count"])
     monkeypatch.setattr(

@@ -48,6 +48,7 @@ PACKED_SOURCE_BUCKET_DIR = PACKED_SOURCE_DIR / SOURCE_BUCKET_DIRNAME
 PACKED_SOURCE_MANIFEST_PATH = PACKED_SOURCE_DIR / SOURCE_BUCKET_MANIFEST_FILENAME
 PACKED_SOURCE_META_PATH = PACKED_SOURCE_DIR / "meta.json"
 DEFAULT_PACKED_SOURCE_BUCKET_COUNT = 128
+PACKED_SOURCE_DEPENDENCY_SIGNATURE_POLICY = "processed_sidecars_industry_context_file_signatures_v1"
 RAW_STAGE_MANIFEST_DIR = RAW_META_DIR / "stage_manifests"
 
 SYMBOL_CACHE_PATH = RAW_META_DIR / "symbol_cache.parquet"
@@ -2499,6 +2500,52 @@ def _packed_source_bucket_path(bucket_id: int) -> Path:
     return PACKED_SOURCE_BUCKET_DIR / f"part-{int(bucket_id):04d}.parquet"
 
 
+def _packed_source_dependency_file_signature(path: Path) -> dict[str, Any]:
+    resolved = path.resolve()
+    if not path.exists():
+        return {
+            "path": str(resolved),
+            "exists": False,
+            "size": -1,
+            "mtime_ns": -1,
+        }
+    stat = path.stat()
+    return {
+        "path": str(resolved),
+        "exists": True,
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _packed_source_dependency_signature(symbol: str, processed_path: Path) -> str:
+    from src import gen_feature
+
+    symbol = str(symbol)
+    dependencies = {
+        "policy": PACKED_SOURCE_DEPENDENCY_SIGNATURE_POLICY,
+        "processed": _packed_source_dependency_file_signature(processed_path),
+        "sidecars": {
+            "fina_indicator": _packed_source_dependency_file_signature(
+                gen_feature.TUSHARE_RAW_FINA_INDICATOR_DIR / f"{symbol}.parquet"
+            ),
+            "dividend": _packed_source_dependency_file_signature(
+                gen_feature.TUSHARE_RAW_DIVIDEND_DIR / f"{symbol}.parquet"
+            ),
+            "forecast": _packed_source_dependency_file_signature(
+                gen_feature.TUSHARE_RAW_FORECAST_DIR / f"{symbol}.parquet"
+            ),
+            "express": _packed_source_dependency_file_signature(
+                gen_feature.TUSHARE_RAW_EXPRESS_DIR / f"{symbol}.parquet"
+            ),
+        },
+        "industry_context": _packed_source_dependency_file_signature(
+            gen_feature.TUSHARE_INDUSTRY_CONTEXT_PATH
+        ),
+    }
+    return json.dumps(dependencies, sort_keys=True, separators=(",", ":"))
+
+
 def _compute_available_dates_from_bucket_dir(bucket_dir: Path) -> list[str]:
     if not bucket_dir.exists():
         return []
@@ -2548,6 +2595,10 @@ def _build_packed_source_bucket_worker(
                 "source_path": str(processed_path.resolve()),
                 "source_size": int(stat.st_size),
                 "source_mtime_ns": int(stat.st_mtime_ns),
+                "dependency_signature": _packed_source_dependency_signature(
+                    symbol,
+                    processed_path,
+                ),
                 "row_count": int(len(augmented)),
                 "min_date": str(pd.to_datetime(augmented["date"]).min().date()),
                 "max_date": str(pd.to_datetime(augmented["date"]).max().date()),
@@ -2576,13 +2627,14 @@ def _load_packed_source_manifest() -> pd.DataFrame:
                 "source_path",
                 "source_size",
                 "source_mtime_ns",
+                "dependency_signature",
                 "row_count",
                 "min_date",
                 "max_date",
             ]
         )
     out = frame.copy()
-    for col in ["symbol", "source_path", "min_date", "max_date"]:
+    for col in ["symbol", "source_path", "dependency_signature", "min_date", "max_date"]:
         if col in out.columns:
             out[col] = out[col].fillna("").astype(str)
     for col in ["bucket_id", "source_size", "source_mtime_ns", "row_count"]:
@@ -2665,6 +2717,7 @@ def rebuild_packed_source_from_local(
         processed_path = PROCESSED_DIR / f"{symbol}.parquet"
         stat = processed_path.stat()
         source_path = str(processed_path.resolve())
+        dependency_signature = _packed_source_dependency_signature(symbol, processed_path)
         current_source_paths.add(source_path)
         existing = existing_manifest_lookup.get(source_path)
         reusable = False
@@ -2673,6 +2726,7 @@ def rebuild_packed_source_from_local(
                 int(existing.get("source_size") or -1) == int(stat.st_size)
                 and int(existing.get("source_mtime_ns") or -1) == int(stat.st_mtime_ns)
                 and int(existing.get("bucket_id") or -1) == bucket_id
+                and str(existing.get("dependency_signature") or "") == dependency_signature
             )
         if not reusable:
             dirty_buckets.add(bucket_id)
@@ -2783,6 +2837,7 @@ def rebuild_packed_source_from_local(
         "source_layout_assumptions": {
             "tushare_event_availability_policy": TUSHARE_EVENT_AVAILABILITY_POLICY,
             "tushare_industry_mapping": TUSHARE_INDUSTRY_MAPPING_POLICY,
+            "packed_source_dependency_signature_policy": PACKED_SOURCE_DEPENDENCY_SIGNATURE_POLICY,
         },
         "incremental": {
             "enabled": bool(incremental),

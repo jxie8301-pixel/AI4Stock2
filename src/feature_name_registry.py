@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from src.data_source import normalize_data_source_name
 
@@ -87,6 +88,31 @@ ALL_FACTORS_LGBM_PREFIX = "LGBM_"
 TEMPORAL_FACTOR_PREFIX = "TEMP_"
 TECHNICAL_FACTOR_PREFIX = "TECH_"
 TUSHARE_FACTOR_PREFIX = "TS_"
+
+
+FactorNameFactory = Callable[[dict[str, Any] | None], list[str]]
+
+
+@dataclass(frozen=True)
+class FactorFamilySpec:
+    name: str
+    prefix: str
+    names_fn: FactorNameFactory
+    data_source: str | None = None
+
+    def is_enabled(self, data_source: str | None = None) -> bool:
+        if self.data_source is None:
+            return True
+        return (
+            data_source is not None
+            and normalize_data_source_name(data_source) == self.data_source
+        )
+
+    def feature_names(self, config: dict[str, Any] | None = None) -> list[str]:
+        names = self.names_fn(config)
+        if not self.prefix:
+            return names
+        return [f"{self.prefix}{name}" for name in names]
 
 
 def get_alpha158_feature_config(config: dict[str, Any] | None = None) -> tuple[list[str], list[str]]:
@@ -644,6 +670,71 @@ def get_tushare_factor_feature_names(config: dict[str, Any] | None = None) -> li
     return names
 
 
+FACTOR_FAMILY_REGISTRY: tuple[FactorFamilySpec, ...] = (
+    FactorFamilySpec(
+        name="legacy158",
+        prefix="",
+        names_fn=lambda config: get_alpha158_feature_config(config)[1],
+    ),
+    FactorFamilySpec(
+        name="lgbm_purified",
+        prefix=ALL_FACTORS_LGBM_PREFIX,
+        names_fn=get_lgbm_purified_feature_names,
+    ),
+    FactorFamilySpec(
+        name="temporal",
+        prefix=TEMPORAL_FACTOR_PREFIX,
+        names_fn=get_temporal_factor_feature_names,
+    ),
+    FactorFamilySpec(
+        name="technical",
+        prefix=TECHNICAL_FACTOR_PREFIX,
+        names_fn=get_technical_factor_feature_names,
+    ),
+    FactorFamilySpec(
+        name="tushare",
+        prefix=TUSHARE_FACTOR_PREFIX,
+        names_fn=get_tushare_factor_feature_names,
+        data_source="tushare",
+    ),
+)
+
+
+def iter_factor_families(data_source: str | None = None) -> tuple[FactorFamilySpec, ...]:
+    normalized_data_source = normalize_data_source_name(data_source) if data_source is not None else None
+    return tuple(
+        family
+        for family in FACTOR_FAMILY_REGISTRY
+        if family.is_enabled(normalized_data_source)
+    )
+
+
+def _factor_family_config_map(
+    *,
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+    temporal_config: dict[str, Any] | None = None,
+    technical_config: dict[str, Any] | None = None,
+    tushare_config: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any] | None]:
+    return {
+        "legacy158": alpha158_config,
+        "lgbm_purified": lgbm_purified_config,
+        "temporal": temporal_config,
+        "technical": technical_config,
+        "tushare": tushare_config,
+    }
+
+
+def get_factor_family_counts(data_source: str | None = None) -> dict[str, int]:
+    counts = {
+        family.name: len(family.feature_names())
+        for family in iter_factor_families(data_source)
+    }
+    counts["total"] = len(get_all_factor_feature_names(data_source=data_source))
+    return counts
+
+
 def get_known_exact_duplicate_feature_groups(
     alpha158_config: dict[str, Any] | None = None,
     lgbm_purified_config: dict[str, Any] | None = None,
@@ -750,18 +841,23 @@ def get_all_factor_feature_names(
     technical_config: dict[str, Any] | None = None,
     data_source: str | None = None,
     tushare_config: dict[str, Any] | None = None,
+    temporal_config: dict[str, Any] | None = None,
 ) -> list[str]:
-    alpha158_names = get_alpha158_feature_config(alpha158_config)[1]
-    lgbm_names = [f"{ALL_FACTORS_LGBM_PREFIX}{name}" for name in get_lgbm_purified_feature_names(lgbm_purified_config)]
-    temporal_names = [f"{TEMPORAL_FACTOR_PREFIX}{name}" for name in get_temporal_factor_feature_names()]
-    technical_names = [f"{TECHNICAL_FACTOR_PREFIX}{name}" for name in get_technical_factor_feature_names(technical_config)]
-    feature_names = alpha158_names + lgbm_names + temporal_names + technical_names
-    if data_source is not None and normalize_data_source_name(data_source) == "tushare":
-        feature_names += [f"{TUSHARE_FACTOR_PREFIX}{name}" for name in get_tushare_factor_feature_names(tushare_config)]
+    family_configs = _factor_family_config_map(
+        alpha158_config=alpha158_config,
+        lgbm_purified_config=lgbm_purified_config,
+        temporal_config=temporal_config,
+        technical_config=technical_config,
+        tushare_config=tushare_config,
+    )
+    feature_names: list[str] = []
+    for family in iter_factor_families(data_source):
+        feature_names.extend(family.feature_names(family_configs[family.name]))
     return deduplicate_exact_feature_names(
         feature_names,
         alpha158_config=alpha158_config,
         lgbm_purified_config=lgbm_purified_config,
+        temporal_config=temporal_config,
     )
 
 

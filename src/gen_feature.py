@@ -13,6 +13,7 @@ import argparse
 import json
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -23,20 +24,21 @@ import pandas as pd
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from tqdm import tqdm
-import yaml
 
+from src.config_loader import load_runtime_config
 from src.data_source import (
     SUPPORTED_DATA_SOURCES,
-    get_default_factor_store_dir,
     resolve_data_source_name,
     resolve_source_parquet_dir,
 )
+from src.feature_profiles import resolve_feature_profile
 from src.label_utils import (
     get_label_column_name,
     get_label_definition,
     get_legacy_label_column_name,
     resolve_label_horizons,
 )
+from src.override_utils import apply_override_args
 from src.source_store import (
     detect_source_storage_layout,
     extract_bucket_id_from_path,
@@ -63,6 +65,7 @@ from src.feature_name_registry import (
     get_alpha158_feature_config,
     get_alpha360_feature_config,
     get_exact_duplicate_feature_source_map,
+    get_factor_family_counts,
     get_full_factor_space_feature_names,
     get_known_exact_duplicate_feature_groups,
     get_lgbm_purified_feature_names,
@@ -74,7 +77,6 @@ from src.feature_name_registry import (
 )
 from src.feature_value_core import (
     _build_open_to_open_label_from_base,
-    _index_to_epoch_ns,
     _prepare_ohlcv,
     _rolling_corr,
     _rolling_rank_pct,
@@ -82,7 +84,6 @@ from src.feature_value_core import (
     _rolling_resi,
     _rolling_rsquare,
     _rolling_slope,
-    _to_panel_arrays,
     build_open_to_open_label,
     build_open_to_open_labels,
     compute_all_factor_features,
@@ -104,7 +105,6 @@ TUSHARE_SYMBOL_CACHE_PATH = TUSHARE_RAW_META_DIR / "symbol_cache.parquet"
 TUSHARE_INDUSTRY_CONTEXT_PATH = TUSHARE_RAW_META_DIR / "industry_context.parquet"
 TUSHARE_EVENT_AVAILABILITY_POLICY = "strict_next_trading_day_after_ann_date"
 TUSHARE_INDUSTRY_MAPPING_POLICY = "static_symbol_cache_current_classification"
-SHARD_DIRNAME = "_shards"
 BUCKET_DIRNAME = "buckets"
 BUCKET_MANIFEST_FILENAME = "manifest.parquet"
 DEFAULT_BUCKET_COUNT = 512
@@ -786,98 +786,6 @@ def _augment_tushare_symbol_frame(
     return pd.concat([base, *sidecar_frames], axis=1).copy()
 
 
-def _compute_symbol_feat_label(
-    file_path: str,
-    *,
-    data_source: str | None = None,
-) -> tuple[str, pd.DataFrame, pd.Series]:
-    df = pd.read_parquet(file_path)
-    symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
-    if data_source == "tushare":
-        _ensure_tushare_industry_context_cache(Path(file_path).resolve().parent)
-        df = _augment_tushare_symbol_frame(df, symbol=symbol)
-    base = _prepare_ohlcv(df)
-    feat = compute_all_factor_features(df, data_source=data_source, _base=base)
-    label = _build_open_to_open_label_from_base(base, horizon_days=1)
-    return symbol, feat, label
-
-
-def _compute_symbol_feat_labels(
-    file_path: str,
-    *,
-    label_horizons: list[int],
-    data_source: str | None = None,
-) -> tuple[str, pd.DataFrame, dict[str, pd.Series]]:
-    df = pd.read_parquet(file_path)
-    symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
-    if data_source == "tushare":
-        _ensure_tushare_industry_context_cache(Path(file_path).resolve().parent)
-        df = _augment_tushare_symbol_frame(df, symbol=symbol)
-    base = _prepare_ohlcv(df)
-    feat = compute_all_factor_features(df, data_source=data_source, _base=base)
-    labels = {
-        get_label_column_name(horizon): _build_open_to_open_label_from_base(base, horizon_days=horizon)
-        for horizon in label_horizons
-    }
-    labels[get_legacy_label_column_name()] = labels[get_label_column_name(1)]
-    return symbol, feat, labels
-
-
-def _count_file_worker(
-    file_path: str,
-    data_source: str | None = None,
-) -> tuple[str, int, int]:
-    symbol = Path(file_path).stem
-    try:
-        meta = pq.read_metadata(file_path)
-        n_rows = int(meta.num_rows)
-    except Exception:
-        n_rows = int(len(pd.read_parquet(file_path, columns=["date"])))
-    return file_path, symbol, len(get_full_factor_space_feature_names(data_source=data_source)), n_rows
-
-
-def _build_file_payload_worker(
-    file_path: str,
-    data_source: str | None = None,
-) -> tuple[str, int, tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    symbol, feat, label = _compute_symbol_feat_label(file_path, data_source=data_source)
-    payload = _to_panel_arrays(feat, label)
-    return symbol, feat.shape[1], payload
-
-
-def _write_panel_file_slice_process(
-    file_path: str,
-    start: int,
-    count: int,
-    symbol_id: int,
-    x_path: str,
-    y_path: str,
-    date_path: str,
-    symbol_path: str,
-    total_rows: int,
-    n_feat: int,
-    data_source: str | None = None,
-) -> int:
-    symbol, feat, label = _compute_symbol_feat_label(file_path, data_source=data_source)
-    x_arr, y_arr, d_arr = _to_panel_arrays(feat, label)
-    if x_arr.shape[0] != count:
-        raise RuntimeError(
-            f"Row count mismatch for {file_path}: counted={count}, computed={x_arr.shape[0]} (symbol={symbol})"
-        )
-
-    x_store = np.lib.format.open_memmap(x_path, mode="r+", dtype=np.float32, shape=(total_rows, n_feat))
-    y_store = np.lib.format.open_memmap(y_path, mode="r+", dtype=np.float32, shape=(total_rows,))
-    date_store = np.lib.format.open_memmap(date_path, mode="r+", dtype=np.int64, shape=(total_rows,))
-    symbol_store = np.lib.format.open_memmap(symbol_path, mode="r+", dtype=np.int32, shape=(total_rows,))
-
-    end = start + count
-    x_store[start:end] = x_arr
-    y_store[start:end] = y_arr
-    date_store[start:end] = d_arr
-    symbol_store[start:end] = symbol_id
-    return count
-
-
 def _json_dumps_canonical(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True)
 
@@ -890,15 +798,6 @@ def _source_file_signature(file_path: str | Path) -> dict[str, Any]:
         "size": int(stat.st_size),
         "mtime_ns": int(stat.st_mtime_ns),
     }
-
-
-def _shard_base_name(file_path: str | Path) -> str:
-    return Path(file_path).stem
-
-
-def _shard_paths(shard_root: Path, shard_meta_root: Path, file_path: str | Path) -> tuple[Path, Path]:
-    base = _shard_base_name(file_path)
-    return shard_root / f"{base}.parquet", shard_meta_root / f"{base}.json"
 
 
 def _stable_bucket_id(symbol: str, bucket_count: int) -> int:
@@ -924,64 +823,6 @@ def _load_json(path: Path) -> dict[str, Any] | None:
         return None
     with open(path, encoding="utf-8") as f:
         return json.load(f)
-
-
-def _load_reusable_shard_meta(
-    *,
-    shard_root: Path,
-    shard_meta_root: Path,
-    file_path: str | Path,
-    feature_names: list[str],
-    label_columns: list[str],
-) -> dict[str, Any] | None:
-    shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, file_path)
-    shard_meta = _load_json(meta_path)
-    if shard_meta is None or not shard_path.exists():
-        return None
-    source_sig = _source_file_signature(file_path)
-    if shard_meta.get("source") != source_sig:
-        return None
-    if shard_meta.get("factor_space") != FULL_FACTOR_SPACE_NAME:
-        return None
-    if shard_meta.get("feature_names") != feature_names:
-        return None
-    if shard_meta.get("label_columns") != label_columns:
-        return None
-    row_count = shard_meta.get("row_count")
-    if not isinstance(row_count, int) or row_count < 0:
-        return None
-    return shard_meta
-
-
-def _save_shard(
-    *,
-    shard_root: Path,
-    shard_meta_root: Path,
-    file_path: str | Path,
-    symbol: str,
-    feature_names: list[str],
-    label_columns: list[str],
-    shard_frame: pd.DataFrame,
-) -> dict[str, Any]:
-    shard_root.mkdir(parents=True, exist_ok=True)
-    shard_meta_root.mkdir(parents=True, exist_ok=True)
-    shard_path, meta_path = _shard_paths(shard_root, shard_meta_root, file_path)
-    shard_frame.to_parquet(shard_path, index=False, engine="pyarrow", compression="zstd")
-    shard_meta = {
-        "symbol": symbol,
-        "row_count": int(len(shard_frame)),
-        "num_features": len(feature_names),
-        "factor_space": FULL_FACTOR_SPACE_NAME,
-        "source": _source_file_signature(file_path),
-        "feature_names": feature_names,
-        "label_columns": label_columns,
-        "min_date": str(pd.to_datetime(shard_frame["date"]).min().date()) if not shard_frame.empty else "",
-        "max_date": str(pd.to_datetime(shard_frame["date"]).max().date()) if not shard_frame.empty else "",
-        "shard_path": str(shard_path),
-    }
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(shard_meta, f, ensure_ascii=False, indent=2)
-    return shard_meta
 
 
 def _build_shard_frame_from_frame(
@@ -1027,32 +868,6 @@ def _build_shard_frame(
         symbol=symbol,
         label_horizons=label_horizons,
         data_source=data_source,
-    )
-
-
-def _write_factor_shard_worker(
-    file_path: str,
-    shard_path: str,
-    meta_path: str,
-    feature_names: list[str],
-    label_horizons: list[int],
-    data_source: str | None = None,
-) -> dict[str, Any]:
-    symbol, shard_frame = _build_shard_frame(
-        file_path,
-        label_horizons=label_horizons,
-        data_source=data_source,
-    )
-    shard_root = Path(shard_path).parent
-    shard_meta_root = Path(meta_path).parent
-    return _save_shard(
-        shard_root=shard_root,
-        shard_meta_root=shard_meta_root,
-        file_path=file_path,
-        symbol=symbol,
-        feature_names=feature_names,
-        label_columns=[get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)],
-        shard_frame=shard_frame,
     )
 
 
@@ -1190,31 +1005,6 @@ def _write_factor_bucket_from_source_bucket_worker(
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bucket_frame.to_parquet(out_path, index=False, engine="pyarrow", compression="zstd")
     return manifest_frame.to_dict(orient="records")
-
-
-def _remove_orphan_shards(
-    *,
-    shard_root: Path,
-    shard_meta_root: Path,
-    source_files: list[Path],
-) -> None:
-    valid_names = {_shard_base_name(path) for path in source_files}
-    for meta_path in shard_meta_root.glob("*.json"):
-        if meta_path.stem in valid_names:
-            continue
-        shard_path = shard_root / f"{meta_path.stem}.parquet"
-        if shard_path.exists():
-            shard_path.unlink()
-        meta_path.unlink()
-
-
-def _collect_shard_metas(shard_meta_root: Path) -> list[dict[str, Any]]:
-    shard_metas: list[dict[str, Any]] = []
-    for meta_path in sorted(shard_meta_root.glob("*.json")):
-        shard_meta = _load_json(meta_path)
-        if shard_meta is not None:
-            shard_metas.append(shard_meta)
-    return shard_metas
 
 
 def _compute_available_dates_from_shards(shard_root: Path) -> list[str]:
@@ -1647,35 +1437,78 @@ def generate_factor_store(
     return metadata
 
 
-def generate_panel_cache(
-    parquet_dir: str = "data/processed/combined",
-    output_dir: str = DEFAULT_FULL_FACTOR_STORE_DIR,
-    workers: int = 1,
-    incremental: bool = False,
-    label_horizons: list[int] | None = None,
-    data_source: str | None = None,
-) -> dict[str, Any]:
-    return generate_factor_store(
-        parquet_dir=parquet_dir,
-        output_dir=output_dir,
-        workers=workers,
-        incremental=incremental,
-        label_horizons=label_horizons,
+@dataclass(frozen=True)
+class FactorGenerationRuntime:
+    cfg: dict[str, Any]
+    data_source: str
+    parquet_dir: str
+    output_dir: str
+    label_horizons: list[int]
+
+
+def _parse_label_horizons_arg(raw: str) -> list[int]:
+    horizons: list[int] = []
+    for item in str(raw).split(","):
+        text = item.strip()
+        if not text:
+            continue
+        horizons.append(int(text))
+    return resolve_label_horizons({"label": {"horizons": horizons}})
+
+
+def _resolve_factor_generation_runtime(args: argparse.Namespace) -> FactorGenerationRuntime:
+    cfg = load_runtime_config(args.config) if args.config else {}
+    cfg.setdefault("runtime", {})
+    if args.config:
+        cfg["runtime"]["config_path"] = args.config
+    if args.data_source:
+        cfg.setdefault("data", {})
+        cfg["data"]["source"] = args.data_source
+    if args.feature_profile:
+        cfg.setdefault("features", {})
+        cfg["features"]["profile"] = args.feature_profile
+    apply_override_args(cfg, getattr(args, "set_overrides", None))
+
+    label_horizons = resolve_label_horizons(cfg)
+    if args.label_horizons:
+        label_horizons = _parse_label_horizons_arg(args.label_horizons)
+
+    data_source = resolve_data_source_name(cfg)
+    feature_profile = resolve_feature_profile(cfg)
+    return FactorGenerationRuntime(
+        cfg=cfg,
         data_source=data_source,
+        parquet_dir=args.parquet_dir or resolve_source_parquet_dir(cfg),
+        output_dir=args.output_dir or str(feature_profile["factor_store_dir"]),
+        label_horizons=label_horizons,
     )
 
 
-def _parse_args() -> argparse.Namespace:
+def _build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate the unified full-factor Parquet store from parquet.")
-    parser.add_argument("--config", default="configs/config.yaml", help="Experiment config path for factor-store output settings.")
+    parser.add_argument(
+        "--config",
+        default="configs/config.yaml",
+        help="Experiment config path for factor-store output settings.",
+    )
     parser.add_argument(
         "--data-source",
         choices=SUPPORTED_DATA_SOURCES,
         help="Named data source for default parquet/factor-store resolution.",
     )
+    parser.add_argument(
+        "--feature-profile",
+        help="Resolve factor-store output path through a named feature profile.",
+    )
     parser.add_argument("--parquet-dir", default=None, help="Input parquet directory.")
     parser.add_argument("--output-dir", default=None, help="Output factor-store directory.")
     parser.add_argument("--workers", type=int, default=4, help="Parallel workers for counting/writing.")
+    parser.add_argument(
+        "--set",
+        action="append",
+        dest="set_overrides",
+        help="Generic dotted override in key=value form, for example features.factor_store_dir=data/factor_store/custom.",
+    )
     parser.add_argument(
         "--label-horizons",
         help="Comma-separated label horizons to materialize, for example '1,5,10,20'. If omitted, use config/defaults.",
@@ -1693,64 +1526,42 @@ def _parse_args() -> argparse.Namespace:
         action="store_false",
         help="Ignore reusable shards and rebuild all per-symbol feature shards.",
     )
-    return parser.parse_args()
+    return parser
 
 
 def main() -> None:
-    args = _parse_args()
+    parser = _build_arg_parser()
+    args = parser.parse_args()
     validate_default_dimensions()
-    cfg = {}
-    if args.config:
-        with open(args.config, encoding="utf-8") as f:
-            cfg = yaml.safe_load(f) or {}
-    if args.data_source:
-        cfg.setdefault("data", {})
-        cfg["data"]["source"] = args.data_source
-    label_horizons = resolve_label_horizons(cfg)
-    if args.label_horizons:
-        label_horizons = resolve_label_horizons(
-            {"label": {"horizons": [int(item.strip()) for item in args.label_horizons.split(",") if item.strip()]}}
-        )
-    data_source = resolve_data_source_name(cfg)
-    parquet_dir = args.parquet_dir or resolve_source_parquet_dir(cfg)
-    out_dir = (
-        args.output_dir
-        or cfg.get("features", {}).get("factor_store_dir")
-        or cfg.get("features", {}).get("cache_dir")
-        or get_default_factor_store_dir(data_source, FULL_FACTOR_SPACE_NAME)
-    )
-    feature_names = get_full_factor_space_feature_names(data_source=data_source)
-    alpha158_count = len(get_alpha158_feature_config()[1])
-    lgbm_count = len(get_lgbm_purified_feature_names())
-    temporal_count = len(get_temporal_factor_feature_names())
-    technical_count = len(get_technical_factor_feature_names())
-    tushare_count = len(get_tushare_factor_feature_names()) if data_source == "tushare" else 0
+    try:
+        runtime = _resolve_factor_generation_runtime(args)
+    except ValueError as exc:
+        parser.error(str(exc))
+    family_counts = get_factor_family_counts(data_source=runtime.data_source)
 
     print(
         "storage_format=parquet, "
-        f"data_source={data_source}, "
-        f"parquet_dir={parquet_dir}, "
+        f"data_source={runtime.data_source}, "
+        f"parquet_dir={runtime.parquet_dir}, "
         f"factor_space={FULL_FACTOR_SPACE_NAME}, "
-        f"output={out_dir}, "
+        f"output={runtime.output_dir}, "
         f"incremental={args.incremental}, "
-        f"label_horizons={label_horizons}"
+        f"label_horizons={runtime.label_horizons}"
     )
     print(
         "factor_groups="
-        f"legacy158:{alpha158_count}, "
-        f"lgbm_purified:{lgbm_count}, "
-        f"temporal:{temporal_count}, "
-        f"technical:{technical_count}, "
-        f"tushare:{tushare_count}, "
-        f"total:{len(feature_names)}"
+        + ", ".join(
+            f"{name}:{count}"
+            for name, count in family_counts.items()
+        )
     )
     generate_factor_store(
-        parquet_dir=parquet_dir,
-        output_dir=out_dir,
+        parquet_dir=runtime.parquet_dir,
+        output_dir=runtime.output_dir,
         workers=max(1, int(args.workers)),
         incremental=args.incremental,
-        label_horizons=label_horizons,
-        data_source=data_source,
+        label_horizons=runtime.label_horizons,
+        data_source=runtime.data_source,
     )
 
 

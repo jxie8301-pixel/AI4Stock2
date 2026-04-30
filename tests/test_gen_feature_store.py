@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -11,7 +12,10 @@ from src.factor_store import load_factor_frame
 from src.gen_feature import (
     TUSHARE_EVENT_AVAILABILITY_POLICY,
     _get_tushare_bucket_source_required_columns,
+    _resolve_factor_generation_runtime,
     generate_factor_store,
+    get_factor_family_counts,
+    get_full_factor_space_feature_names,
 )
 
 
@@ -96,6 +100,59 @@ def _minimal_tushare_bucket_frame() -> pd.DataFrame:
 
 
 class GenFeatureStoreTest(unittest.TestCase):
+    def test_factor_family_counts_come_from_registry(self):
+        default_counts = get_factor_family_counts()
+        tushare_counts = get_factor_family_counts(data_source="tushare")
+
+        self.assertEqual(default_counts["legacy158"], 158)
+        self.assertEqual(default_counts["lgbm_purified"], 22)
+        self.assertEqual(default_counts["temporal"], 77)
+        self.assertEqual(default_counts["technical"], 26)
+        self.assertNotIn("tushare", default_counts)
+        self.assertIn("tushare", tushare_counts)
+        self.assertEqual(default_counts["total"], len(get_full_factor_space_feature_names()))
+        self.assertEqual(tushare_counts["total"], len(get_full_factor_space_feature_names(data_source="tushare")))
+
+    def test_factor_generation_runtime_uses_shared_config_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            config_path = root / "config.yaml"
+            config_path.write_text(
+                "\n".join(
+                    [
+                        "data:",
+                        "  source: tushare",
+                        f"  parquet_dir: {root / 'source'}",
+                        "features:",
+                        f"  cache_dir: {root / 'legacy_cache_dir'}",
+                        "label:",
+                        "  horizons: [1, 10]",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            args = Namespace(
+                config=str(config_path),
+                data_source=None,
+                feature_profile=None,
+                parquet_dir=None,
+                output_dir=None,
+                workers=1,
+                label_horizons=None,
+                set_overrides=[
+                    f"features.factor_store_dir={root / 'factor_store'}",
+                    "label.horizons=[1,5,20]",
+                ],
+                incremental=True,
+            )
+
+            runtime = _resolve_factor_generation_runtime(args)
+
+        self.assertEqual(runtime.data_source, "tushare")
+        self.assertEqual(runtime.parquet_dir, str(root / "source"))
+        self.assertEqual(runtime.output_dir, str(root / "factor_store"))
+        self.assertEqual(runtime.label_horizons, [1, 5, 10, 20])
+
     def test_generate_factor_store_can_read_bucket_sharded_source(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)

@@ -68,6 +68,19 @@ class FeatureProfilesTest(unittest.TestCase):
         self.assertEqual(profile["data_source"], "tushare")
         self.assertEqual(profile["factor_store_dir"], "data/factor_store/tushare_full_factor_space")
 
+    def test_legacy_cache_dir_is_resolved_in_feature_profile_layer(self):
+        profile = resolve_feature_profile(
+            {
+                "features": {
+                    "profile": "core_v4_techlite",
+                    "cache_dir": "data/custom_legacy_cache",
+                },
+            }
+        )
+
+        self.assertEqual(profile["factor_store_dir"], "data/custom_legacy_cache")
+        self.assertEqual(profile["cache_dir"], "data/custom_legacy_cache")
+
     def test_compact_profile_reduces_feature_count(self):
         profile = resolve_feature_profile(
             {

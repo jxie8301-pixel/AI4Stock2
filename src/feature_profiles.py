@@ -201,9 +201,13 @@ def resolve_feature_profile(
     generation_space = str(profile.get("generation_space", profile.get("generation_alpha", "full_factor_space")))
     factor_store_name = profile.get("factor_store_name") or "full_factor_space"
     data_source = resolve_data_source_name(cfg)
-    factor_store_dir = features_cfg.get("factor_store_dir") or get_default_factor_store_dir(
-        data_source,
-        factor_store_name=factor_store_name,
+    factor_store_dir = (
+        features_cfg.get("factor_store_dir")
+        or features_cfg.get("cache_dir")
+        or get_default_factor_store_dir(
+            data_source,
+            factor_store_name=factor_store_name,
+        )
     )
     profile_selected_columns, profile_source_columns, profile_load_columns = _expand_profile_selected_columns(profile)
 

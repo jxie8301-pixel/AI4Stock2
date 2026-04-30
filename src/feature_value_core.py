@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
@@ -18,22 +19,19 @@ from src.label_utils import (
 from src.valuation_utils import nonpositive_invalid_flag, positive_inverse
 
 from src.feature_name_registry import (
-    ALL_FACTORS_LGBM_PREFIX,
     DEFAULT_ALPHA158_CONFIG,
     DEFAULT_LGBM_PURIFIED_CONFIG,
     DEFAULT_TECHNICAL_FACTOR_CONFIG,
     DEFAULT_TEMPORAL_FACTOR_CONFIG,
     DEFAULT_TUSHARE_FACTOR_CONFIG,
     EPS,
-    TECHNICAL_FACTOR_PREFIX,
-    TEMPORAL_FACTOR_PREFIX,
-    TUSHARE_FACTOR_PREFIX,
     get_all_factor_feature_names,
     get_alpha158_feature_config,
     get_lgbm_purified_feature_names,
     get_technical_factor_feature_names,
     get_temporal_factor_feature_names,
     get_tushare_factor_feature_names,
+    iter_factor_families,
 )
 
 
@@ -1407,6 +1405,53 @@ def compute_tushare_factor_features(
     return feat.reindex(columns=get_tushare_factor_feature_names(cfg))
 
 
+FactorComputeFactory = Callable[..., pd.DataFrame]
+
+
+@dataclass(frozen=True)
+class FactorComputeSpec:
+    name: str
+    compute_fn: FactorComputeFactory
+
+    def compute(
+        self,
+        df: pd.DataFrame,
+        *,
+        base: pd.DataFrame,
+        config: dict[str, Any] | None = None,
+    ) -> pd.DataFrame:
+        return self.compute_fn(df, config=config, _base=base)
+
+
+FACTOR_COMPUTE_REGISTRY: dict[str, FactorComputeSpec] = {
+    spec.name: spec
+    for spec in (
+        FactorComputeSpec("legacy158", compute_alpha158),
+        FactorComputeSpec("lgbm_purified", compute_lgbm_purified_features),
+        FactorComputeSpec("temporal", compute_temporal_factor_features),
+        FactorComputeSpec("technical", compute_technical_factor_features),
+        FactorComputeSpec("tushare", compute_tushare_factor_features),
+    )
+}
+
+
+def _factor_compute_config_map(
+    *,
+    alpha158_config: dict[str, Any] | None = None,
+    lgbm_purified_config: dict[str, Any] | None = None,
+    temporal_config: dict[str, Any] | None = None,
+    technical_config: dict[str, Any] | None = None,
+    tushare_config: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any] | None]:
+    return {
+        "legacy158": alpha158_config,
+        "lgbm_purified": lgbm_purified_config,
+        "temporal": temporal_config,
+        "technical": technical_config,
+        "tushare": tushare_config,
+    }
+
+
 def compute_all_factor_features(
     df: pd.DataFrame,
     alpha158_config: dict[str, Any] | None = None,
@@ -1414,18 +1459,31 @@ def compute_all_factor_features(
     technical_config: dict[str, Any] | None = None,
     data_source: str | None = None,
     tushare_config: dict[str, Any] | None = None,
+    temporal_config: dict[str, Any] | None = None,
     _base: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     base = _base if _base is not None else _prepare_ohlcv(df)
-    alpha158_feat = compute_alpha158(df, config=alpha158_config, _base=base)
-    lgbm_feat = compute_lgbm_purified_features(df, config=lgbm_purified_config, _base=base).rename(columns=lambda name: f"{ALL_FACTORS_LGBM_PREFIX}{name}")
-    temporal_feat = compute_temporal_factor_features(df, _base=base).rename(columns=lambda name: f"{TEMPORAL_FACTOR_PREFIX}{name}")
-    technical_feat = compute_technical_factor_features(df, config=technical_config, _base=base).rename(columns=lambda name: f"{TECHNICAL_FACTOR_PREFIX}{name}")
-    parts = [alpha158_feat, lgbm_feat, temporal_feat, technical_feat]
     normalized_data_source = normalize_data_source_name(data_source) if data_source is not None else None
-    if normalized_data_source == "tushare":
-        tushare_feat = compute_tushare_factor_features(df, config=tushare_config, _base=base).rename(columns=lambda name: f"{TUSHARE_FACTOR_PREFIX}{name}")
-        parts.append(tushare_feat)
+    family_configs = _factor_compute_config_map(
+        alpha158_config=alpha158_config,
+        lgbm_purified_config=lgbm_purified_config,
+        temporal_config=temporal_config,
+        technical_config=technical_config,
+        tushare_config=tushare_config,
+    )
+    parts: list[pd.DataFrame] = []
+    for family in iter_factor_families(normalized_data_source):
+        compute_spec = FACTOR_COMPUTE_REGISTRY[family.name]
+        part = compute_spec.compute(
+            df,
+            base=base,
+            config=family_configs[family.name],
+        )
+        if family.prefix:
+            part = part.rename(
+                columns=lambda name, prefix=family.prefix: f"{prefix}{name}"
+            )
+        parts.append(part)
     feat = pd.concat(parts, axis=1)
     ordered_names = get_all_factor_feature_names(
         alpha158_config,
@@ -1433,6 +1491,7 @@ def compute_all_factor_features(
         technical_config,
         data_source=normalized_data_source,
         tushare_config=tushare_config,
+        temporal_config=temporal_config,
     )
     return feat.reindex(columns=ordered_names)
 
@@ -1475,16 +1534,3 @@ def build_open_to_open_labels(
     }
     labels[get_legacy_label_column_name()] = labels[get_label_column_name(1)]
     return labels
-
-
-def _index_to_epoch_ns(index: pd.DatetimeIndex) -> np.ndarray:
-    idx_ns = index.astype("datetime64[ns]")
-    return idx_ns.view("i8")
-
-
-def _to_panel_arrays(feat: pd.DataFrame, label: pd.Series) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    y = label.reindex(feat.index)
-    x2d = feat.to_numpy(dtype=np.float32, copy=False)
-    y1d = y.to_numpy(dtype=np.float32, copy=False)
-    date_ns = _index_to_epoch_ns(feat.index).astype(np.int64, copy=False)
-    return x2d, y1d, date_ns

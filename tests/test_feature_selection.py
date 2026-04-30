@@ -106,6 +106,20 @@ class FeatureSelectionTest(unittest.TestCase):
         self.assertEqual(ranked["f1"].round(3).tolist(), [0.5, 1.0, 0.5, 1.0])
         self.assertEqual(ranked["f2"].round(3).tolist(), [0.5, 1.0, 1.0, 0.5])
 
+    def test_apply_cross_sectional_rank_preserves_excluded_columns(self):
+        frame = pd.DataFrame(
+            {
+                "f1": [10.0, 20.0, 30.0, 40.0],
+                "raw_market": [100.0, 90.0, 80.0, 70.0],
+            }
+        )
+        dates = pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"])
+
+        ranked = apply_cross_sectional_rank(frame, dates, exclude_columns={"raw_market"})
+
+        self.assertEqual(ranked["f1"].round(3).tolist(), [0.5, 1.0, 0.5, 1.0])
+        self.assertEqual(ranked["raw_market"].tolist(), frame["raw_market"].tolist())
+
     def test_apply_feature_transforms_respects_config_flag(self):
         frame = pd.DataFrame({"f1": [10.0, 20.0]})
         dates = pd.to_datetime(["2024-01-02", "2024-01-02"])

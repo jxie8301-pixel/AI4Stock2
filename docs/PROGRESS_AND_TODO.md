@@ -298,6 +298,107 @@ Current status:
 - [x] Low-risk unused imports are removed without adding a lint dependency
 - [ ] Lint gate remains deferred until code movement stabilizes
 
+### 0F. Training Performance Audit
+
+Audit status on 2026-04-30:
+
+- The active performance-critical path is still `run_native_rolling.py` -> `src/rolling_runtime.py` -> `src/rolling_train.py` -> `src/models/pure_lightgbm.py` / `src/models/pure_pytorch_lstm.py` -> `src/rolling_evaluate.py`.
+- The largest likely training-time costs are repeated date-local feature transforms, pandas-heavy LightGBM custom validation metrics, and LSTM sequence data rebuilding inside every rolling window.
+- Non-training runtime can still be dominated by factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
+
+Completed optimization slices:
+
+- [x] Vectorize the current per-call cross-sectional rank transform:
+  - benchmark shape: `126000` rows x `80` features, `75` ranked columns, `252` date groups
+  - before median: `1.194876s`
+  - after median: `1.160695s`
+  - speedup: `1.03x`
+- [x] Remove pandas work from LightGBM custom validation metrics inside `lgb.train` callbacks:
+  - benchmark shape: `20000` rows, `40` date groups, `500` symbols/date
+  - public `daily_rank_ic` before median: `0.037272s`; after median: `0.007012s`; speedup: `5.32x`
+  - public `valid_topk_excess` before median: `0.010678s`; after median: `0.004745s`; speedup: `2.25x`
+  - reused-context `daily_rank_ic` after median: `0.001865s`
+- [x] Cache validation-label ranks inside LightGBM metric contexts:
+  - benchmark shape: `20000` rows, `40` date groups, `500` symbols/date
+  - reused-context `daily_rank_ic` before median: `0.003142s`
+  - reused-context `daily_rank_ic` after median: `0.001865s`
+  - speedup: `1.68x`
+- [x] Vectorize ranker relevance-label construction for `rank_xendcg`:
+  - benchmark shape: `126000` rows, `252` date groups, `500` symbols/date
+  - before median: `0.040195s`
+  - after median: `0.019381s`
+  - speedup: `2.07x`
+- [x] Replace ranker group-size `groupby` with `factorize` / `bincount`:
+  - benchmark shape: `126000` rows, `252` date groups
+  - before median: `0.006093s`
+  - after median: `0.005718s`
+  - speedup: `1.07x`
+- [x] Add a sorted-input fast path for ranker date sorting:
+  - benchmark shape: `126000` rows x `80` features
+  - before median: `0.004991s`
+  - after median: `0.004791s`
+  - speedup: `1.04x`
+- [x] Replace top-k validation full sort with threshold partition while preserving stable boundary ties:
+  - benchmark shape: `40000` rows, `40` date groups, `1000` symbols/date, `topk=30`
+  - before median: `0.001784s`
+  - after median: `0.000740s`
+  - speedup: `2.41x`
+- [x] Run a temporary single-window LGBM benchmark:
+  - benchmark shape: `60800` rows, `51200` train rows, `6400` valid rows, `3200` prediction rows, `64` features, `90` boosting rounds, `num_threads=1`
+  - optimization-before median: `5.028498s`
+  - optimization-after median: `1.529942s`
+  - speedup: `3.29x`
+  - `best_valid_daily_rank_ic` stayed identical at `0.4838547584724201`
+  - temporary runner and raw benchmark artifacts were removed before commit; retained numbers above are the durable summary
+
+Priority fixes:
+
+- [ ] Add a reproducible rolling-runtime benchmark mode that records wall time for:
+  - factor-store load
+  - selected-feature materialization / finite-mask construction
+  - train / valid / test slicing
+  - feature transforms
+  - model fit
+  - validation metric callback time
+  - prediction
+  - non-ML baseline construction
+  - backtest / report generation
+- [ ] Cache or precompute date-local cross-sectional rank transforms once per loaded runtime frame when `features.transforms.cross_sectional_rank` is enabled:
+  - preserve strict per-date semantics
+  - avoid reranking overlapping train windows on every rolling step
+  - avoid separate train / valid / test rank passes when the transform is identical for the same date rows
+- [x] Rewrite LightGBM custom validation metrics to avoid pandas work inside every boosting round:
+  - precompute valid-date group boundaries once before `lgb.train`
+  - compute daily IC / RankIC from arrays
+  - compute top-k metrics from arrays while preserving stable tie order
+  - keep metric order and early-stopping behavior unchanged
+- [ ] Make optional factor-baseline generation explicit for training-speed runs:
+  - allow skipping average / sign-aligned / rank-average / rank-IC-weighted baselines when only model training time is under test
+  - cache train-window rank-IC weights where repeated formula-score / baseline paths use the same feature set and embargo
+  - vectorize per-feature rank-IC calculations before using all-factor profiles as baselines
+- [ ] Move LSTM sequence preparation out of `_run_lstm_window`:
+  - sort / factorize symbols once per runtime load
+  - build the full feature tensor once
+  - apply NaN / inf fill and clipping once instead of in every `Dataset.__getitem__`
+  - make `DataLoader` worker count configurable and enable `persistent_workers` when workers are used
+  - use `pin_memory` only when the selected device is CUDA
+- [ ] Reduce pandas copy and sort pressure in the LightGBM window path:
+  - avoid repeated `reset_index(drop=True)` copies where array masks are sufficient
+  - pass NumPy arrays to LightGBM after one validated feature-column ordering step
+  - avoid writing per-window feature-importance / training-history CSVs when a speed-only benchmark disables artifacts
+- [ ] Benchmark CPU LightGBM profiles against `lgbm_cuda_fast` on the same rolling slice:
+  - record model profile, `num_threads`, `device_type`, `max_bin`, rows, features, best iteration, and wall time
+  - do not treat `model.n_jobs` as effective unless it is actually wired into LightGBM parameters
+  - tune `num_threads` from measured throughput instead of keeping `24` as a universal default
+- [ ] Separate factor-store layout work from model optimization:
+  - first prove whether current bucket shards are I/O-bound for training reads
+  - only then add a date-major / year-partitioned training layout
+  - keep the logical factor-store metadata contract unchanged so prediction reproducibility is preserved
+- [ ] Keep diagnostics performance separate from rolling training promotion:
+  - vectorize single-factor and baseline rank-IC kernels where possible
+  - benchmark whether Tushare bucket factor generation is CPU-bound enough to prefer process workers over thread workers
+  - do not mix diagnostics-only speedups with model training correctness changes in the same patch
+
 ### 1. Relative-Opportunity Research Track
 
 - [ ] Promote `industry_excess` style labels from side experiment to first-class research track

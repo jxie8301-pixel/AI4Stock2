@@ -126,10 +126,12 @@ def apply_cross_sectional_rank(frame, dates, *, exclude_columns: set[str] | None
     exclude_columns = set(exclude_columns or set())
     ranked = frame.copy()
     date_index = pd.to_datetime(pd.Series(dates, index=ranked.index))
-    for col in ranked.columns:
-        if col in exclude_columns:
-            continue
-        ranked[col] = ranked[col].groupby(date_index, sort=False).rank(pct=True, method="average")
+    rank_columns = [col for col in ranked.columns if col not in exclude_columns]
+    if rank_columns:
+        ranked[rank_columns] = ranked[rank_columns].groupby(date_index, sort=False).rank(
+            pct=True,
+            method="average",
+        )
     return ranked
 
 

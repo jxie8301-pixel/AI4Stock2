@@ -5,7 +5,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.evaluate import safe_cross_sectional_corr
 from src.rolling_types import RollingRuntimeData
 
 FORMULA_SCORE_MODES = {"rank_avg", "sign_aligned_rank_avg", "rank_ic_weighted"}
@@ -53,6 +52,12 @@ def _build_prediction_series(
     ).sort_index()
 
 
+def _ensure_numeric_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if all(pd.api.types.is_numeric_dtype(dtype) for dtype in frame.dtypes):
+        return frame
+    return frame.apply(pd.to_numeric, errors="coerce")
+
+
 def _cross_sectional_rank_zscore(feature_frame: pd.DataFrame, dates: pd.Series) -> pd.DataFrame:
     numeric_frame = feature_frame.apply(pd.to_numeric, errors="coerce")
     date_key = pd.Series(pd.to_datetime(dates).to_numpy(), index=numeric_frame.index)
@@ -60,6 +65,86 @@ def _cross_sectional_rank_zscore(feature_frame: pd.DataFrame, dates: pd.Series) 
     centered = ranked - ranked.groupby(date_key, sort=False).transform("mean")
     scale = centered.groupby(date_key, sort=False).transform("std").replace(0.0, np.nan)
     return centered.divide(scale).replace([np.inf, -np.inf], np.nan)
+
+
+def _rank_average(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return np.asarray([], dtype=np.float64)
+    order = np.argsort(values, kind="mergesort")
+    sorted_values = values[order]
+    group_start_mask = np.r_[True, sorted_values[1:] != sorted_values[:-1]]
+    starts = np.flatnonzero(group_start_mask)
+    ends = np.r_[starts[1:], values.size]
+    average_ranks = 0.5 * (starts.astype(np.float64) + ends.astype(np.float64) - 1.0) + 1.0
+    ranks_sorted = np.repeat(average_ranks, ends - starts)
+    ranks = np.empty(values.size, dtype=np.float64)
+    ranks[order] = ranks_sorted
+    return ranks
+
+
+def _accumulate_rank_ic_fallback(
+    feature_values: np.ndarray,
+    labels: np.ndarray,
+    corr_sum: np.ndarray,
+    corr_count: np.ndarray,
+) -> None:
+    label_finite = np.isfinite(labels)
+    for col_idx in range(feature_values.shape[1]):
+        values = feature_values[:, col_idx]
+        valid = label_finite & np.isfinite(values)
+        if int(valid.sum()) < 2:
+            continue
+        xs = values[valid].astype(np.float64, copy=False)
+        ys = labels[valid].astype(np.float64, copy=False)
+        if np.unique(xs).size < 2 or np.unique(ys).size < 2:
+            continue
+        x_ranks = _rank_average(xs)
+        y_ranks = _rank_average(ys)
+        x_centered = x_ranks - x_ranks.mean()
+        y_centered = y_ranks - y_ranks.mean()
+        x_ss = float(np.dot(x_centered, x_centered))
+        y_ss = float(np.dot(y_centered, y_centered))
+        if x_ss <= 0.0 or y_ss <= 0.0:
+            continue
+        corr = float(np.dot(x_centered, y_centered) / np.sqrt(x_ss * y_ss))
+        if np.isfinite(corr):
+            corr_sum[col_idx] += corr
+            corr_count[col_idx] += 1
+
+
+def _accumulate_rank_ic_dense(
+    feature_values: np.ndarray,
+    labels: np.ndarray,
+    corr_sum: np.ndarray,
+    corr_count: np.ndarray,
+) -> None:
+    label_finite = np.isfinite(labels)
+    if int(label_finite.sum()) < 2:
+        return
+    y = labels[label_finite].astype(np.float64, copy=False)
+    X = feature_values[label_finite]
+    if not np.isfinite(X).all():
+        _accumulate_rank_ic_fallback(feature_values, labels, corr_sum, corr_count)
+        return
+    if np.unique(y).size < 2:
+        return
+
+    y_ranks = _rank_average(y)
+    x_ranks = pd.DataFrame(X).rank(method="average").to_numpy(dtype=np.float64, copy=False)
+    x_centered = x_ranks - x_ranks.mean(axis=0)
+    y_centered = y_ranks - y_ranks.mean()
+    x_ss = np.einsum("ij,ij->j", x_centered, x_centered)
+    y_ss = float(np.dot(y_centered, y_centered))
+    denom = np.sqrt(x_ss * y_ss)
+    valid = np.isfinite(denom) & (denom > 0.0)
+    if not valid.any():
+        return
+    numer = x_centered.T @ y_centered
+    corrs = np.divide(numer, denom, out=np.full_like(numer, np.nan, dtype=np.float64), where=valid)
+    finite = np.isfinite(corrs)
+    corr_sum[finite] += corrs[finite]
+    corr_count[finite] += 1
 
 
 def _compute_train_rank_ic_weights(
@@ -72,31 +157,43 @@ def _compute_train_rank_ic_weights(
     if not np.any(train_mask):
         return pd.Series(dtype=float)
 
-    train_dates = pd.to_datetime(runtime_data.dt_index[train_mask])
-    train_labels = pd.Series(runtime_data.y[train_mask], dtype=float)
-    train_feature_frame = runtime_data.factor_frame.loc[train_mask, feature_names].apply(
+    train_dates = pd.to_datetime(runtime_data.dt_index[train_mask]).to_numpy(dtype="datetime64[ns]", copy=False)
+    train_labels = np.asarray(runtime_data.y[train_mask], dtype=np.float64)
+    train_feature_values = runtime_data.factor_frame.loc[train_mask, feature_names].apply(
         pd.to_numeric,
         errors="coerce",
+    ).to_numpy(dtype=np.float64, copy=False)
+
+    valid_date_positions = np.flatnonzero(~np.isnat(train_dates))
+    if valid_date_positions.size == 0:
+        return pd.Series(0.0, index=feature_names, dtype=float)
+
+    order = valid_date_positions[np.argsort(train_dates[valid_date_positions], kind="stable")]
+    sorted_dates = train_dates[order]
+    sorted_labels = train_labels[order]
+    sorted_features = train_feature_values[order]
+    boundaries = np.flatnonzero(sorted_dates[1:] != sorted_dates[:-1]) + 1
+    starts = np.r_[0, boundaries]
+    ends = np.r_[boundaries, len(sorted_dates)]
+
+    corr_sum = np.zeros(len(feature_names), dtype=np.float64)
+    corr_count = np.zeros(len(feature_names), dtype=np.int32)
+    for start, end in zip(starts, ends, strict=False):
+        _accumulate_rank_ic_dense(
+            sorted_features[start:end],
+            sorted_labels[start:end],
+            corr_sum,
+            corr_count,
+        )
+
+    weights = np.divide(
+        corr_sum,
+        corr_count,
+        out=np.zeros(len(feature_names), dtype=np.float64),
+        where=corr_count > 0,
     )
-    weights: dict[str, float] = {}
-    for feature_name in feature_names:
-        frame = pd.DataFrame(
-            {
-                "date": train_dates,
-                "feature": train_feature_frame[feature_name].to_numpy(dtype=float, copy=False),
-                "label": train_labels.to_numpy(dtype=float, copy=False),
-            }
-        ).dropna()
-        if frame.empty:
-            weights[feature_name] = 0.0
-            continue
-        daily_rank_ic = frame.groupby("date", sort=True).apply(
-            lambda x: safe_cross_sectional_corr(x["feature"], x["label"], method="spearman"),
-            include_groups=False,
-        ).dropna()
-        mean_rank_ic = float(daily_rank_ic.mean()) if not daily_rank_ic.empty else 0.0
-        weights[feature_name] = mean_rank_ic if np.isfinite(mean_rank_ic) else 0.0
-    return pd.Series(weights, dtype=float)
+    weights[~np.isfinite(weights)] = 0.0
+    return pd.Series(weights, index=feature_names, dtype=float)
 
 
 def normalize_formula_score_mode(mode: str | None) -> str:
@@ -175,7 +272,7 @@ def build_average_factor_baseline_predictions(
         return None
     unique_source_columns = _unique_source_columns(runtime_data)
     feature_frame = runtime_data.factor_frame.loc[global_test_mask, unique_source_columns]
-    baseline_scores = feature_frame.apply(pd.to_numeric, errors="coerce").mean(axis=1, skipna=True)
+    baseline_scores = _ensure_numeric_frame(feature_frame).mean(axis=1, skipna=True)
     return _build_prediction_series(baseline_scores, runtime_data, global_test_mask)
 
 
@@ -195,40 +292,22 @@ def build_sign_aligned_factor_baseline_predictions(
     if not np.any(global_test_mask):
         return None
 
-    train_feature_frame = runtime_data.factor_frame.loc[train_mask, unique_source_columns].apply(
-        pd.to_numeric,
-        errors="coerce",
+    rank_ic_weights = _compute_train_rank_ic_weights(
+        runtime_data,
+        unique_source_columns,
+        train_mask=train_mask,
+    ).reindex(unique_source_columns).fillna(0.0)
+    sign_values = pd.Series(
+        np.where(rank_ic_weights.to_numpy(dtype=float, copy=False) < 0.0, -1.0, 1.0),
+        index=unique_source_columns,
+        dtype=float,
     )
-    train_dates = pd.to_datetime(runtime_data.dt_index[train_mask])
-    train_labels = pd.Series(runtime_data.y[train_mask], dtype=float)
-
-    sign_map: dict[str, float] = {}
-    for feature_name in unique_source_columns:
-        feature_values = pd.Series(
-            train_feature_frame[feature_name].to_numpy(dtype=float, copy=False),
-            dtype=float,
-        )
-        frame = pd.DataFrame({"date": train_dates, "feature": feature_values, "label": train_labels}).dropna()
-        if frame.empty:
-            sign_map[feature_name] = 1.0
-            continue
-        daily_rank_ic = frame.groupby("date", sort=True).apply(
-            lambda x: safe_cross_sectional_corr(x["feature"], x["label"], method="spearman"),
-            include_groups=False,
-        ).dropna()
-        if daily_rank_ic.empty:
-            sign_map[feature_name] = 1.0
-            continue
-        mean_rank_ic = float(daily_rank_ic.mean())
-        sign_map[feature_name] = 1.0 if not np.isfinite(mean_rank_ic) or mean_rank_ic >= 0 else -1.0
 
     test_feature_frame = runtime_data.factor_frame.loc[global_test_mask, unique_source_columns].apply(
         pd.to_numeric,
         errors="coerce",
     )
-    aligned_feature_frame = test_feature_frame.copy()
-    for feature_name, sign_value in sign_map.items():
-        aligned_feature_frame[feature_name] = aligned_feature_frame[feature_name] * float(sign_value)
+    aligned_feature_frame = test_feature_frame.mul(sign_values, axis=1)
     baseline_scores = aligned_feature_frame.mean(axis=1, skipna=True)
     return _build_prediction_series(baseline_scores, runtime_data, global_test_mask)
 

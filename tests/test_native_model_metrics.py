@@ -109,6 +109,17 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertTrue(higher_is_better)
         self.assertAlmostEqual(metric_value, 0.0, places=8)
 
+    def test_lightgbm_metrics_ignore_nat_dates(self):
+        predictions = np.array([1.0, 2.0, 100.0, 1.0, 2.0], dtype=np.float32)
+        labels = np.array([1.0, 2.0, 100.0, 2.0, 1.0], dtype=np.float32)
+        dates = pd.to_datetime(["2024-01-02", "2024-01-02", pd.NaT, "2024-01-03", "2024-01-03"])
+
+        metric_name, metric_value, higher_is_better = _daily_rank_ic_metric_from_labels(predictions, labels, dates)
+
+        self.assertEqual(metric_name, "daily_rank_ic")
+        self.assertTrue(higher_is_better)
+        self.assertAlmostEqual(metric_value, 0.0, places=8)
+
     def test_valid_topk_label_mean_metric_uses_selected_labels(self):
         predictions = np.array([0.9, 0.8, 0.1, 0.7, 0.6, 0.2], dtype=np.float32)
         labels = np.array([0.10, -0.05, -0.10, 0.03, 0.02, -0.04], dtype=np.float32)
@@ -127,6 +138,22 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(metric_name, "valid_topk_label_mean")
         self.assertTrue(higher_is_better)
         self.assertAlmostEqual(metric_value, 0.025, places=8)
+
+    def test_valid_topk_label_mean_preserves_boundary_tie_order(self):
+        predictions = np.array([0.9, 0.8, 0.8, 0.1], dtype=np.float32)
+        labels = np.array([1.0, 2.0, 100.0, 0.0], dtype=np.float32)
+        dates = np.array(["2024-01-02"] * 4, dtype="datetime64[ns]")
+
+        metric_name, metric_value, higher_is_better = _valid_topk_label_mean_metric_from_labels(
+            predictions,
+            labels,
+            dates,
+            topk=2,
+        )
+
+        self.assertEqual(metric_name, "valid_topk_label_mean")
+        self.assertTrue(higher_is_better)
+        self.assertAlmostEqual(metric_value, 1.5, places=8)
 
     def test_valid_topk_excess_mean_metric_uses_cross_section_excess(self):
         predictions = np.array([0.9, 0.8, 0.1, 0.7, 0.6, 0.2], dtype=np.float32)

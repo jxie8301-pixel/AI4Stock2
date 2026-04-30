@@ -58,63 +58,78 @@ def _compute_validation_topk_summary(
     opportunity_labels: pd.Series | None = None,
 ) -> dict[str, float | int]:
     topk = max(1, int(topk))
-    frame = pd.DataFrame(
-        {
-            "prediction": np.asarray(predictions, dtype=np.float32),
-            "label": pd.to_numeric(labels, errors="coerce").to_numpy(dtype=np.float32, copy=False),
-            "date": pd.to_datetime(pd.Series(dates)).to_numpy(),
-        }
-    ).dropna()
+    pred_arr = np.asarray(predictions, dtype=np.float32)
+    label_arr = pd.to_numeric(labels, errors="coerce").to_numpy(dtype=np.float32, copy=False)
+    date_arr = pd.to_datetime(pd.Series(dates)).to_numpy(dtype="datetime64[ns]", copy=False)
+    if len(pred_arr) != len(label_arr) or len(pred_arr) != len(date_arr):
+        raise ValueError("predictions, labels, and dates must have the same length")
+
+    valid_mask = np.isfinite(pred_arr) & np.isfinite(label_arr) & ~np.isnat(date_arr)
+    if not valid_mask.any():
+        return _empty_validation_topk_summary()
+
+    opportunity_arr = None
     if opportunity_labels is not None:
-        frame["opportunity_label"] = pd.to_numeric(opportunity_labels, errors="coerce").to_numpy(dtype=np.float32, copy=False)
-    if frame.empty:
-        return {
-            "valid_topk_days": 0,
-            "valid_top1_label_mean": float("nan"),
-            "valid_top1_positive_rate": float("nan"),
-            "valid_topk_label_mean": float("nan"),
-            "valid_topk_label_median": float("nan"),
-            "valid_topk_min_label_mean": float("nan"),
-            "valid_topk_positive_rate": float("nan"),
-            "valid_topk_excess_mean": float("nan"),
-            "valid_top1_opportunity_rate": float("nan"),
-            "valid_topk_opportunity_rate": float("nan"),
-        }
+        opportunity_full = pd.to_numeric(opportunity_labels, errors="coerce").to_numpy(dtype=np.float32, copy=False)
+        if len(opportunity_full) != len(pred_arr):
+            raise ValueError("opportunity_labels must have the same length as predictions")
+        opportunity_arr = opportunity_full[valid_mask]
+
+    pred_arr = pred_arr[valid_mask]
+    label_arr = label_arr[valid_mask]
+    date_arr = date_arr[valid_mask]
+    order = np.argsort(date_arr, kind="stable")
+    pred_sorted = pred_arr[order]
+    label_sorted = label_arr[order].astype(np.float64, copy=False)
+    date_sorted = date_arr[order]
+    opportunity_sorted = opportunity_arr[order] if opportunity_arr is not None else None
+
+    boundaries = np.flatnonzero(date_sorted[1:] != date_sorted[:-1]) + 1
+    starts = np.r_[0, boundaries]
+    ends = np.r_[boundaries, len(date_sorted)]
 
     daily_rows: list[dict[str, float]] = []
-    for _, group in frame.groupby("date", sort=True):
-        ranked = group.sort_values("prediction", ascending=False, kind="stable")
-        selected = ranked.head(topk)
-        if selected.empty:
+    for start, end in zip(starts, ends, strict=False):
+        group_pred = pred_sorted[start:end]
+        group_label = label_sorted[start:end]
+        if group_pred.size == 0:
             continue
-        selected_labels = selected["label"].to_numpy(dtype=np.float64, copy=False)
-        daily_rows.append(
-            {
-                "top1_label": float(selected_labels[0]),
-                "top1_positive": float(selected_labels[0] > 0.0),
-                "topk_label_mean": float(selected_labels.mean()),
-                "topk_label_median": float(np.median(selected_labels)),
-                "topk_min_label": float(selected_labels.min()),
-                "topk_positive_rate": float((selected_labels > 0.0).mean()),
-                "topk_excess_mean": float(selected_labels.mean() - group["label"].mean()),
-                "top1_opportunity": float(selected["opportunity_label"].iloc[0]) if "opportunity_label" in selected.columns else np.nan,
-                "topk_opportunity_rate": float(selected["opportunity_label"].mean()) if "opportunity_label" in selected.columns else np.nan,
-            }
-        )
+        top1_pos = int(np.argmax(group_pred))
+        if group_pred.size <= topk:
+            selected_pos = np.arange(group_pred.size)
+        else:
+            threshold = float(np.partition(group_pred, group_pred.size - topk)[group_pred.size - topk])
+            selected_mask = group_pred > threshold
+            needed = topk - int(selected_mask.sum())
+            if needed > 0:
+                tie_idx = np.flatnonzero(group_pred == threshold)[:needed]
+                selected_mask[tie_idx] = True
+            selected_pos = np.flatnonzero(selected_mask)
+        selected_labels = group_label[selected_pos]
+        row = {
+            "top1_label": float(group_label[top1_pos]),
+            "top1_positive": float(group_label[top1_pos] > 0.0),
+            "topk_label_mean": float(selected_labels.mean()),
+            "topk_label_median": float(np.median(selected_labels)),
+            "topk_min_label": float(selected_labels.min()),
+            "topk_positive_rate": float((selected_labels > 0.0).mean()),
+            "topk_excess_mean": float(selected_labels.mean() - group_label.mean()),
+            "top1_opportunity": np.nan,
+            "topk_opportunity_rate": np.nan,
+        }
+        if opportunity_sorted is not None:
+            group_opportunity = opportunity_sorted[start:end].astype(np.float64, copy=False)
+            selected_opportunity = group_opportunity[selected_pos]
+            row["top1_opportunity"] = float(group_opportunity[top1_pos])
+            row["topk_opportunity_rate"] = (
+                float(np.nanmean(selected_opportunity))
+                if not np.isnan(selected_opportunity).all()
+                else float("nan")
+            )
+        daily_rows.append(row)
 
     if not daily_rows:
-        return {
-            "valid_topk_days": 0,
-            "valid_top1_label_mean": float("nan"),
-            "valid_top1_positive_rate": float("nan"),
-            "valid_topk_label_mean": float("nan"),
-            "valid_topk_label_median": float("nan"),
-            "valid_topk_min_label_mean": float("nan"),
-            "valid_topk_positive_rate": float("nan"),
-            "valid_topk_excess_mean": float("nan"),
-            "valid_top1_opportunity_rate": float("nan"),
-            "valid_topk_opportunity_rate": float("nan"),
-        }
+        return _empty_validation_topk_summary()
 
     daily = pd.DataFrame(daily_rows)
     return {
@@ -519,6 +534,36 @@ def _run_lgbm_window(
     return _prediction_series_from_arrays(preds_arr, pred_dates, pred_symbols), importance_df, training_summary
 
 
+def _prepare_lstm_sequence_context(
+    cfg: dict[str, Any],
+    runtime_data: RollingRuntimeData,
+) -> dict[str, Any]:
+    seq_frame = runtime_data.factor_frame.sort_values(["symbol", "date"]).reset_index(drop=True)
+    seq_dt_index = pd.to_datetime(seq_frame["date"])
+    seq_symbols_str = seq_frame["symbol"].astype(str).to_numpy()
+    seq_symbol_ids, unique_symbols = pd.factorize(seq_symbols_str, sort=True)
+    X = seq_frame[runtime_data.selected_feature_names].to_numpy(dtype=np.float32, copy=True)
+    np.nan_to_num(X, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    np.clip(X, -10.0, 10.0, out=X)
+    seq_train_labels = transform_training_label_series(seq_frame["label"], seq_dt_index, cfg)
+    y_seq = seq_train_labels.to_numpy(dtype=np.float32, copy=True)
+    continuous_mask = np.zeros(len(seq_symbol_ids), dtype=bool)
+    lookback = int(runtime_data.lookback)
+    if lookback <= 1:
+        continuous_mask[:] = True
+    elif len(seq_symbol_ids) >= lookback:
+        continuous_mask[lookback - 1:] = seq_symbol_ids[lookback - 1:] == seq_symbol_ids[:-lookback + 1]
+    return {
+        "dt_index": seq_dt_index,
+        "dates": seq_dt_index.to_numpy(),
+        "symbol_ids": seq_symbol_ids,
+        "id_to_symbol": {idx: symbol for idx, symbol in enumerate(unique_symbols)},
+        "features": X,
+        "labels": y_seq,
+        "continuous_mask": continuous_mask,
+    }
+
+
 def _run_lstm_window(
     cfg: dict[str, Any],
     runtime_data: RollingRuntimeData,
@@ -533,19 +578,19 @@ def _run_lstm_window(
     load_models: bool,
     save_models: bool,
     device: str,
+    sequence_context: dict[str, Any] | None = None,
 ) -> pd.Series | None:
     from torch.utils.data import DataLoader
     from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset
 
-    seq_frame = runtime_data.factor_frame.sort_values(["symbol", "date"]).reset_index(drop=True)
-    seq_dt_index = pd.to_datetime(seq_frame["date"])
-    seq_symbols_str = seq_frame["symbol"].astype(str).to_numpy()
-    seq_symbol_ids, unique_symbols = pd.factorize(seq_symbols_str, sort=True)
-    id_to_symbol = {idx: symbol for idx, symbol in enumerate(unique_symbols)}
-    X = seq_frame[runtime_data.selected_feature_names].to_numpy(dtype=np.float32, copy=True)
-    seq_train_labels = transform_training_label_series(seq_frame["label"], seq_dt_index, cfg)
-    y_seq = seq_train_labels.to_numpy(dtype=np.float32, copy=True)
-    feature_indices = np.arange(len(runtime_data.selected_feature_names))
+    if sequence_context is None:
+        sequence_context = _prepare_lstm_sequence_context(cfg, runtime_data)
+    seq_dt_index = sequence_context["dt_index"]
+    seq_symbol_ids = sequence_context["symbol_ids"]
+    id_to_symbol = sequence_context["id_to_symbol"]
+    X = sequence_context["features"]
+    y_seq = sequence_context["labels"]
+    continuous_mask = sequence_context["continuous_mask"]
 
     train_mask_seq = (seq_dt_index >= train_start) & (seq_dt_index <= train_end)
     valid_mask_seq = (seq_dt_index >= valid_start) & (seq_dt_index <= valid_end)
@@ -557,8 +602,9 @@ def _run_lstm_window(
         seq_symbol_ids,
         train_mask_seq,
         lookback=runtime_data.lookback,
-        full_dates=seq_dt_index.to_numpy(),
-        feature_indices=feature_indices,
+        full_dates=sequence_context["dates"],
+        continuous_mask=continuous_mask,
+        sanitize_features=False,
     )
     valid_dataset = NativeStockDataset(
         X,
@@ -566,8 +612,9 @@ def _run_lstm_window(
         seq_symbol_ids,
         valid_mask_seq,
         lookback=runtime_data.lookback,
-        full_dates=seq_dt_index.to_numpy(),
-        feature_indices=feature_indices,
+        full_dates=sequence_context["dates"],
+        continuous_mask=continuous_mask,
+        sanitize_features=False,
     )
     test_dataset = NativeStockDataset(
         X,
@@ -575,8 +622,9 @@ def _run_lstm_window(
         seq_symbol_ids,
         test_mask_seq,
         lookback=runtime_data.lookback,
-        full_dates=seq_dt_index.to_numpy(),
-        feature_indices=feature_indices,
+        full_dates=sequence_context["dates"],
+        continuous_mask=continuous_mask,
+        sanitize_features=False,
     )
     if len(train_dataset) == 0:
         print("    Skipping window: native LSTM training dataset is empty.")
@@ -656,6 +704,11 @@ def generate_prediction_bundle(
         cfg,
         runtime_data,
         signal_horizon=signal_horizon,
+    )
+    lstm_sequence_context = (
+        _prepare_lstm_sequence_context(cfg, runtime_data)
+        if model_name not in {"formula_score", "lgbm"}
+        else None
     )
 
     print(
@@ -756,6 +809,7 @@ def generate_prediction_bundle(
                 load_models=args.load_models,
                 save_models=args.save_models,
                 device=device,
+                sequence_context=lstm_sequence_context,
             )
 
         if pred_series is not None and not pred_series.empty:

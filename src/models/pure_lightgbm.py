@@ -1,5 +1,6 @@
 """Pure LightGBM Native Implementation."""
 
+from dataclasses import dataclass
 import inspect
 from pathlib import Path
 from typing import Any
@@ -9,15 +10,179 @@ import lightgbm.callback as lgb_callback
 import numpy as np
 import pandas as pd
 
-from src.evaluate import safe_cross_sectional_corr
+
+@dataclass(frozen=True)
+class _MetricContext:
+    labels: np.ndarray
+    label_ranks: np.ndarray
+    order: np.ndarray
+    starts: np.ndarray
+    ends: np.ndarray
+    input_length: int
+
+
+def _rank_average(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64)
+    if values.size == 0:
+        return np.asarray([], dtype=np.float64)
+    order = np.argsort(values, kind="mergesort")
+    sorted_values = values[order]
+    group_start_mask = np.r_[True, sorted_values[1:] != sorted_values[:-1]]
+    starts = np.flatnonzero(group_start_mask)
+    ends = np.r_[starts[1:], values.size]
+    average_ranks = 0.5 * (starts.astype(np.float64) + ends.astype(np.float64) - 1.0) + 1.0
+    ranks_sorted = np.repeat(average_ranks, ends - starts)
+    ranks = np.empty(values.size, dtype=np.float64)
+    ranks[order] = ranks_sorted
+    return ranks
+
+
+def _prepare_metric_context(
+    labels: np.ndarray | pd.Series,
+    dates: np.ndarray | pd.Series,
+    *,
+    precompute_label_ranks: bool = True,
+) -> _MetricContext:
+    labels_arr = np.asarray(labels, dtype=np.float32)
+    date_arr = pd.to_datetime(pd.Series(dates)).to_numpy(dtype="datetime64[ns]", copy=False)
+    if len(labels_arr) != len(date_arr):
+        raise ValueError("labels and dates must have the same length")
+    valid_date_positions = np.flatnonzero(~np.isnat(date_arr))
+    if len(valid_date_positions) == 0:
+        empty_idx = np.asarray([], dtype=np.int64)
+        return _MetricContext(
+            labels=np.asarray([], dtype=np.float32),
+            label_ranks=np.asarray([], dtype=np.float64),
+            order=empty_idx,
+            starts=empty_idx,
+            ends=empty_idx,
+            input_length=int(len(labels_arr)),
+        )
+    order = valid_date_positions[np.argsort(date_arr[valid_date_positions], kind="stable")]
+    sorted_dates = date_arr[order]
+    boundaries = np.flatnonzero(sorted_dates[1:] != sorted_dates[:-1]) + 1
+    starts = np.r_[0, boundaries].astype(np.int64, copy=False)
+    ends = np.r_[boundaries, len(sorted_dates)].astype(np.int64, copy=False)
+    sorted_labels = labels_arr[order]
+    label_ranks = np.asarray([], dtype=np.float64)
+    if precompute_label_ranks:
+        label_ranks = np.full(len(sorted_labels), np.nan, dtype=np.float64)
+        for start, end in zip(starts, ends, strict=False):
+            label_slice = sorted_labels[start:end]
+            finite_mask = np.isfinite(label_slice)
+            if int(finite_mask.sum()) >= 2:
+                label_ranks[start:end][finite_mask] = _rank_average(label_slice[finite_mask])
+    return _MetricContext(
+        labels=sorted_labels,
+        label_ranks=label_ranks,
+        order=order.astype(np.int64, copy=False),
+        starts=starts,
+        ends=ends,
+        input_length=int(len(labels_arr)),
+    )
+
+
+def _ordered_predictions(preds: np.ndarray, context: _MetricContext) -> np.ndarray:
+    preds_arr = np.asarray(preds, dtype=np.float32)
+    if len(preds_arr) != context.input_length:
+        raise ValueError("predictions length must match metric context")
+    return preds_arr[context.order]
+
+
+def _pearson_corr_from_arrays(xs: np.ndarray, ys: np.ndarray) -> float:
+    if xs.size < 2 or ys.size < 2:
+        return float("nan")
+    xs = xs.astype(np.float64, copy=False)
+    ys = ys.astype(np.float64, copy=False)
+    xs_centered = xs - xs.mean()
+    ys_centered = ys - ys.mean()
+    xs_ss = float(np.dot(xs_centered, xs_centered))
+    ys_ss = float(np.dot(ys_centered, ys_centered))
+    if not np.isfinite(xs_ss) or not np.isfinite(ys_ss) or xs_ss <= 0.0 or ys_ss <= 0.0:
+        return float("nan")
+    return float(np.dot(xs_centered, ys_centered) / np.sqrt(xs_ss * ys_ss))
+
+
+def _daily_corr_metric_from_context(
+    preds: np.ndarray,
+    context: _MetricContext,
+    *,
+    method: str,
+    metric_name: str,
+):
+    ordered_preds = _ordered_predictions(preds, context)
+    values: list[float] = []
+    for start, end in zip(context.starts, context.ends, strict=False):
+        pred_slice = ordered_preds[start:end]
+        label_slice = context.labels[start:end]
+        valid_mask = np.isfinite(pred_slice) & np.isfinite(label_slice)
+        if int(valid_mask.sum()) < 2:
+            continue
+        xs = pred_slice[valid_mask]
+        ys = label_slice[valid_mask]
+        if method == "spearman":
+            xs = _rank_average(xs)
+            label_finite_mask = np.isfinite(label_slice)
+            if len(context.label_ranks) == len(context.labels) and np.array_equal(valid_mask, label_finite_mask):
+                ys = context.label_ranks[start:end][valid_mask]
+            else:
+                ys = _rank_average(ys)
+        corr = _pearson_corr_from_arrays(xs, ys)
+        if np.isfinite(corr):
+            values.append(float(corr))
+    if not values:
+        return metric_name, 0.0, True
+    return metric_name, float(np.mean(values)), True
+
+
+def _topk_label_metric_from_context(
+    preds: np.ndarray,
+    context: _MetricContext,
+    *,
+    topk: int,
+    metric_name: str,
+    excess: bool,
+):
+    topk = max(1, int(topk))
+    ordered_preds = _ordered_predictions(preds, context)
+    values: list[float] = []
+    for start, end in zip(context.starts, context.ends, strict=False):
+        pred_slice = ordered_preds[start:end]
+        label_slice = context.labels[start:end]
+        valid_mask = np.isfinite(pred_slice) & np.isfinite(label_slice)
+        if not valid_mask.any():
+            continue
+        pred_valid = pred_slice[valid_mask]
+        label_valid = label_slice[valid_mask]
+        if pred_valid.size <= topk:
+            selected_labels = label_valid
+        else:
+            threshold = float(np.partition(pred_valid, pred_valid.size - topk)[pred_valid.size - topk])
+            selected_mask = pred_valid > threshold
+            needed = topk - int(selected_mask.sum())
+            if needed > 0:
+                tie_idx = np.flatnonzero(pred_valid == threshold)[:needed]
+                selected_mask[tie_idx] = True
+            selected_labels = label_valid[selected_mask]
+        if selected_labels.size == 0:
+            continue
+        selected_mean = float(selected_labels.mean())
+        if excess:
+            selected_mean -= float(label_valid.mean())
+        values.append(selected_mean)
+    if not values:
+        return metric_name, 0.0, True
+    return metric_name, float(np.mean(values)), True
 
 
 def _daily_ic_metric_from_labels(preds: np.ndarray, labels: np.ndarray, dates: np.ndarray):
-    return _daily_corr_metric_from_labels(preds, labels, dates, method="pearson", metric_name="daily_ic")
+    context = _prepare_metric_context(labels, dates, precompute_label_ranks=False)
+    return _daily_corr_metric_from_context(preds, context, method="pearson", metric_name="daily_ic")
 
 
 def _daily_rank_ic_metric_from_labels(preds: np.ndarray, labels: np.ndarray, dates: np.ndarray):
-    return _daily_corr_metric_from_labels(preds, labels, dates, method="spearman", metric_name="daily_rank_ic")
+    context = _prepare_metric_context(labels, dates)
+    return _daily_corr_metric_from_context(preds, context, method="spearman", metric_name="daily_rank_ic")
 
 
 def _topk_label_metric_from_labels(
@@ -29,29 +194,14 @@ def _topk_label_metric_from_labels(
     metric_name: str,
     excess: bool,
 ):
-    topk = max(1, int(topk))
-    frame = pd.DataFrame(
-        {
-            "pred": np.asarray(preds, dtype=np.float32),
-            "label": np.asarray(labels, dtype=np.float32),
-            "date": pd.to_datetime(np.asarray(dates)),
-        }
-    ).dropna()
-    if frame.empty:
-        return metric_name, 0.0, True
-
-    values: list[float] = []
-    for _, group in frame.groupby("date", sort=True):
-        ranked = group.sort_values("pred", ascending=False, kind="stable").head(topk)
-        if ranked.empty:
-            continue
-        selected_mean = float(ranked["label"].mean())
-        if excess:
-            selected_mean -= float(group["label"].mean())
-        values.append(selected_mean)
-    if not values:
-        return metric_name, 0.0, True
-    return metric_name, float(np.mean(values)), True
+    context = _prepare_metric_context(labels, dates, precompute_label_ranks=False)
+    return _topk_label_metric_from_context(
+        preds,
+        context,
+        topk=topk,
+        metric_name=metric_name,
+        excess=excess,
+    )
 
 
 def _valid_topk_label_mean_metric_from_labels(
@@ -96,23 +246,8 @@ def _daily_corr_metric_from_labels(
     method: str,
     metric_name: str,
 ):
-    frame = pd.DataFrame(
-        {
-            "pred": np.asarray(preds, dtype=np.float32),
-            "label": np.asarray(labels, dtype=np.float32),
-            "date": pd.to_datetime(np.asarray(dates)),
-        }
-    ).dropna()
-    if frame.empty:
-        return metric_name, 0.0, True
-
-    daily_ic = frame.groupby("date", sort=True).apply(
-        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method=method),
-        include_groups=False,
-    ).dropna()
-    if daily_ic.empty:
-        return metric_name, 0.0, True
-    return metric_name, float(daily_ic.mean()), True
+    context = _prepare_metric_context(labels, dates)
+    return _daily_corr_metric_from_context(preds, context, method=method, metric_name=metric_name)
 
 
 def _daily_ic_metric(preds: np.ndarray, dataset: lgb.Dataset, dates: np.ndarray):
@@ -267,7 +402,13 @@ def _sort_frame_by_dates(
     date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
     if len(X) != len(y) or len(X) != len(date_series):
         raise ValueError("X, y, and dates must have the same length")
-    order = np.argsort(date_series.to_numpy(dtype="datetime64[ns]"), kind="stable")
+    raw_dates = date_series.to_numpy(dtype="datetime64[ns]", copy=False)
+    if len(raw_dates) <= 1 or bool(np.all(raw_dates[1:] >= raw_dates[:-1])):
+        x_out = X if isinstance(X.index, pd.RangeIndex) and X.index.equals(pd.RangeIndex(len(X))) else X.reset_index(drop=True)
+        y_out = y if isinstance(y.index, pd.RangeIndex) and y.index.equals(pd.RangeIndex(len(y))) else y.reset_index(drop=True)
+        return x_out, y_out, date_series
+
+    order = np.argsort(raw_dates, kind="stable")
     return (
         X.iloc[order].reset_index(drop=True),
         y.iloc[order].reset_index(drop=True),
@@ -279,7 +420,11 @@ def _compute_ranking_groups(dates: np.ndarray | pd.Series) -> np.ndarray:
     date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
     if date_series.empty:
         return np.array([], dtype=np.int32)
-    return date_series.groupby(date_series, sort=False).size().to_numpy(dtype=np.int32, copy=False)
+    codes, _ = pd.factorize(date_series, sort=False)
+    valid_codes = codes[codes >= 0]
+    if valid_codes.size == 0:
+        return np.array([], dtype=np.int32)
+    return np.bincount(valid_codes).astype(np.int32, copy=False)
 
 
 def _build_ranking_relevance_labels(
@@ -290,26 +435,33 @@ def _build_ranking_relevance_labels(
 ) -> np.ndarray:
     """Convert raw returns into per-date integer relevance labels for LTR."""
     num_bins = max(2, int(num_bins))
-    label_series = pd.Series(np.asarray(labels, dtype=np.float32)).reset_index(drop=True)
-    date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
-    if len(label_series) != len(date_series):
+    label_values = np.asarray(labels, dtype=np.float32)
+    date_values = pd.to_datetime(pd.Series(dates)).to_numpy(dtype="datetime64[ns]", copy=False)
+    if len(label_values) != len(date_values):
         raise ValueError("labels and dates must have the same length")
 
-    relevance = np.zeros(len(label_series), dtype=np.int32)
-    if label_series.empty:
+    relevance = np.zeros(len(label_values), dtype=np.int32)
+    valid_date_positions = np.flatnonzero(~np.isnat(date_values))
+    if valid_date_positions.size == 0:
         return relevance
 
-    for _, idx in date_series.groupby(date_series, sort=False).groups.items():
-        group_idx = np.asarray(idx, dtype=np.int64)
-        values = label_series.iloc[group_idx].to_numpy(dtype=np.float32, copy=False)
+    order = valid_date_positions[np.argsort(date_values[valid_date_positions], kind="stable")]
+    sorted_dates = date_values[order]
+    boundaries = np.flatnonzero(sorted_dates[1:] != sorted_dates[:-1]) + 1
+    starts = np.r_[0, boundaries]
+    ends = np.r_[boundaries, len(sorted_dates)]
+    for start, end in zip(starts, ends, strict=False):
+        group_idx = order[start:end]
+        values = label_values[group_idx]
         finite_mask = np.isfinite(values)
-        if finite_mask.sum() <= 1:
+        finite_count = int(finite_mask.sum())
+        if finite_count <= 1:
             continue
         finite_values = values[finite_mask]
         if np.isclose(float(finite_values.max()), float(finite_values.min())):
             continue
-        ranks = pd.Series(finite_values).rank(method="average", ascending=True).to_numpy(dtype=np.float32, copy=False)
-        group_rel = np.floor((ranks - 1.0) * num_bins / len(finite_values) + 1e-8).astype(np.int32)
+        ranks = _rank_average(finite_values)
+        group_rel = np.floor((ranks - 1.0) * num_bins / finite_count + 1e-8).astype(np.int32)
         group_rel = np.maximum(group_rel, 0)
         group_rel = np.minimum(group_rel, num_bins - 1)
         relevance[group_idx[finite_mask]] = group_rel
@@ -587,40 +739,52 @@ class NativeLGBM:
                 else:
                     raw_valid_labels = raw_valid_eval_series.to_numpy(dtype=np.float32, copy=False)
                     raw_valid_dates = valid_dates
+                metric_context = _prepare_metric_context(raw_valid_labels, raw_valid_dates)
                 def _feval(
                     preds,
                     data,
                     *,
-                    labels=raw_valid_labels,
-                    dates=raw_valid_dates,
+                    context=metric_context,
                     primary=self.early_stopping_metric,
                     topk=self.validation_topk,
                 ):
                     if primary == "daily_ic":
                         return [
-                            _daily_ic_metric_from_labels(preds, labels, dates),
-                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
+                            _daily_corr_metric_from_context(preds, context, method="pearson", metric_name="daily_ic"),
+                            _daily_corr_metric_from_context(preds, context, method="spearman", metric_name="daily_rank_ic"),
                         ]
                     if primary == "daily_rank_ic":
                         return [
-                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
-                            _daily_ic_metric_from_labels(preds, labels, dates),
+                            _daily_corr_metric_from_context(preds, context, method="spearman", metric_name="daily_rank_ic"),
+                            _daily_corr_metric_from_context(preds, context, method="pearson", metric_name="daily_ic"),
                         ]
                     if primary == "valid_topk_label_mean":
                         return [
-                            _valid_topk_label_mean_metric_from_labels(preds, labels, dates, topk=topk),
-                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
-                            _daily_ic_metric_from_labels(preds, labels, dates),
+                            _topk_label_metric_from_context(
+                                preds,
+                                context,
+                                topk=topk,
+                                metric_name="valid_topk_label_mean",
+                                excess=False,
+                            ),
+                            _daily_corr_metric_from_context(preds, context, method="spearman", metric_name="daily_rank_ic"),
+                            _daily_corr_metric_from_context(preds, context, method="pearson", metric_name="daily_ic"),
                         ]
                     if primary == "valid_topk_excess_mean":
                         return [
-                            _valid_topk_excess_mean_metric_from_labels(preds, labels, dates, topk=topk),
-                            _daily_rank_ic_metric_from_labels(preds, labels, dates),
-                            _daily_ic_metric_from_labels(preds, labels, dates),
+                            _topk_label_metric_from_context(
+                                preds,
+                                context,
+                                topk=topk,
+                                metric_name="valid_topk_excess_mean",
+                                excess=True,
+                            ),
+                            _daily_corr_metric_from_context(preds, context, method="spearman", metric_name="daily_rank_ic"),
+                            _daily_corr_metric_from_context(preds, context, method="pearson", metric_name="daily_ic"),
                         ]
                     return [
-                        _daily_ic_metric_from_labels(preds, labels, dates),
-                        _daily_rank_ic_metric_from_labels(preds, labels, dates),
+                        _daily_corr_metric_from_context(preds, context, method="pearson", metric_name="daily_ic"),
+                        _daily_corr_metric_from_context(preds, context, method="spearman", metric_name="daily_rank_ic"),
                     ]
 
                 feval = _feval

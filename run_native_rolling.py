@@ -64,6 +64,31 @@ def build_parser() -> argparse.ArgumentParser:
             "Portfolio output will omit reference-baseline comparisons."
         ),
     )
+    parser.add_argument(
+        "--backtest-artifact-level",
+        choices=("full", "reports", "metrics"),
+        default="full",
+        help=(
+            "Control backtest artifact volume. full preserves all diagnostics, plots, trace, and CSV reports; "
+            "reports keeps core CSV/JSON reports but skips opportunity diagnostics, plots, and trace; "
+            "metrics writes only metrics/manifest-oriented artifacts."
+        ),
+    )
+    parser.add_argument(
+        "--skip-opportunity-diagnostics",
+        action="store_true",
+        help="Skip buyability/opportunity diagnostics during backtest evaluation.",
+    )
+    parser.add_argument(
+        "--skip-backtest-plots",
+        action="store_true",
+        help="Skip cumulative return, drawdown, and monthly heatmap plots during backtest evaluation.",
+    )
+    parser.add_argument(
+        "--skip-backtest-trace",
+        action="store_true",
+        help="Skip detailed native backtest trace artifact generation.",
+    )
     return parser
 
 

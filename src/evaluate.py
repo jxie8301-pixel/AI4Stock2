@@ -333,6 +333,60 @@ def align_prediction_label_pairs(
     return frame["pred"].sort_index(), frame["label"].sort_index()
 
 
+def _rowwise_pearson_corr(left: pd.DataFrame, right: pd.DataFrame) -> pd.Series:
+    left_values = left.to_numpy(dtype=float, copy=False)
+    right_values = right.to_numpy(dtype=float, copy=False)
+    valid = np.isfinite(left_values) & np.isfinite(right_values)
+    counts = valid.sum(axis=1)
+
+    left_sums = np.where(valid, left_values, 0.0).sum(axis=1)
+    right_sums = np.where(valid, right_values, 0.0).sum(axis=1)
+    left_means = np.divide(
+        left_sums,
+        counts,
+        out=np.full(left_values.shape[0], np.nan, dtype=float),
+        where=counts > 0,
+    )
+    right_means = np.divide(
+        right_sums,
+        counts,
+        out=np.full(right_values.shape[0], np.nan, dtype=float),
+        where=counts > 0,
+    )
+
+    left_centered = np.where(valid, left_values - left_means[:, None], 0.0)
+    right_centered = np.where(valid, right_values - right_means[:, None], 0.0)
+    numerator = (left_centered * right_centered).sum(axis=1)
+    left_ss = (left_centered * left_centered).sum(axis=1)
+    right_ss = (right_centered * right_centered).sum(axis=1)
+    denominator = np.sqrt(left_ss * right_ss)
+    corr = np.divide(
+        numerator,
+        denominator,
+        out=np.full(left_values.shape[0], np.nan, dtype=float),
+        where=(counts >= 2) & (denominator > 0.0),
+    )
+    return pd.Series(corr, index=left.index, dtype=float)
+
+
+def _compute_daily_ic_series(
+    predictions: pd.Series,
+    labels: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    pred_matrix = predictions.unstack(level=-1).sort_index().astype(float)
+    label_matrix = (
+        labels.unstack(level=-1)
+        .reindex(index=pred_matrix.index, columns=pred_matrix.columns)
+        .astype(float)
+    )
+
+    daily_ic = _rowwise_pearson_corr(pred_matrix, label_matrix)
+    pred_ranks = pred_matrix.rank(axis=1, method="average", na_option="keep")
+    label_ranks = label_matrix.rank(axis=1, method="average", na_option="keep")
+    daily_rank_ic = _rowwise_pearson_corr(pred_ranks, label_ranks)
+    return daily_ic, daily_rank_ic
+
+
 def compute_signal_metrics(predictions: pd.Series, labels: pd.Series) -> dict:
     """Compute IC and ICIR metrics between predictions and actual returns.
 
@@ -362,26 +416,22 @@ def compute_signal_metrics(predictions: pd.Series, labels: pd.Series) -> dict:
             "Rank_IC_win_rate": 0.0,
         }, empty_daily_ic
 
-    # Group by date, compute daily IC (Pearson correlation of ranks)
-    daily_ic = df.groupby(level=0).apply(
-        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="pearson"),
-        include_groups=False,
-    )
-    daily_rank_ic = df.groupby(level=0).apply(
-        lambda x: safe_cross_sectional_corr(x["pred"], x["label"], method="spearman"),
-        include_groups=False,
-    )
+    daily_ic, daily_rank_ic = _compute_daily_ic_series(aligned_preds, aligned_labels)
 
     daily_ic_valid = daily_ic.dropna()
     daily_rank_ic_valid = daily_rank_ic.dropna()
+    daily_ic_mean = daily_ic.mean()
+    daily_ic_std = daily_ic.std()
+    daily_rank_ic_mean = daily_rank_ic.mean()
+    daily_rank_ic_std = daily_rank_ic.std()
     metrics = {
-        "IC_mean": daily_ic.mean(),
-        "IC_std": daily_ic.std(),
-        "ICIR": daily_ic.mean() / daily_ic.std() if daily_ic.std() > 0 else 0,
+        "IC_mean": daily_ic_mean,
+        "IC_std": daily_ic_std,
+        "ICIR": daily_ic_mean / daily_ic_std if daily_ic_std > 0 else 0,
         "IC_win_rate": float((daily_ic_valid > 0).mean()) if not daily_ic_valid.empty else 0.0,
-        "Rank_IC_mean": daily_rank_ic.mean(),
-        "Rank_IC_std": daily_rank_ic.std(),
-        "Rank_ICIR": daily_rank_ic.mean() / daily_rank_ic.std() if daily_rank_ic.std() > 0 else 0,
+        "Rank_IC_mean": daily_rank_ic_mean,
+        "Rank_IC_std": daily_rank_ic_std,
+        "Rank_ICIR": daily_rank_ic_mean / daily_rank_ic_std if daily_rank_ic_std > 0 else 0,
         "Rank_IC_win_rate": float((daily_rank_ic_valid > 0).mean()) if not daily_rank_ic_valid.empty else 0.0,
     }
     return metrics, daily_ic

@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
+from src.backtest_controls import normalize_risk_control_config
 from src.experiment_store import finalize_run_store, resolve_rebalance_freq, resolve_retrain_step
 from src.backtest_report import attach_native_baseline_returns, to_legacy_return_report
 from src.backtest_trace import save_trace_artifacts, select_trace_dates
@@ -51,6 +53,64 @@ def _run_baseline_backtests(
             ),
         )
     return reports
+
+
+def _fixed_risk_baselines_match_same_gate(
+    risk_control_cfg: Any,
+    *,
+    fallback_risk_degree: float,
+) -> bool:
+    normalized = normalize_risk_control_config(
+        risk_control_cfg,
+        fallback_risk_degree=float(fallback_risk_degree),
+    )
+    if str(normalized.get("mode")) != "fixed":
+        return False
+    return math.isclose(
+        float(normalized["risk_degree"]),
+        float(fallback_risk_degree),
+        rel_tol=0.0,
+        abs_tol=1e-12,
+    )
+
+
+def _reuse_same_gate_reports_as_fixed_risk(
+    same_gate_baseline_reports: dict[str, tuple[str, pd.DataFrame]],
+) -> dict[str, tuple[str, pd.DataFrame]]:
+    return {
+        f"fixed_risk_{prefix}": (f"Fixed-Risk {display_name}", report)
+        for prefix, (display_name, report) in same_gate_baseline_reports.items()
+    }
+
+
+def _bundle_reference_baseline_predictions(
+    bundle: PredictionBundle,
+    *,
+    skip_reference_baselines: bool,
+) -> list[pd.Series | None]:
+    if skip_reference_baselines:
+        return [None for _ in REFERENCE_BASELINE_SPECS]
+    return [
+        bundle.avg_factor_baseline_predictions,
+        bundle.sign_aligned_factor_baseline_predictions,
+        bundle.rank_avg_factor_baseline_predictions,
+        bundle.rank_ic_weighted_factor_baseline_predictions,
+    ]
+
+
+def _resolve_backtest_artifact_options(args: argparse.Namespace) -> dict[str, Any]:
+    level = str(getattr(args, "backtest_artifact_level", "full") or "full").strip().lower()
+    if level not in {"full", "reports", "metrics"}:
+        raise ValueError(f"Unsupported backtest artifact level: {level}")
+
+    reduced_level = level in {"reports", "metrics"}
+    return {
+        "level": level,
+        "skip_opportunity_diagnostics": bool(getattr(args, "skip_opportunity_diagnostics", False)) or reduced_level,
+        "skip_backtest_plots": bool(getattr(args, "skip_backtest_plots", False)) or reduced_level,
+        "skip_backtest_trace": bool(getattr(args, "skip_backtest_trace", False)) or reduced_level,
+        "write_report_artifacts": level != "metrics",
+    }
 
 
 def _sanitize_dict_keys(data: Any) -> Any:
@@ -154,6 +214,7 @@ def evaluate_prediction_bundle(
     rebalance_freq = int(resolve_rebalance_freq(cfg, args))
     runtime_data_cache = None
     run_warnings: list[dict[str, Any]] = []
+    artifact_options = _resolve_backtest_artifact_options(args)
 
     def _ensure_runtime_data(*, extra_columns: list[str] | None = None):
         nonlocal runtime_data_cache
@@ -182,11 +243,16 @@ def evaluate_prediction_bundle(
             )
         return runtime_data_cache
 
-    avg_factor_baseline_predictions = bundle.avg_factor_baseline_predictions
-    sign_aligned_factor_baseline_predictions = bundle.sign_aligned_factor_baseline_predictions
-    rank_avg_factor_baseline_predictions = bundle.rank_avg_factor_baseline_predictions
-    rank_ic_weighted_factor_baseline_predictions = bundle.rank_ic_weighted_factor_baseline_predictions
     skip_reference_baselines = bool(getattr(args, "skip_reference_baselines", False))
+    (
+        avg_factor_baseline_predictions,
+        sign_aligned_factor_baseline_predictions,
+        rank_avg_factor_baseline_predictions,
+        rank_ic_weighted_factor_baseline_predictions,
+    ) = _bundle_reference_baseline_predictions(
+        bundle,
+        skip_reference_baselines=skip_reference_baselines,
+    )
     if avg_factor_baseline_predictions is None and not skip_reference_baselines:
         try:
             runtime_data = _ensure_runtime_data()
@@ -279,45 +345,49 @@ def evaluate_prediction_bundle(
         bundle.backtest_label_series,
         cfg.get("backtest", {}).get("benchmark"),
     )
-    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
-    opportunity_labels: pd.Series | None = None
-    opportunity_instrument_groups: pd.Series | None = None
-    benchmark_forward_returns: pd.Series | None = None
-    if str(opportunity_cfg["mode"]) == "industry_excess":
-        opportunity_instrument_groups = load_instrument_industry_groups(
-            cfg,
-            instruments=aligned_preds.index.get_level_values("instrument").unique(),
-        )
-    elif str(opportunity_cfg["mode"]) == "benchmark_excess":
-        benchmark_forward_returns = build_forward_compound_return_series(bench_series, horizon=signal_horizon)
-    try:
-        opportunity_labels = build_opportunity_target_series(
-            aligned_labels,
-            opportunity_cfg=opportunity_cfg,
-            instrument_groups=opportunity_instrument_groups,
-            benchmark_forward_returns=benchmark_forward_returns,
-        )
-    except Exception as exc:
-        _append_run_warning(
-            run_warnings,
-            code="opportunity_label_derivation_failed",
-            message=f"Skipping opportunity label derivation: {exc}",
+    opportunity_paths: dict[str, str] = {}
+    if not artifact_options["skip_opportunity_diagnostics"]:
+        opportunity_cfg = resolve_opportunity_label_cfg(cfg)
+        opportunity_labels: pd.Series | None = None
+        opportunity_instrument_groups: pd.Series | None = None
+        benchmark_forward_returns: pd.Series | None = None
+        if str(opportunity_cfg["mode"]) == "industry_excess":
+            opportunity_instrument_groups = load_instrument_industry_groups(
+                cfg,
+                instruments=aligned_preds.index.get_level_values("instrument").unique(),
+            )
+        elif str(opportunity_cfg["mode"]) == "benchmark_excess":
+            benchmark_forward_returns = build_forward_compound_return_series(bench_series, horizon=signal_horizon)
+        try:
+            opportunity_labels = build_opportunity_target_series(
+                aligned_labels,
+                opportunity_cfg=opportunity_cfg,
+                instrument_groups=opportunity_instrument_groups,
+                benchmark_forward_returns=benchmark_forward_returns,
+            )
+        except Exception as exc:
+            _append_run_warning(
+                run_warnings,
+                code="opportunity_label_derivation_failed",
+                message=f"Skipping opportunity label derivation: {exc}",
+                opportunity_mode=str(opportunity_cfg["mode"]),
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            opportunity_labels = None
+        opportunity_paths = save_opportunity_diagnostics(
+            paths.results_dir,
+            predictions=aligned_preds,
+            labels=aligned_labels,
+            topk=int(cfg["strategy"]["topk"]),
+            opportunity_labels=opportunity_labels,
             opportunity_mode=str(opportunity_cfg["mode"]),
-            error_type=type(exc).__name__,
-            error=str(exc),
+            opportunity_threshold=float(opportunity_cfg["threshold"]),
+            n_buckets=10,
         )
-        opportunity_labels = None
-    opportunity_paths = save_opportunity_diagnostics(
-        paths.results_dir,
-        predictions=aligned_preds,
-        labels=aligned_labels,
-        topk=int(cfg["strategy"]["topk"]),
-        opportunity_labels=opportunity_labels,
-        opportunity_mode=str(opportunity_cfg["mode"]),
-        opportunity_threshold=float(opportunity_cfg["threshold"]),
-        n_buckets=10,
-    )
-    print(f"Buyability diagnostics saved: {opportunity_paths['buyability_summary_path']}")
+        print(f"Buyability diagnostics saved: {opportunity_paths['buyability_summary_path']}")
+    else:
+        print("Buyability diagnostics skipped.")
     risk_control_cfg = cfg["backtest"].get("risk_control")
     risk_control_signal_values = None
     if isinstance(risk_control_cfg, dict):
@@ -397,21 +467,23 @@ def evaluate_prediction_bundle(
         preds=bundle.final_predictions,
         **backtest_kwargs,
     )
-    trace_top_n = max(int(cfg.get("artifacts", {}).get("backtest_trace_top_n", 8) or 8), 0)
-    trace_dates: set[pd.Timestamp] = set(select_trace_dates(backtest_report, top_n=trace_top_n))
-    if "intraperiod_exit_count" in backtest_report.columns:
-        exit_rows = backtest_report.loc[backtest_report["intraperiod_exit_count"].fillna(0).astype(int) > 0]
-        if not exit_rows.empty:
-            exit_focus_n = min(max(trace_top_n, 8), len(exit_rows))
-            trace_dates.update(pd.to_datetime(exit_rows["intraperiod_exit_count"].nlargest(exit_focus_n).index).tolist())
-            if "intraperiod_exit_saved_return" in exit_rows.columns:
-                trace_dates.update(
-                    pd.to_datetime(exit_rows["intraperiod_exit_saved_return"].abs().nlargest(exit_focus_n).index).tolist()
-                )
-            if "intraperiod_exit_missed_return" in exit_rows.columns:
-                trace_dates.update(
-                    pd.to_datetime(exit_rows["intraperiod_exit_missed_return"].abs().nlargest(exit_focus_n).index).tolist()
-                )
+    trace_dates: set[pd.Timestamp] = set()
+    if not artifact_options["skip_backtest_trace"]:
+        trace_top_n = max(int(cfg.get("artifacts", {}).get("backtest_trace_top_n", 8) or 8), 0)
+        trace_dates = set(select_trace_dates(backtest_report, top_n=trace_top_n))
+        if "intraperiod_exit_count" in backtest_report.columns:
+            exit_rows = backtest_report.loc[backtest_report["intraperiod_exit_count"].fillna(0).astype(int) > 0]
+            if not exit_rows.empty:
+                exit_focus_n = min(max(trace_top_n, 8), len(exit_rows))
+                trace_dates.update(pd.to_datetime(exit_rows["intraperiod_exit_count"].nlargest(exit_focus_n).index).tolist())
+                if "intraperiod_exit_saved_return" in exit_rows.columns:
+                    trace_dates.update(
+                        pd.to_datetime(exit_rows["intraperiod_exit_saved_return"].abs().nlargest(exit_focus_n).index).tolist()
+                    )
+                if "intraperiod_exit_missed_return" in exit_rows.columns:
+                    trace_dates.update(
+                        pd.to_datetime(exit_rows["intraperiod_exit_missed_return"].abs().nlargest(exit_focus_n).index).tolist()
+                    )
     baseline_prediction_series = [
         avg_factor_baseline_predictions,
         sign_aligned_factor_baseline_predictions,
@@ -435,13 +507,19 @@ def evaluate_prediction_bundle(
         "risk_control": None,
         "risk_control_signal_values": None,
     }
-    fixed_risk_baseline_reports = _run_baseline_backtests(
-        [
-            (f"fixed_risk_{prefix}", f"Fixed-Risk {display_name}", predictions)
-            for prefix, display_name, predictions in baseline_predictions
-        ],
-        backtest_kwargs=fixed_risk_backtest_kwargs,
-    )
+    if _fixed_risk_baselines_match_same_gate(
+        risk_control_cfg,
+        fallback_risk_degree=float(backtest_kwargs["risk_degree"]),
+    ):
+        fixed_risk_baseline_reports = _reuse_same_gate_reports_as_fixed_risk(same_gate_baseline_reports)
+    else:
+        fixed_risk_baseline_reports = _run_baseline_backtests(
+            [
+                (f"fixed_risk_{prefix}", f"Fixed-Risk {display_name}", predictions)
+                for prefix, display_name, predictions in baseline_predictions
+            ],
+            backtest_kwargs=fixed_risk_backtest_kwargs,
+        )
     plot_report = to_legacy_return_report(backtest_report)
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,
@@ -457,18 +535,24 @@ def evaluate_prediction_bundle(
     monthly_summary = build_period_summary(metric_report, freq="ME")
     rebalance_summary = build_rebalance_period_summary(metric_report, rebalance_freq)
 
-    plot_cumulative_return(metric_report, save_path=str(paths.results_dir / "native_cumulative_return.png"))
-    plot_drawdown(metric_report, save_path=str(paths.results_dir / "native_drawdown.png"))
-    plot_monthly_heatmap(metric_report, save_path=str(paths.results_dir / "native_monthly_heatmap.png"))
-    save_monthly_report(metric_report, save_path=str(paths.results_dir / "native_monthly_report.csv"))
-    metric_report.to_csv(paths.results_dir / "native_daily_report.csv", index=True)
-    if "intraperiod_exit_count" in metric_report.columns:
-        exit_daily_report = metric_report.loc[metric_report["intraperiod_exit_count"].fillna(0).astype(int) > 0].copy()
-        if not exit_daily_report.empty:
-            exit_daily_report.index.name = "datetime"
-            exit_daily_report.to_csv(paths.results_dir / "native_exit_daily_report.csv", index=True)
-    save_period_summary(monthly_summary, paths.results_dir / "native_monthly_summary.csv")
-    save_period_summary(rebalance_summary, paths.results_dir / "native_rebalance_summary.csv")
+    if not artifact_options["skip_backtest_plots"]:
+        plot_cumulative_return(metric_report, save_path=str(paths.results_dir / "native_cumulative_return.png"))
+        plot_drawdown(metric_report, save_path=str(paths.results_dir / "native_drawdown.png"))
+        plot_monthly_heatmap(metric_report, save_path=str(paths.results_dir / "native_monthly_heatmap.png"))
+    else:
+        print("Backtest plots skipped.")
+    if artifact_options["write_report_artifacts"]:
+        save_monthly_report(metric_report, save_path=str(paths.results_dir / "native_monthly_report.csv"))
+        metric_report.to_csv(paths.results_dir / "native_daily_report.csv", index=True)
+        if "intraperiod_exit_count" in metric_report.columns:
+            exit_daily_report = metric_report.loc[metric_report["intraperiod_exit_count"].fillna(0).astype(int) > 0].copy()
+            if not exit_daily_report.empty:
+                exit_daily_report.index.name = "datetime"
+                exit_daily_report.to_csv(paths.results_dir / "native_exit_daily_report.csv", index=True)
+        save_period_summary(monthly_summary, paths.results_dir / "native_monthly_summary.csv")
+        save_period_summary(rebalance_summary, paths.results_dir / "native_rebalance_summary.csv")
+    else:
+        print("Backtest CSV reports skipped.")
     if trace_dates:
         _, trace_df = run_native_backtest(
             preds=bundle.final_predictions,
@@ -483,6 +567,8 @@ def evaluate_prediction_bundle(
             prefix="native",
         )
         print(f"Trace artifacts saved: {trace_path} ; {trace_dates_path}")
+    elif artifact_options["skip_backtest_trace"]:
+        print("Trace artifacts skipped.")
     print(f"Artifacts saved under: {paths.results_dir}")
 
     aggregated_importance_path: Path | None = None
@@ -547,6 +633,11 @@ def evaluate_prediction_bundle(
             "run_warning_count": len(run_warnings),
             "run_warnings_path": str(run_warnings_path) if run_warnings_path else "",
             "run_warnings": run_warnings,
+            "backtest_artifact_level": artifact_options["level"],
+            "skip_opportunity_diagnostics": artifact_options["skip_opportunity_diagnostics"],
+            "skip_backtest_plots": artifact_options["skip_backtest_plots"],
+            "skip_backtest_trace": artifact_options["skip_backtest_trace"],
+            "write_backtest_report_artifacts": artifact_options["write_report_artifacts"],
             **opportunity_paths,
         },
     )

@@ -1,6 +1,9 @@
 use ai4stock2_native::common::parquet::{
     inspect_parquet_layout, scan_source_bucket, validate_required_columns,
 };
+use ai4stock2_native::factor_expr::{
+    load_factor_expression_profile, summarize_factor_expression_profile,
+};
 use ai4stock2_native::gen_feature::{generate_factor_store, GenerateOptions};
 use std::env;
 use std::fs;
@@ -12,11 +15,12 @@ fn usage() -> &'static str {
 ai4stock-gen-feature: Rust migration entrypoint for AI4Stock2 feature generation
 
 Usage:
-  ai4stock-gen-feature generate --parquet-dir <PATH> --output-dir <PATH> [--data-source <NAME>] [--workers <N>] [--label-horizons <CSV>] [--batch-size <N>] [--bucket-limit <N>] [--json]
+  ai4stock-gen-feature generate --parquet-dir <PATH> --output-dir <PATH> [--data-source <NAME>] [--workers <N>] [--label-horizons <CSV>] [--factor-profile <PATH>] [--batch-size <N>] [--bucket-limit <N>] [--json]
   ai4stock-gen-feature inspect-source --parquet-dir <PATH> [--json]
   ai4stock-gen-feature inspect-store --store-dir <PATH> [--json]
   ai4stock-gen-feature scan-source-bucket --bucket-path <PATH> [--column <COL>...] [--batch-size <N>] [--json]
   ai4stock-gen-feature validate-required-columns --parquet-dir <PATH> (--required-column <COL> | --required-columns-json <PATH>)... [--json]
+  ai4stock-gen-feature validate-factor-profile --factor-profile <PATH> [--json]
 
 Options:
   --parquet-dir <PATH>        Source Parquet root. Supports <root>/buckets/part-*.parquet.
@@ -24,6 +28,7 @@ Options:
   --data-source <NAME>        Source name for `generate`. Use `tushare` to include TS_ factors.
   --workers <N>               Worker threads for `generate`. Default: available parallelism.
   --label-horizons <CSV>      Label horizons for `generate`. Default: 1,5,10,20.
+  --factor-profile <PATH>     Optional expression factor profile YAML. If omitted, use native built-in factors.
   --bucket-limit <N>          Limit generated source buckets for smoke tests.
   --store-dir <PATH>          Factor-store root. Supports <root>/buckets/part-*.parquet.
   --bucket-path <PATH>        Single source bucket Parquet shard to scan.
@@ -61,6 +66,12 @@ struct ScanBucketOptions {
 #[derive(Debug)]
 struct GenerateCliOptions {
     options: GenerateOptions,
+    json: bool,
+}
+
+#[derive(Debug)]
+struct FactorProfileOptions {
+    path: PathBuf,
     json: bool,
 }
 
@@ -297,6 +308,43 @@ fn parse_scan_bucket_options(args: &[String]) -> Result<ScanBucketOptions, Strin
     })
 }
 
+fn parse_factor_profile_options(args: &[String]) -> Result<FactorProfileOptions, String> {
+    let mut path: Option<PathBuf> = None;
+    let mut json = false;
+    let mut idx = 0usize;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--json" => json = true,
+            "--factor-profile" => {
+                idx += 1;
+                let raw = args
+                    .get(idx)
+                    .ok_or_else(|| "missing value for --factor-profile".to_owned())?;
+                path = Some(PathBuf::from(raw));
+            }
+            value if value.starts_with("--factor-profile=") => {
+                let raw = value
+                    .split_once('=')
+                    .map(|(_, right)| right)
+                    .unwrap_or_default();
+                if raw.is_empty() {
+                    return Err("missing value for --factor-profile".to_owned());
+                }
+                path = Some(PathBuf::from(raw));
+            }
+            other => {
+                return Err(format!(
+                    "unknown option for validate-factor-profile command: {other}"
+                ))
+            }
+        }
+        idx += 1;
+    }
+    let path = path.ok_or_else(|| "--factor-profile is required".to_owned())?;
+    Ok(FactorProfileOptions { path, json })
+}
+
 fn parse_label_horizons(raw: &str) -> Result<Vec<usize>, String> {
     let mut horizons = Vec::new();
     for value in raw.split(',') {
@@ -333,6 +381,7 @@ fn parse_generate_options(args: &[String]) -> Result<GenerateCliOptions, String>
     let mut label_horizons = vec![1, 5, 10, 20];
     let mut batch_size = 65_536usize;
     let mut bucket_limit = None;
+    let mut factor_profile = None;
     let mut json = false;
     let mut idx = 0usize;
     while idx < args.len() {
@@ -395,6 +444,16 @@ fn parse_generate_options(args: &[String]) -> Result<GenerateCliOptions, String>
             value if value.starts_with("--label-horizons=") => {
                 label_horizons = parse_label_horizons(value.split_once('=').unwrap().1)?;
             }
+            "--factor-profile" => {
+                idx += 1;
+                factor_profile =
+                    Some(PathBuf::from(args.get(idx).ok_or_else(|| {
+                        "missing value for --factor-profile".to_owned()
+                    })?));
+            }
+            value if value.starts_with("--factor-profile=") => {
+                factor_profile = Some(PathBuf::from(value.split_once('=').unwrap().1));
+            }
             "--batch-size" => {
                 idx += 1;
                 let raw = args
@@ -440,6 +499,7 @@ fn parse_generate_options(args: &[String]) -> Result<GenerateCliOptions, String>
             label_horizons,
             batch_size: batch_size.max(1),
             bucket_limit,
+            factor_profile,
         },
         json,
     })
@@ -536,7 +596,33 @@ fn run_generate(args: &[String]) -> Result<(), String> {
     println!("bucket_count={}", summary.bucket_count);
     println!("num_rows={}", summary.num_rows);
     println!("num_features={}", summary.num_features);
+    println!("factor_generation_mode={}", summary.factor_generation_mode);
+    if let Some(path) = &summary.factor_profile {
+        println!("factor_profile={path}");
+    }
     println!("elapsed_seconds={:.3}", summary.elapsed_seconds);
+    Ok(())
+}
+
+fn run_validate_factor_profile(args: &[String]) -> Result<(), String> {
+    let options = parse_factor_profile_options(args)?;
+    let profile = load_factor_expression_profile(&options.path)?;
+    let summary = summarize_factor_expression_profile(&profile);
+    if options.json {
+        let payload = serde_json::to_string_pretty(&summary)
+            .map_err(|err| format!("failed to encode factor profile summary JSON: {err}"))?;
+        println!("{payload}");
+        return Ok(());
+    }
+
+    println!("profile={}", options.path.display());
+    println!("name={}", summary.name);
+    println!("factor_store_name={}", summary.factor_store_name);
+    println!("stage={}", summary.stage);
+    println!("factor_count={}", summary.factor_count);
+    println!("required_columns={}", summary.required_columns.join(","));
+    println!("functions={}", summary.functions.join(","));
+    println!("max_lookback={}", summary.max_lookback);
     Ok(())
 }
 
@@ -551,6 +637,7 @@ fn run(args: &[String]) -> Result<(), String> {
         "inspect-store" => run_inspect(&args[1..], "--store-dir"),
         "scan-source-bucket" => run_scan_source_bucket(&args[1..]),
         "validate-required-columns" => run_validate_required_columns(&args[1..]),
+        "validate-factor-profile" => run_validate_factor_profile(&args[1..]),
         other => Err(format!("unknown command: {other}\n\n{}", usage())),
     }
 }
@@ -573,8 +660,8 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_generate_options, parse_inspect_options, parse_required_columns_options,
-        parse_scan_bucket_options,
+        parse_factor_profile_options, parse_generate_options, parse_inspect_options,
+        parse_required_columns_options, parse_scan_bucket_options,
     };
 
     #[test]
@@ -587,6 +674,8 @@ mod tests {
             "tushare".to_owned(),
             "--workers=16".to_owned(),
             "--label-horizons=1,5,20".to_owned(),
+            "--factor-profile".to_owned(),
+            "configs/factor_expressions/smoke.yaml".to_owned(),
             "--bucket-limit".to_owned(),
             "2".to_owned(),
             "--json".to_owned(),
@@ -603,6 +692,15 @@ mod tests {
         assert_eq!(options.options.workers, 16);
         assert_eq!(options.options.label_horizons, vec![1, 5, 20]);
         assert_eq!(options.options.bucket_limit, Some(2));
+        assert_eq!(
+            options
+                .options
+                .factor_profile
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string())
+                .as_deref(),
+            Some("configs/factor_expressions/smoke.yaml")
+        );
         assert!(options.json);
     }
 
@@ -659,6 +757,22 @@ mod tests {
         );
         assert_eq!(options.columns, vec!["close", "symbol"]);
         assert_eq!(options.batch_size, 4096);
+        assert!(options.json);
+    }
+
+    #[test]
+    fn parses_factor_profile_options() {
+        let args = vec![
+            "--factor-profile=configs/factor_expressions/smoke.yaml".to_owned(),
+            "--json".to_owned(),
+        ];
+
+        let options = parse_factor_profile_options(&args).unwrap();
+
+        assert_eq!(
+            options.path.to_string_lossy(),
+            "configs/factor_expressions/smoke.yaml"
+        );
         assert!(options.json);
     }
 }

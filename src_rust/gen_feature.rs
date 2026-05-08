@@ -1,4 +1,9 @@
-use crate::common::parquet::discover_bucket_parquet_paths;
+use crate::common::parquet::{discover_bucket_parquet_paths, open_projected_parquet_reader};
+use crate::factor_expr::{
+    evaluate_factor_expressions, load_factor_expression_profile,
+    summarize_factor_expression_profile, CompiledFactorExpressionProfile,
+    FactorExpressionProfileSummary,
+};
 use crate::factor_kernels;
 use arrow_array::{
     Array, Date32Array, Date64Array, Float32Array, Float64Array, Int32Array, Int64Array,
@@ -32,6 +37,7 @@ pub struct GenerateOptions {
     pub label_horizons: Vec<usize>,
     pub batch_size: usize,
     pub bucket_limit: Option<usize>,
+    pub factor_profile: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -51,6 +57,9 @@ pub struct GenerateSummary {
     pub feature_names: Vec<String>,
     pub label_columns: Vec<String>,
     pub available_dates: Vec<String>,
+    pub factor_generation_mode: String,
+    pub factor_profile: Option<String>,
+    pub factor_profile_summary: Option<FactorExpressionProfileSummary>,
     pub elapsed_seconds: f64,
 }
 
@@ -92,8 +101,24 @@ struct SymbolFactorFrame {
     feature_columns: Vec<(String, Vec<f32>)>,
 }
 
+#[derive(Debug, Clone)]
+struct SourceColumnProjection {
+    required_columns: Vec<String>,
+    derive_vwap: bool,
+}
+
 pub fn generate_factor_store(options: &GenerateOptions) -> Result<GenerateSummary, String> {
     let started = Instant::now();
+    let expression_profile = match &options.factor_profile {
+        Some(path) => Some(load_factor_expression_profile(path)?),
+        None => None,
+    };
+    let expression_profile_summary = expression_profile
+        .as_ref()
+        .map(summarize_factor_expression_profile);
+    let source_projection = expression_profile_summary
+        .as_ref()
+        .map(expression_source_column_projection);
     let (_, mut source_paths) = discover_bucket_parquet_paths(&options.parquet_dir)?;
     if source_paths.is_empty() {
         return Err(format!(
@@ -122,7 +147,15 @@ pub fn generate_factor_store(options: &GenerateOptions) -> Result<GenerateSummar
     let mut results = pool.install(|| {
         source_paths
             .par_iter()
-            .map(|path| write_factor_bucket_from_source_bucket(path, &bucket_root, options))
+            .map(|path| {
+                write_factor_bucket_from_source_bucket(
+                    path,
+                    &bucket_root,
+                    options,
+                    expression_profile.as_ref(),
+                    source_projection.as_ref(),
+                )
+            })
             .collect::<Vec<_>>()
     });
     let mut bucket_results = Vec::with_capacity(results.len());
@@ -174,6 +207,16 @@ pub fn generate_factor_store(options: &GenerateOptions) -> Result<GenerateSummar
         feature_names,
         label_columns,
         available_dates: available_dates.into_iter().collect(),
+        factor_generation_mode: if expression_profile.is_some() {
+            "expression_profile".to_owned()
+        } else {
+            "native_builtin".to_owned()
+        },
+        factor_profile: options
+            .factor_profile
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        factor_profile_summary: expression_profile_summary,
         elapsed_seconds: started.elapsed().as_secs_f64(),
     };
     write_meta(&options.output_dir.join("meta.json"), &summary)?;
@@ -218,6 +261,8 @@ fn write_factor_bucket_from_source_bucket(
     source_path: &Path,
     bucket_root: &Path,
     options: &GenerateOptions,
+    expression_profile: Option<&CompiledFactorExpressionProfile>,
+    source_projection: Option<&SourceColumnProjection>,
 ) -> Result<SourceBucketResult, String> {
     let bucket_id = extract_bucket_id(source_path)?;
     let out_path = bucket_root.join(format!("part-{bucket_id:04}.parquet"));
@@ -225,19 +270,26 @@ fn write_factor_bucket_from_source_bucket(
         .map_err(|err| format!("failed to stat {}: {err}", source_path.display()))?;
     let source_size = source_stat.len() as i64;
     let source_mtime_ns = source_mtime_ns(&source_stat);
-    let mut symbols = read_source_bucket_symbols(source_path, options.batch_size)?;
+    let mut symbols =
+        read_source_bucket_symbols(source_path, options.batch_size, source_projection)?;
     let mut writer: Option<ArrowWriter<File>> = None;
     let mut manifest_rows = Vec::new();
     let mut total_rows = 0usize;
     let mut feature_names = Vec::new();
-    let mut available_dates = BTreeSet::new();
+    let mut available_date_ns = BTreeSet::new();
     let label_columns = label_column_names(&options.label_horizons);
     let label_columns_joined = label_columns.join(",");
 
     for (symbol, rows) in symbols.iter_mut() {
         sort_symbol_rows(rows);
-        ensure_vwap(rows);
-        let frame = build_symbol_factor_frame(symbol, rows, options)?;
+        if expression_profile.is_none()
+            || source_projection
+                .map(|projection| projection.derive_vwap)
+                .unwrap_or(false)
+        {
+            ensure_vwap(rows);
+        }
+        let frame = build_symbol_factor_frame(symbol, rows, options, expression_profile)?;
         if feature_names.is_empty() {
             feature_names = frame
                 .feature_columns
@@ -273,7 +325,7 @@ fn write_factor_bucket_from_source_bucket(
             .last()
             .map(|value| format_date_ns(*value))
             .unwrap_or_default();
-        available_dates.extend(frame.dates_ns.iter().map(|value| format_date_ns(*value)));
+        available_date_ns.extend(frame.dates_ns.iter().copied());
         total_rows += frame.dates_ns.len();
         manifest_rows.push(ManifestRow {
             symbol: symbol.clone(),
@@ -302,31 +354,36 @@ fn write_factor_bucket_from_source_bucket(
         row_count: total_rows,
         manifest_rows,
         feature_names,
-        available_dates,
+        available_dates: available_date_ns.into_iter().map(format_date_ns).collect(),
     })
 }
 
 fn read_source_bucket_symbols(
     source_path: &Path,
     batch_size: usize,
+    projection: Option<&SourceColumnProjection>,
 ) -> Result<BTreeMap<String, SymbolRows>, String> {
-    let file = File::open(source_path)
-        .map_err(|err| format!("failed to open {}: {err}", source_path.display()))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|err| {
-            format!(
-                "failed to create parquet reader {}: {err}",
-                source_path.display()
-            )
-        })?
-        .with_batch_size(batch_size.max(1))
-        .build()
-        .map_err(|err| {
-            format!(
-                "failed to build parquet reader {}: {err}",
-                source_path.display()
-            )
-        })?;
+    let reader = if let Some(projection) = projection {
+        open_projected_parquet_reader(source_path, &projection.required_columns, batch_size)?
+    } else {
+        let file = File::open(source_path)
+            .map_err(|err| format!("failed to open {}: {err}", source_path.display()))?;
+        ParquetRecordBatchReaderBuilder::try_new(file)
+            .map_err(|err| {
+                format!(
+                    "failed to create parquet reader {}: {err}",
+                    source_path.display()
+                )
+            })?
+            .with_batch_size(batch_size.max(1))
+            .build()
+            .map_err(|err| {
+                format!(
+                    "failed to build parquet reader {}: {err}",
+                    source_path.display()
+                )
+            })?
+    };
     let mut symbols: BTreeMap<String, SymbolRows> = BTreeMap::new();
     for batch in reader {
         let batch = batch.map_err(|err| {
@@ -338,6 +395,31 @@ fn read_source_bucket_symbols(
         append_source_batch(&mut symbols, &batch)?;
     }
     Ok(symbols)
+}
+
+fn expression_source_column_projection(
+    summary: &FactorExpressionProfileSummary,
+) -> SourceColumnProjection {
+    let mut required = BTreeSet::from([
+        "date".to_owned(),
+        "symbol".to_owned(),
+        "open".to_owned(),
+        "volume".to_owned(),
+        "amount".to_owned(),
+    ]);
+    let mut derive_vwap = false;
+    for column in &summary.required_columns {
+        if column == "vwap" {
+            derive_vwap = true;
+            required.extend(["close".to_owned(), "amount".to_owned(), "volume".to_owned()]);
+        } else {
+            required.insert(column.clone());
+        }
+    }
+    SourceColumnProjection {
+        required_columns: required.into_iter().collect(),
+        derive_vwap,
+    }
 }
 
 fn append_source_batch(
@@ -401,7 +483,37 @@ fn build_symbol_factor_frame(
     symbol: &str,
     rows: &SymbolRows,
     options: &GenerateOptions,
+    expression_profile: Option<&CompiledFactorExpressionProfile>,
 ) -> Result<SymbolFactorFrame, String> {
+    let feature_columns = if let Some(profile) = expression_profile {
+        evaluate_factor_expressions(profile, &rows.columns, rows.dates_ns.len())?
+    } else {
+        deduplicate_exact_feature_columns(build_builtin_feature_columns(rows, options)?)
+    };
+    let labels = build_labels(rows, &options.label_horizons);
+    Ok(SymbolFactorFrame {
+        symbol: symbol.to_owned(),
+        dates_ns: rows.dates_ns.clone(),
+        label_columns: labels,
+        feature_columns: feature_columns
+            .into_iter()
+            .map(|(name, values)| {
+                (
+                    name,
+                    values
+                        .into_iter()
+                        .map(|value| value as f32)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect(),
+    })
+}
+
+fn build_builtin_feature_columns(
+    rows: &SymbolRows,
+    options: &GenerateOptions,
+) -> Result<Vec<(String, Vec<f64>)>, String> {
     let mut feature_columns = Vec::new();
     let open = column_or_nan(rows, "open");
     let high = column_or_nan(rows, "high");
@@ -529,25 +641,7 @@ fn build_symbol_factor_frame(
             )?,
         );
     }
-    let feature_columns = deduplicate_exact_feature_columns(feature_columns);
-    let labels = build_labels(rows, &options.label_horizons);
-    Ok(SymbolFactorFrame {
-        symbol: symbol.to_owned(),
-        dates_ns: rows.dates_ns.clone(),
-        label_columns: labels,
-        feature_columns: feature_columns
-            .into_iter()
-            .map(|(name, values)| {
-                (
-                    name,
-                    values
-                        .into_iter()
-                        .map(|value| value as f32)
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect(),
-    })
+    Ok(feature_columns)
 }
 
 fn append_prefixed(
@@ -841,6 +935,18 @@ fn write_meta(path: &Path, summary: &GenerateSummary) -> Result<(), String> {
             serde_json::json!("bucket_shards"),
         );
         object.insert(
+            "factor_generation_mode".to_owned(),
+            serde_json::json!(summary.factor_generation_mode),
+        );
+        object.insert(
+            "factor_profile".to_owned(),
+            serde_json::json!(summary.factor_profile),
+        );
+        object.insert(
+            "factor_profile_summary".to_owned(),
+            serde_json::json!(summary.factor_profile_summary),
+        );
+        object.insert(
             "incremental".to_owned(),
             serde_json::json!({"enabled": false, "reason": "rust_standalone_full_rebuild"}),
         );
@@ -1078,10 +1184,15 @@ fn source_mtime_ns(metadata: &fs::Metadata) -> i64 {
 mod tests {
     use super::{
         build_labels, build_open_to_open_label, build_symbol_factor_frame,
-        deduplicate_exact_feature_columns, GenerateOptions, SymbolRows,
+        deduplicate_exact_feature_columns, expression_source_column_projection, GenerateOptions,
+        SymbolRows,
     };
     use crate::common::parquet::{
         summarize_parquet_shards, validate_required_columns, ParquetShardStats,
+    };
+    use crate::factor_expr::{
+        compile_factor_expression_profile, summarize_factor_expression_profile,
+        FactorExpressionProfile, FactorExpressionSpec,
     };
     use parquet::basic::Compression;
     use parquet::file::properties::WriterProperties;
@@ -1305,9 +1416,10 @@ mod tests {
             label_horizons: vec![1, 5, 10, 20],
             batch_size: 1024,
             bucket_limit: None,
+            factor_profile: None,
         };
 
-        let frame = build_symbol_factor_frame("000001", &rows, &options).unwrap();
+        let frame = build_symbol_factor_frame("000001", &rows, &options, None).unwrap();
         let names = frame
             .feature_columns
             .iter()
@@ -1319,5 +1431,134 @@ mod tests {
         assert!(!names.contains(&"TEMP_rsv_5"));
         assert!(names.contains(&"LGBM_dist_ma120"));
         assert!(!names.contains(&"TEMP_ma_gap_120"));
+    }
+
+    #[test]
+    fn expression_projection_uses_profile_and_label_columns_only() {
+        let profile = compile_factor_expression_profile(FactorExpressionProfile {
+            name: "projection".to_owned(),
+            factor_store_name: String::new(),
+            description: String::new(),
+            factors: vec![
+                FactorExpressionSpec {
+                    name: "ret5".to_owned(),
+                    expr: "close / delay(close, 5) - 1".to_owned(),
+                    description: String::new(),
+                },
+                FactorExpressionSpec {
+                    name: "turn20".to_owned(),
+                    expr: "ts_mean(turnover, 20)".to_owned(),
+                    description: String::new(),
+                },
+            ],
+        })
+        .unwrap();
+        let summary = summarize_factor_expression_profile(&profile);
+
+        let projection = expression_source_column_projection(&summary);
+
+        assert!(!projection.derive_vwap);
+        assert_eq!(
+            projection.required_columns,
+            vec!["amount", "close", "date", "open", "symbol", "turnover", "volume"]
+        );
+    }
+
+    #[test]
+    fn expression_projection_derives_vwap_without_requiring_source_vwap() {
+        let profile = compile_factor_expression_profile(FactorExpressionProfile {
+            name: "projection".to_owned(),
+            factor_store_name: String::new(),
+            description: String::new(),
+            factors: vec![FactorExpressionSpec {
+                name: "vwap_gap".to_owned(),
+                expr: "close / vwap - 1".to_owned(),
+                description: String::new(),
+            }],
+        })
+        .unwrap();
+        let summary = summarize_factor_expression_profile(&profile);
+
+        let projection = expression_source_column_projection(&summary);
+
+        assert!(projection.derive_vwap);
+        assert_eq!(
+            projection.required_columns,
+            vec!["amount", "close", "date", "open", "symbol", "volume"]
+        );
+    }
+
+    #[test]
+    fn expression_profile_generates_profile_features_and_keeps_labels() {
+        let row_count = 8usize;
+        let mut columns = HashMap::new();
+        columns.insert(
+            "open".to_owned(),
+            (0..row_count)
+                .map(|row_idx| 10.0 + row_idx as f64)
+                .collect::<Vec<_>>(),
+        );
+        columns.insert(
+            "close".to_owned(),
+            (0..row_count)
+                .map(|row_idx| 20.0 + row_idx as f64)
+                .collect::<Vec<_>>(),
+        );
+        columns.insert("volume".to_owned(), vec![100.0; row_count]);
+        columns.insert("amount".to_owned(), vec![1_000.0; row_count]);
+        let rows = SymbolRows {
+            dates_ns: (0..row_count)
+                .map(|row_idx| row_idx as i64 * 86_400_000_000_000)
+                .collect(),
+            columns,
+            all_numeric_float32: true,
+        };
+        let options = GenerateOptions {
+            parquet_dir: PathBuf::from("unused-source"),
+            output_dir: PathBuf::from("unused-output"),
+            data_source: "tushare".to_owned(),
+            workers: 1,
+            label_horizons: vec![1, 3],
+            batch_size: 1024,
+            bucket_limit: None,
+            factor_profile: Some(PathBuf::from("configs/factor_expressions/test.yaml")),
+        };
+        let profile = compile_factor_expression_profile(FactorExpressionProfile {
+            name: "expr_test".to_owned(),
+            factor_store_name: "expr_test".to_owned(),
+            description: String::new(),
+            factors: vec![
+                FactorExpressionSpec {
+                    name: "EXPR_ret_2".to_owned(),
+                    expr: "close / delay(close, 2) - 1".to_owned(),
+                    description: String::new(),
+                },
+                FactorExpressionSpec {
+                    name: "TEMP_ret_20".to_owned(),
+                    expr: "close".to_owned(),
+                    description: String::new(),
+                },
+            ],
+        })
+        .unwrap();
+
+        let frame = build_symbol_factor_frame("000001", &rows, &options, Some(&profile)).unwrap();
+        let feature_names = frame
+            .feature_columns
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        let label_names = frame
+            .label_columns
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(feature_names, vec!["EXPR_ret_2", "TEMP_ret_20"]);
+        assert!(!feature_names.contains(&"RSV5"));
+        assert_eq!(label_names, vec!["label", "label_1d", "label_3d"]);
+        assert!(frame.feature_columns[0].1[0].is_nan());
+        assert!(frame.feature_columns[0].1[1].is_nan());
+        assert!((frame.feature_columns[0].1[2] - 0.1).abs() < 1e-6);
     }
 }

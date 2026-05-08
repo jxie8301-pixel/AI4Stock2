@@ -26,6 +26,13 @@ rust_plot_examples_*/
 *.sh
 candidate_profile.json
 candidate_profiles.json
+# Local profiles. Keep real experiment/model/feature/factor profiles out of Git;
+# commit schema-style examples under examples/ instead.
+configs/*profiles*.yaml
+configs/features/
+configs/models/
+configs/experiments/
+configs/factor_expressions/
 dump_bin.py
 get_data.py
 

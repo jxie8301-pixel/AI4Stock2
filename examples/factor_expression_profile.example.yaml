@@ -1,0 +1,19 @@
+name: tushare_expr_smoke_v1
+factor_store_name: tushare_expr_smoke_v1
+description: Minimal expression-defined factor profile for validating the new factor DSL path.
+factors:
+  - name: EXPR_ret_5
+    expr: close / delay(close, 5) - 1
+    description: Five-trading-day close momentum using only historical close.
+  - name: EXPR_ret_20
+    expr: close / delay(close, 20) - 1
+    description: Twenty-trading-day close momentum using only historical close.
+  - name: EXPR_ma_gap_20
+    expr: close / ts_mean(close, 20) - 1
+    description: Close versus trailing 20-day mean.
+  - name: EXPR_vol_rank_20
+    expr: ts_rank(volume, 20)
+    description: Current volume percentile within trailing 20 trading days.
+  - name: EXPR_turnover_mean_20
+    expr: ts_mean(turnover, 20)
+    description: Trailing 20-day mean turnover.

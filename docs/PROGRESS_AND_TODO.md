@@ -431,6 +431,12 @@ Completed optimization slices:
   - `ai4stock-backtest artifact-batch` owns selected-matrix row filtering, preflight checks, marker handling, failure TSVs, summary TSV/JSON, grouped post-bundle execution, and parallelism
   - `run_lgbm_backtest_artifacts.py` is now only a compatibility wrapper that builds and delegates the Rust `artifact-batch` command
   - Python `direct` and Python `subprocess` artifact-rebuild execution modes are removed from the wrapper; post-bundle work should go through Rust unless explicitly using an older local shell fallback
+- [x] Start moving experiment-sweep orchestration to Rust:
+  - `ai4stock-experiment batch` now owns non-deduped sweep/case expansion, run-tag construction, child command generation, dry-run output, fail-fast handling, and sequential child execution
+  - the initial compatibility wrapper delegated normal sweeps while prediction dedupe was still pending
+- [x] Finish moving experiment-sweep prediction dedupe to Rust:
+  - `ai4stock-experiment batch --dedupe-predictions` now resolves the per-run prediction-producing config, fingerprints the same config surface as the old Python runner, saves predictions for the first matching run, and replays later compatible runs through `--load-predictions-dir`
+  - `run_experiment_batch.py` is now a thin compatibility wrapper for `ai4stock-experiment batch`
 
 Feature build v2 direction:
 

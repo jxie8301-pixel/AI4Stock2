@@ -34,6 +34,7 @@ At the same time, the data layer is actively being migrated:
 - Native feature-cache builder: Rust `ai4stock-gen-feature`, with `src/gen_feature.py` kept as config/profile-resolving compatibility wrapper and pandas reference path
 - Diagnostics/profile prefilter: Rust `ai4stock-diagnostics single-factor`, `prefilter-summary`, `robust-prefilter-summary`, `corr-prune`, `write-profile`, `build-prefilter-profile`, and `build-robust-profile`; Python diagnostics/profile builders remain compatibility wrappers for config loading, feature resolution, safety checks, and batch summaries
 - LGBM artifact-rebuild batches: Rust `ai4stock-backtest artifact-batch`, with `run_lgbm_backtest_artifacts.py` kept only as a compatibility wrapper that delegates to Rust
+- Experiment sweep batches: Rust `ai4stock-experiment batch` owns sweep/case expansion, command generation, dry-run output, sequential child execution, and prediction-bundle dedupe/replay; `run_experiment_batch.py` is a compatibility wrapper
 
 Current collector roles:
 

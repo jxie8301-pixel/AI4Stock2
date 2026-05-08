@@ -7,14 +7,14 @@ AI4Stock2 is now a native A-share research pipeline built around:
 - Parquet market data in normalized `combined/` directories
 - Local feature-cache generation through Rust `ai4stock-gen-feature`
 - Native rolling LightGBM training through Rust `ai4stock-train rolling-lgbm`
-- Native backtest and evaluation in `src/native_backtest.py` and `src/evaluate.py`
+- Native post-bundle backtest and evaluation through Rust `ai4stock-backtest run-bundle`
 
 The stable research path today is:
 
 1. Update raw/processed Parquet data with `src/collector_akshare.py`
 2. Generate one unified full-factor store with `src/gen_feature.py`
 3. Train a native LightGBM model from a named experiment profile
-4. Evaluate signal quality and run the native backtest
+4. Evaluate signal quality and run the Rust post-bundle backtest
 5. Archive metrics, plots, models, and config snapshots into the local experiment store
 
 At the same time, the data layer is actively being migrated:
@@ -33,6 +33,7 @@ At the same time, the data layer is actively being migrated:
 - Migration target: promote one canonical Tushare-normalized `combined` schema into the formal research workflow
 - Native feature-cache builder: Rust `ai4stock-gen-feature`, with `src/gen_feature.py` kept as config/profile-resolving compatibility wrapper and pandas reference path
 - Native rolling LightGBM entry: Rust `ai4stock-train rolling-lgbm` owns output-dir resolution, config/profile/date overrides, prediction-bundle creation, and post-bundle backtest delegation; `run_native_rolling.py` is a compatibility wrapper only
+- Native post-bundle backtest: Rust `ai4stock-backtest run-bundle` owns backtest execution, benchmark/reference-baseline reports, plots, trace artifacts, and backtest label safety validation. The old Python backtest engine path has been removed.
 - Diagnostics/profile prefilter: Rust `ai4stock-diagnostics single-factor`, `single-factor-profile`, `single-factor-batch`, `full-space-single-factor`, `quality-event-flow-single-factor`, `prefilter-summary`, `robust-prefilter-summary`, `corr-prune`, `write-profile`, `build-prefilter-profile`, `build-robust-profile`, `build-prefilter-profile-runtime`, `build-robust-profile-runtime`, `candidate-pool`, and `strategy-pair`; Python diagnostics/profile builders are compatibility wrappers only
 - LGBM artifact-rebuild batches: Rust `ai4stock-backtest artifact-batch`, with `run_lgbm_backtest_artifacts.py` kept only as a compatibility wrapper that delegates to Rust
 - Experiment sweep batches: Rust `ai4stock-experiment batch` owns sweep/case expansion, command generation, dry-run output, sequential child execution, and prediction-bundle dedupe/replay; `run_experiment_batch.py` is a compatibility wrapper
@@ -74,9 +75,8 @@ Current default model is `lgbm`.
 
 ### Evaluation Layer
 
-- Signal metrics and plots: `src/evaluate.py`
-- Native backtest engine: `src/native_backtest.py`
-- Backtest wrapper: `src/backtest.py`
+- Training-side validation metrics and benchmark helpers: Rust `ai4stock-train rolling-lgbm`
+- Post-bundle score fusion, backtest, reports, and plots: Rust `ai4stock-backtest run-bundle`
 
 ## Key Files
 
@@ -111,9 +111,6 @@ AI4Stock2/
 │   ├── model_profiles.py
 │   ├── override_utils.py
 │   ├── runtime_cli.py
-│   ├── native_backtest.py
-│   ├── backtest.py
-│   ├── evaluate.py
 │   ├── probe_tushare.py
 │   └── models/
 │       ├── pure_lightgbm.py

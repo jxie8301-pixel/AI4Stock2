@@ -298,7 +298,7 @@ Current status:
 - [x] The hidden rolling `--gpu` alias is removed; LSTM device selection uses `--torch-gpu`, while LightGBM GPU/CUDA stays under `lgbm.device_type`
 - [x] Candidate diagnostics share artifact readers, metric extraction, bucket-shape, and feature-family helpers
 - [x] Config validation supported-mode constants are centralized while keeping `validate_training_config` as the public entrypoint
-- [x] Backtest wrapper/report boundaries use shared native-to-legacy return helpers while keeping engine `net_return` canonical
+- [x] Backtest wrapper/report boundaries used shared native-to-legacy return helpers during migration; the Python backtest wrapper/report path has now been removed
 - [x] `run_native_rolling.py` no longer re-exports underscored artifact/baseline helpers only for tests
 - [x] Low-risk unused imports are removed without adding a lint dependency
 - [ ] Lint gate remains deferred until code movement stabilizes
@@ -312,7 +312,7 @@ Audit status on 2026-04-30:
 - The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `ai4stock-diagnostics single-factor-profile` / `ai4stock-diagnostics single-factor-batch` -> `ai4stock-diagnostics single-factor`.
   The Python entrypoints `run_single_factor_diagnostics.py` and `run_single_factor_diagnostics_batch.py` are compatibility wrappers only; config/profile resolution, selected-feature JSON, metadata, and batch summaries are owned by Rust.
 - The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
-- Non-training runtime can still be dominated by factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
+- Non-training runtime can still be dominated by Rust factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
 - LSTM sequence context is now prepared once per rolling run, but each rolling window still rebuilds `Dataset` / `DataLoader` wrappers and computes validation IC through pandas.
 
 Completed optimization slices:
@@ -441,7 +441,13 @@ Completed optimization slices:
 - [x] Move LGBM artifact-rebuild batch runtime to Rust:
   - `ai4stock-backtest artifact-batch` owns selected-matrix row filtering, preflight checks, marker handling, failure TSVs, summary TSV/JSON, grouped post-bundle execution, and parallelism
   - `run_lgbm_backtest_artifacts.py` is now only a thin compatibility wrapper that delegates directly to Rust `artifact-batch`
-  - Python `direct` and Python `subprocess` artifact-rebuild execution modes are removed from the wrapper; post-bundle work should go through Rust unless explicitly using an older local shell fallback
+  - Python `direct`, Python `subprocess`, and `--disable-rust-backtest` artifact-rebuild execution modes are removed; post-bundle work now goes through Rust only
+- [x] Remove obsolete Python backtest runtime:
+  - `src/native_backtest.py`, `src/backtest_engine.py`, `src/backtest.py`, `src/backtest_controls.py`, `src/backtest_scoring.py`, `src/backtest_trace.py`, `src/backtest_report.py`, and `src/rolling_evaluate.py` have been deleted
+  - `ai4stock-backtest bundle` no longer falls back to `run_native_rolling.py` for Python post-bundle evaluation; unsupported bundle options now fail fast
+- [x] Remove obsolete Python rolling/evaluation runtime:
+  - `src/evaluate.py`, `src/rolling_train.py`, `src/rolling_runtime.py`, `src/rolling_artifacts.py`, `src/rolling_baselines.py`, `src/rolling_types.py`, and `src/prediction_fusion.py` have been deleted
+  - Rust `ai4stock-train rolling-lgbm` owns rolling training orchestration and prediction-bundle generation; Rust `ai4stock-backtest run-bundle` owns score fusion, benchmark/baseline handling, and report artifacts
 - [x] Start moving experiment-sweep orchestration to Rust:
   - `ai4stock-experiment batch` now owns non-deduped sweep/case expansion, run-tag construction, child command generation, dry-run output, fail-fast handling, and sequential child execution
   - the initial compatibility wrapper delegated normal sweeps while prediction dedupe was still pending

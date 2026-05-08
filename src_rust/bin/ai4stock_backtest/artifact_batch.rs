@@ -28,7 +28,6 @@ struct BatchOptions {
     start_after: String,
     jobs: usize,
     baseline_jobs: usize,
-    python_runner: String,
     repo_root: PathBuf,
     model: String,
     run_tag_prefix: String,
@@ -38,7 +37,6 @@ struct BatchOptions {
     skip_opportunity_diagnostics: bool,
     skip_backtest_plots: bool,
     skip_backtest_trace: bool,
-    disable_rust_backtest: bool,
     dry_run: bool,
     fail_fast: bool,
 }
@@ -106,7 +104,6 @@ struct BatchSummaryJson {
     summary_tsv: String,
     summary_json: String,
     artifact_level: String,
-    rust_backtest_enabled: bool,
     parallel_jobs: usize,
     selected_jobs: usize,
     processed_jobs: usize,
@@ -149,8 +146,6 @@ fn parse_batch_options(args: &[String]) -> Result<BatchOptions, String> {
     let mut start_after = String::new();
     let mut jobs = 1usize;
     let mut baseline_jobs = 1usize;
-    let mut python_runner =
-        env::var("PYTHON_RUNNER").unwrap_or_else(|_| "pixi run python".to_owned());
     let mut repo_root = env::var("AI4STOCK_REPO_ROOT")
         .map(PathBuf::from)
         .unwrap_or_else(|_| env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
@@ -162,7 +157,6 @@ fn parse_batch_options(args: &[String]) -> Result<BatchOptions, String> {
     let mut skip_opportunity_diagnostics = false;
     let mut skip_backtest_plots = false;
     let mut skip_backtest_trace = false;
-    let mut disable_rust_backtest = false;
     let mut dry_run = false;
     let mut fail_fast = false;
 
@@ -191,9 +185,6 @@ fn parse_batch_options(args: &[String]) -> Result<BatchOptions, String> {
             "--baseline-jobs" => {
                 baseline_jobs = parse_positive_usize(&next_arg(args, &mut idx, "--baseline-jobs")?)
             }
-            "--python-runner" | "--python" => {
-                python_runner = next_arg(args, &mut idx, "--python-runner")?
-            }
             "--repo-root" => repo_root = PathBuf::from(next_arg(args, &mut idx, "--repo-root")?),
             "--model" => model = next_arg(args, &mut idx, "--model")?,
             "--run-tag-prefix" => run_tag_prefix = next_arg(args, &mut idx, "--run-tag-prefix")?,
@@ -205,7 +196,6 @@ fn parse_batch_options(args: &[String]) -> Result<BatchOptions, String> {
             "--skip-opportunity-diagnostics" => skip_opportunity_diagnostics = true,
             "--skip-backtest-plots" => skip_backtest_plots = true,
             "--skip-backtest-trace" => skip_backtest_trace = true,
-            "--disable-rust-backtest" => disable_rust_backtest = true,
             "--dry-run" => dry_run = true,
             "--fail-fast" => fail_fast = true,
             "-h" | "--help" => return Err(batch_usage().to_owned()),
@@ -239,7 +229,6 @@ fn parse_batch_options(args: &[String]) -> Result<BatchOptions, String> {
         start_after,
         jobs,
         baseline_jobs,
-        python_runner,
         repo_root,
         model,
         run_tag_prefix,
@@ -249,7 +238,6 @@ fn parse_batch_options(args: &[String]) -> Result<BatchOptions, String> {
         skip_opportunity_diagnostics,
         skip_backtest_plots,
         skip_backtest_trace,
-        disable_rust_backtest,
         dry_run,
         fail_fast,
     })
@@ -272,7 +260,6 @@ Main options:
   --matrix-id <ID>[,<ID>...]
   --train-id <ID>[,<ID>...]
   --backtest-id <ID>[,<ID>...]
-  --python-runner <CMD>
   --repo-root <PATH>
   --model <NAME>
   --run-tag-prefix <TEXT>
@@ -282,7 +269,6 @@ Main options:
   --skip-opportunity-diagnostics
   --skip-backtest-plots
   --skip-backtest-trace
-  --disable-rust-backtest
   --dry-run
   --fail-fast
 "
@@ -464,16 +450,11 @@ fn build_bundle_command(argv: &[String], options: &BatchOptions) -> Result<Vec<S
     let mut command = vec![
         path_to_string(&exe),
         "bundle".to_owned(),
-        "--python-runner".to_owned(),
-        options.python_runner.clone(),
         "--repo-root".to_owned(),
         path_to_string(&options.repo_root),
         "--baseline-jobs".to_owned(),
         options.baseline_jobs.to_string(),
     ];
-    if options.disable_rust_backtest {
-        command.push("--disable-rust-backtest".to_owned());
-    }
     command.push("--".to_owned());
     command.extend_from_slice(argv);
     Ok(command)
@@ -538,14 +519,7 @@ fn run_jobs(options: BatchOptions, jobs: Vec<ArtifactJob>) -> Result<ExitCode, S
     println!("[info] artifact_level={}", options.backtest_artifact_level);
     println!("[info] jobs={}", options.jobs);
     println!("[info] baseline_jobs={}", options.baseline_jobs);
-    println!(
-        "[info] rust_backtest={}",
-        if options.disable_rust_backtest {
-            "disabled"
-        } else {
-            "enabled"
-        }
-    );
+    println!("[info] rust_backtest=enabled");
     if let Some(marker_dir) = &options.marker_dir {
         println!("[info] marker_dir={}", marker_dir.display());
     }
@@ -634,7 +608,6 @@ fn run_jobs(options: BatchOptions, jobs: Vec<ArtifactJob>) -> Result<ExitCode, S
         summary_tsv: path_to_string(&summary_path),
         summary_json: path_to_string(&summary_json_path),
         artifact_level: options.backtest_artifact_level.clone(),
-        rust_backtest_enabled: !options.disable_rust_backtest,
         parallel_jobs: options.jobs,
         selected_jobs: jobs.len(),
         processed_jobs: job_summaries.len(),
@@ -668,10 +641,6 @@ fn run_jobs_parallel(
     if jobs.is_empty() {
         return Ok(Vec::new());
     }
-    if options.disable_rust_backtest {
-        return run_jobs_subprocess_parallel(options, jobs);
-    }
-
     env::set_current_dir(&options.repo_root).map_err(|err| {
         format!(
             "failed to enter repo root {}: {err}",
@@ -1086,19 +1055,8 @@ fn run_job_inprocess(
         }
     }
 
-    let mut plan =
-        match bundle_entry::prepare_run(&job.argv, &options.repo_root, options.baseline_jobs)? {
-            BundlePlan::Planned(plan) => plan,
-            BundlePlan::Fallback(reason) => {
-                writeln!(writer, "[fallback] {reason}")
-                    .map_err(|err| format!("failed to write {}: {err}", job.log_path.display()))?;
-                writer
-                    .flush()
-                    .map_err(|err| format!("failed to flush {}: {err}", job.log_path.display()))?;
-                drop(writer);
-                return run_job(job, options, None, failed_marker);
-            }
-        };
+    let BundlePlan::Planned(mut plan) =
+        bundle_entry::prepare_run(&job.argv, &options.repo_root, options.baseline_jobs)?;
     plan.execution.quiet = true;
 
     if primary_bundle_dir.as_ref() != Some(&plan.bundle_dir) {
@@ -1306,7 +1264,6 @@ mod tests {
             start_after: String::new(),
             jobs: 1,
             baseline_jobs: 1,
-            python_runner: "pixi run python".to_owned(),
             repo_root: PathBuf::from("/repo"),
             model: "lgbm".to_owned(),
             run_tag_prefix: "artifact-rebuild-lgbm".to_owned(),
@@ -1316,7 +1273,6 @@ mod tests {
             skip_opportunity_diagnostics: true,
             skip_backtest_plots: true,
             skip_backtest_trace: true,
-            disable_rust_backtest: false,
             dry_run: false,
             fail_fast: false,
         };
@@ -1354,7 +1310,6 @@ mod tests {
             summary_tsv: "logs/summary.tsv".to_owned(),
             summary_json: path_to_string(&path),
             artifact_level: "metrics".to_owned(),
-            rust_backtest_enabled: true,
             parallel_jobs: 1,
             selected_jobs: 1,
             processed_jobs: 1,

@@ -1320,7 +1320,7 @@ mod tests {
     }
 
     #[test]
-    fn builds_python_rolling_command() {
+    fn builds_rust_rolling_command() {
         let options = parse_options(&[
             "--experiment-profile".to_owned(),
             "base".to_owned(),

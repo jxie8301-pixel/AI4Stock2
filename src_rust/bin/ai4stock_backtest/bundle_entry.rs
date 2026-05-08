@@ -9,12 +9,6 @@ use std::process::ExitCode;
 const PREDICTION_ARTIFACT_DIRNAME: &str = "prediction_artifacts";
 const PREDICTION_METADATA_FILENAME: &str = "metadata.json";
 
-#[derive(Debug)]
-pub(crate) enum BundleDispatch {
-    Ran(ExitCode),
-    Fallback(String),
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedBundleRun {
     pub(crate) bundle_dir: PathBuf,
@@ -27,7 +21,6 @@ pub(crate) struct PreparedBundleRun {
 
 pub(crate) enum BundlePlan {
     Planned(PreparedBundleRun),
-    Fallback(String),
 }
 
 #[derive(Debug, Clone)]
@@ -97,15 +90,11 @@ pub(crate) fn try_run(
     args: &[String],
     repo_root: &Path,
     baseline_jobs: usize,
-) -> Result<BundleDispatch, String> {
+) -> Result<ExitCode, String> {
     std::env::set_current_dir(repo_root)
         .map_err(|err| format!("failed to enter repo root {}: {err}", repo_root.display()))?;
-    let plan = match prepare_run(args, repo_root, baseline_jobs)? {
-        BundlePlan::Planned(plan) => plan,
-        BundlePlan::Fallback(reason) => return Ok(BundleDispatch::Fallback(reason)),
-    };
-    let code = run_prepared(plan)?;
-    Ok(BundleDispatch::Ran(code))
+    let BundlePlan::Planned(plan) = prepare_run(args, repo_root, baseline_jobs)?;
+    run_prepared(plan)
 }
 
 pub(crate) fn prepare_run(
@@ -113,19 +102,12 @@ pub(crate) fn prepare_run(
     repo_root: &Path,
     baseline_jobs: usize,
 ) -> Result<BundlePlan, String> {
-    let parsed = match parse_native_rolling_bundle_args(args) {
-        Ok(parsed) => parsed,
-        Err(reason) => return Ok(BundlePlan::Fallback(reason)),
-    };
+    let parsed = parse_native_rolling_bundle_args(args)?;
     if !parsed.config_is_snapshot {
-        return Ok(BundlePlan::Fallback(
-            "direct Rust bundle path requires --config-is-snapshot".to_owned(),
-        ));
+        return Err("Rust bundle path requires --config-is-snapshot".to_owned());
     }
     let Some(bundle_dir) = parsed.load_predictions_dir.clone() else {
-        return Ok(BundlePlan::Fallback(
-            "direct Rust bundle path requires --load-predictions-dir".to_owned(),
-        ));
+        return Err("Rust bundle path requires --load-predictions-dir".to_owned());
     };
 
     let config_path = resolve_repo_path(repo_root, &parsed.config_path);
@@ -134,9 +116,10 @@ pub(crate) fn prepare_run(
 
     if parsed.save_predictions && bool_at(&config, &["strategy", "score_fusion", "enabled"], false)
     {
-        return Ok(BundlePlan::Fallback(
-            "direct Rust bundle path cannot yet persist fused prediction bundles for --save-predictions".to_owned(),
-        ));
+        return Err(
+            "Rust bundle path cannot persist fused prediction bundles for --save-predictions"
+                .to_owned(),
+        );
     }
 
     let output_dir = parsed

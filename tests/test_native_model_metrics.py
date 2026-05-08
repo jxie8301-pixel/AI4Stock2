@@ -206,6 +206,25 @@ class NativeModelMetricsTest(unittest.TestCase):
         self.assertEqual(exported.columns.tolist(), ["feature", "gain"])
         self.assertEqual(set(exported["feature"]), {"f1", "f2"})
 
+    def test_native_lgbm_accepts_numpy_feature_matrices(self):
+        model = NativeLGBM(loss="mse", early_stop=0, num_threads=1)
+        X_train = np.array(
+            [
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [2.0, 0.0],
+                [3.0, 0.0],
+            ],
+            dtype=np.float64,
+        )
+        y_train = np.array([0.0, 0.1, 0.2, 0.3], dtype=np.float64)
+
+        model.fit(X_train, y_train, feature_names=["f1", "f2"])
+        preds = model.predict(X_train, feature_names=["f1", "f2"])
+
+        self.assertEqual(preds.shape, (4,))
+        self.assertEqual(set(model.model.feature_name()), {"f1", "f2"})
+
     def test_compute_time_decay_weights_emphasizes_recent_rows(self):
         dates = pd.to_datetime(["2024-01-01", "2024-01-11", "2024-01-31"])
 

@@ -27,15 +27,16 @@ At the same time, the data layer is actively being migrated:
 ### Data Layer
 
 - Stable source of truth today: `data/processed/combined/*.parquet`
-- Stable updater today: `src/collector_akshare.py`
+- Stable updater today: Rust `ai4stock-collect akshare`, with `src/collector_akshare.py` kept as a compatibility wrapper.
+- Universe membership builder: Rust `ai4stock-collect universes`, with `src/build_universes.py` kept as a compatibility wrapper and the AkShare provider adapter kept behind the PyO3 bridge.
 - Isolated Tushare path: `data/tushare/raw/*` -> `data/tushare/processed/combined/*.parquet`
 - Migration target: promote one canonical Tushare-normalized `combined` schema into the formal research workflow
-- Native feature-cache builder: `src/gen_feature.py`
+- Native feature-cache builder: Rust `ai4stock-gen-feature`, with `src/gen_feature.py` kept as config/profile-resolving compatibility wrapper and pandas reference path
 
 Current collector roles:
 
-- `src/collector_akshare.py`: legacy Eastmoney-compatible update path for the current default research dataset
-- `src/collector_tushare.py`: lifecycle-aware symbol-by-symbol incremental collector with segmented backfill and stage cooldown scheduling
+- `src/collector_akshare.py`: compatibility wrapper plus provider adapter for the current default Eastmoney-compatible dataset
+- `src/collector_tushare.py`: compatibility wrapper plus Tushare provider adapter; Rust owns scheduling, processed rebuild, packed source, sidecar lagging, and industry context materialization
 - `src/probe_tushare.py`: endpoint probe for schema/latency inspection before formal integration
 
 ### Feature Layer

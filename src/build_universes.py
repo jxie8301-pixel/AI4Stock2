@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -121,7 +124,31 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _rust_collector_command() -> list[str]:
+    env_value = os.environ.get("AI4STOCK_COLLECT_BIN")
+    if env_value:
+        return shlex.split(env_value)
+    return ["cargo", "run", "--bin", "ai4stock-collect", "--"]
+
+
+def _rust_collector_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pixi_lib = Path(".pixi/envs/default/lib")
+    if pixi_lib.exists():
+        current = env.get("LD_LIBRARY_PATH", "")
+        parts = [str(pixi_lib), *([current] if current else [])]
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
+    return env
+
+
 def main() -> None:
+    if os.environ.get("AI4STOCK_PY_BUILD_UNIVERSES_RUNTIME", "").strip() != "1":
+        command = _rust_collector_command()
+        command.extend(["universes", *sys.argv[1:]])
+        print(f"[run] {shlex.join(command)}", flush=True)
+        completed = subprocess.run(command, check=False, env=_rust_collector_env())
+        raise SystemExit(int(completed.returncode))
+
     args = _parse_args()
     universe_names = [name.strip() for name in args.universes.split(",") if name.strip()]
     for universe_name in universe_names:

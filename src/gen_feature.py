@@ -13,6 +13,9 @@ import argparse
 from contextlib import contextmanager
 import gc
 import json
+import os
+import shlex
+import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
@@ -1826,7 +1829,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--timing-output",
         default=None,
-        help="Optional JSON timing summary path. Defaults to <output-dir>/factor_generation_timing.json.",
+        help=(
+            "Optional JSON timing summary path for the Python reference runtime. "
+            "The default Rust runtime records summary metadata in <output-dir>/meta.json."
+        ),
+    )
+    parser.add_argument(
+        "--rust-batch-size",
+        type=int,
+        default=65536,
+        help="Arrow record-batch size for the Rust generator.",
+    )
+    parser.add_argument(
+        "--rust-bucket-limit",
+        type=int,
+        default=None,
+        help="Limit source buckets for Rust smoke tests. Leave unset for production.",
     )
     parser.set_defaults(incremental=True)
     parser.add_argument(
@@ -1842,6 +1860,60 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Ignore reusable shards and rebuild all per-symbol feature shards.",
     )
     return parser
+
+
+def _rust_gen_feature_command() -> list[str]:
+    env_value = os.environ.get("AI4STOCK_GEN_FEATURE_BIN")
+    if env_value:
+        return shlex.split(env_value)
+    return ["cargo", "run", "--bin", "ai4stock-gen-feature", "--"]
+
+
+def _rust_gen_feature_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pixi_lib = Path(".pixi/envs/default/lib")
+    if pixi_lib.exists():
+        current = env.get("LD_LIBRARY_PATH", "")
+        parts = [str(pixi_lib), *([current] if current else [])]
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
+    return env
+
+
+def _run_rust_gen_feature(args: argparse.Namespace, runtime: FactorGenerationRuntime) -> None:
+    if args.timing_output:
+        raise ValueError(
+            "--timing-output is only supported by the Python reference runtime. "
+            "Set AI4STOCK_PY_GEN_FEATURE_RUNTIME=1 to use it."
+        )
+    if args.incremental:
+        print(
+            "[warn] Rust gen_feature currently materializes bucket outputs as a standalone full rebuild; "
+            "the --incremental flag is accepted for CLI compatibility.",
+            flush=True,
+        )
+    command = _rust_gen_feature_command()
+    command.extend(
+        [
+            "generate",
+            "--parquet-dir",
+            runtime.parquet_dir,
+            "--output-dir",
+            runtime.output_dir,
+            "--data-source",
+            runtime.data_source,
+            "--workers",
+            str(max(1, int(args.workers))),
+            "--label-horizons",
+            ",".join(str(item) for item in runtime.label_horizons),
+            "--batch-size",
+            str(max(1, int(args.rust_batch_size))),
+        ]
+    )
+    if args.rust_bucket_limit is not None:
+        command.extend(["--bucket-limit", str(max(1, int(args.rust_bucket_limit)))])
+    print(f"[run] {shlex.join(command)}", flush=True)
+    completed = subprocess.run(command, check=False, env=_rust_gen_feature_env())
+    raise SystemExit(int(completed.returncode))
 
 
 def main() -> None:
@@ -1870,6 +1942,12 @@ def main() -> None:
             for name, count in family_counts.items()
         )
     )
+    if os.environ.get("AI4STOCK_PY_GEN_FEATURE_RUNTIME", "").strip() != "1":
+        try:
+            _run_rust_gen_feature(args, runtime)
+        except ValueError as exc:
+            parser.error(str(exc))
+
     generate_factor_store(
         parquet_dir=runtime.parquet_dir,
         output_dir=runtime.output_dir,

@@ -3,48 +3,22 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
-import pandas as pd
 
-from src.rust_lgbm_bridge import _finite_feature_mask, _json_safe, train_lgbm_window_from_prepared_parquet
-
-
-def test_finite_feature_mask_allows_nan_and_rejects_inf():
-    frame = pd.DataFrame(
-        {
-            "f1": [1.0, np.nan, np.inf],
-            "f2": [2.0, 3.0, 4.0],
-        }
-    )
-
-    mask = _finite_feature_mask(frame, ["f1", "f2"])
-
-    assert mask.tolist() == [True, True, False]
+from src.rust_lgbm_bridge import _json_safe, train_lgbm_window_from_prepared_arrays
 
 
-def test_train_window_helper_only_calls_native_lgbm_on_prepared_frames(tmp_path):
-    train_path = tmp_path / "train.parquet"
-    valid_path = tmp_path / "valid.parquet"
-    test_path = tmp_path / "test.parquet"
-    prediction_path = tmp_path / "predictions.parquet"
+def _f64_bytes(values) -> bytes:
+    return np.asarray(values, dtype=np.float64).tobytes()
+
+
+def _i64_bytes(values) -> bytes:
+    return np.asarray(values, dtype=np.int64).tobytes()
+
+
+def test_train_window_helper_only_calls_native_lgbm_on_prepared_arrays(tmp_path):
     importance_path = tmp_path / "feature_importance.csv"
     history_path = tmp_path / "training_history.csv"
     model_path = tmp_path / "model.pkl"
-    base_frame = pd.DataFrame(
-        {
-            "datetime": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "instrument": ["000001.SZ", "000002.SZ"],
-            "label": [-0.5, 0.5],
-            "raw_label": [0.01, 0.03],
-            "backtest_label": [0.001, 0.002],
-            "sample_weight": [np.nan, np.nan],
-            "opportunity_label": [1.0, 1.0],
-            "f1": [1.0, 2.0],
-            "f2": [3.0, 4.0],
-        }
-    )
-    base_frame.to_parquet(train_path, index=False)
-    base_frame.to_parquet(valid_path, index=False)
-    base_frame.assign(f1=[np.nan, 5.0]).to_parquet(test_path, index=False)
     captured = {}
 
     class FakeNativeLGBM:
@@ -63,73 +37,96 @@ def test_train_window_helper_only_calls_native_lgbm_on_prepared_frames(tmp_path)
             valid_eval_labels=None,
             train_sample_weight=None,
             valid_sample_weight=None,
+            feature_names=None,
         ):
-            captured["X_train"] = X_train.copy()
-            captured["y_train"] = pd.Series(y_train).reset_index(drop=True)
-            captured["X_valid"] = X_valid.copy()
-            captured["y_valid"] = pd.Series(y_valid).reset_index(drop=True)
-            captured["valid_eval_labels"] = pd.Series(valid_eval_labels).reset_index(drop=True)
+            captured["X_train"] = np.array(X_train, copy=True)
+            captured["y_train"] = np.array(y_train, copy=True)
+            captured["X_valid"] = np.array(X_valid, copy=True)
+            captured["y_valid"] = np.array(y_valid, copy=True)
+            captured["train_dates"] = np.array(train_dates, copy=True)
+            captured["valid_dates"] = np.array(valid_dates, copy=True)
+            captured["valid_eval_labels"] = np.array(valid_eval_labels, copy=True)
             captured["train_sample_weight"] = train_sample_weight
             captured["valid_sample_weight"] = valid_sample_weight
+            captured["feature_names"] = list(feature_names or [])
             return self
 
         def predict(self, X):
-            captured.setdefault("predict_X", []).append(X.copy())
+            captured.setdefault("predict_X", []).append(np.array(X, copy=True))
             return np.linspace(0.0, 1.0, len(X), dtype=np.float32)
 
         def save_feature_importance(self, save_path):
             path = Path(save_path)
-            pd.DataFrame({"feature": ["f1", "f2"], "gain": [1.0, 2.0]}).to_csv(path, index=False)
+            path.write_text("feature,gain\nf1,1.0\nf2,2.0\n", encoding="utf-8")
             return path
 
-        def get_feature_importance_frame(self, importance_type="gain"):
-            return pd.DataFrame({"feature": ["f1", "f2"], importance_type: [1.0, 2.0]})
+        def get_feature_importance(self, importance_type="gain"):
+            assert importance_type == "gain"
+            return np.array([1.0, 2.0], dtype=np.float64)
 
         def save_training_history(self, save_path):
             path = Path(save_path)
-            pd.DataFrame({"iteration": [1], "valid": [0.1]}).to_csv(path, index=False)
+            path.write_text("iteration,valid\n1,0.1\n", encoding="utf-8")
             return path
 
         def get_training_summary(self):
             return {"num_iterations": 1}
 
     with patch("src.models.pure_lightgbm.NativeLGBM", FakeNativeLGBM):
-        summary = train_lgbm_window_from_prepared_parquet(
-            train_path=str(train_path),
-            valid_path=str(valid_path),
-            test_path=str(test_path),
-            prediction_path=str(prediction_path),
+        summary = train_lgbm_window_from_prepared_arrays(
+            train_feature_bytes=_f64_bytes([[1.0, 3.0], [2.0, 4.0]]),
+            valid_feature_bytes=_f64_bytes([[1.5, 3.5], [2.5, 4.5]]),
+            test_feature_bytes=_f64_bytes([[np.nan, 7.0], [5.0, 8.0]]),
+            train_rows=2,
+            valid_rows=2,
+            test_rows=2,
+            train_label_bytes=_f64_bytes([-0.5, 0.5]),
+            valid_label_bytes=_f64_bytes([-0.25, 0.25]),
+            raw_valid_label_bytes=_f64_bytes([0.01, 0.03]),
+            train_date_ns_bytes=_i64_bytes(
+                [
+                    np.datetime64("2024-01-02", "ns").astype(np.int64),
+                    np.datetime64("2024-01-02", "ns").astype(np.int64),
+                ]
+            ),
+            valid_date_ns_bytes=_i64_bytes(
+                [
+                    np.datetime64("2024-01-03", "ns").astype(np.int64),
+                    np.datetime64("2024-01-03", "ns").astype(np.int64),
+                ]
+            ),
+            train_sample_weight_bytes=None,
+            valid_sample_weight_bytes=None,
             model_path=str(model_path),
             feature_importance_path=str(importance_path),
             training_history_path=str(history_path),
             lgbm_config_json=json.dumps({"loss": "huber", "validation_topk": 1}),
-            window_metadata_json=json.dumps(
-                {
-                    "window_start": "2024-01-03",
-                    "train_label_transform_mode": "cross_section_rank",
-                    "opportunity_label_mode": "positive",
-                    "opportunity_label_threshold": 0.0,
-                    "opportunity_label_neutral_band": 0.0,
-                    "train_sample_weight_mode": "none",
-                }
-            ),
-            training_config_json=json.dumps(
-                {
-                    "label": {"train_transform": {"mode": "cross_section_rank"}},
-                    "strategy": {"topk": 1},
-                }
-            ),
             feature_names=["f1", "f2"],
         )
 
     assert captured["config"]["loss"] == "huber"
+    assert captured["feature_names"] == ["f1", "f2"]
+    assert captured["X_train"].tolist() == [[1.0, 3.0], [2.0, 4.0]]
     assert captured["y_train"].tolist() == [-0.5, 0.5]
     assert captured["valid_eval_labels"].tolist() == [0.01, 0.03]
     assert captured["train_sample_weight"] is None
-    assert captured["predict_X"][0]["f1"].isna().iloc[0]
-    assert summary["train_label_transform_mode"] == "cross_section_rank"
-    assert summary["test_rows"] == 2
-    assert pd.read_parquet(prediction_path).shape[0] == 2
+    assert captured["valid_sample_weight"] is None
+    assert str(captured["train_dates"][0]) == "2024-01-02T00:00:00.000000000"
+    assert str(captured["valid_dates"][0]) == "2024-01-03T00:00:00.000000000"
+    assert not np.isnan(captured["predict_X"][0][:, 0]).any()
+    assert np.isnan(captured["predict_X"][1][0, 0])
+    assert np.frombuffer(summary["valid_prediction_bytes"], dtype=np.float64).tolist() == [0.0, 1.0]
+    assert np.frombuffer(summary["test_prediction_bytes"], dtype=np.float64).tolist() == [0.0, 1.0]
+    assert summary["summary"]["feature_importance_path"] == str(importance_path)
+    assert summary["summary"]["training_history_path"] == str(history_path)
+    assert summary["summary"]["importance_gain_sum"] == 3.0
+    assert summary["summary"]["python_import_native_lgbm_seconds"] >= 0.0
+    assert summary["summary"]["python_materialize_inputs_seconds"] >= 0.0
+    assert summary["summary"]["python_fit_seconds"] >= 0.0
+    assert (
+        summary["summary"]["python_bridge_total_seconds"]
+        >= summary["summary"]["python_fit_seconds"]
+    )
 
 
 def test_json_safe_replaces_nan_with_none():

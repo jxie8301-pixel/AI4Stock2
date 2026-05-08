@@ -1,2 +1,11 @@
 [env]
 PYO3_PYTHON = { value = ".pixi/envs/default/bin/python", relative = true }
+LD_LIBRARY_PATH = { value = ".pixi/envs/default/lib", relative = true }
+
+[target.x86_64-unknown-linux-gnu]
+rustflags = [
+  "-C",
+  "link-arg=-Wl,-rpath,$ORIGIN/../../.pixi/envs/default/lib",
+  "-C",
+  "link-arg=-Wl,-rpath,$ORIGIN/../../../.pixi/envs/default/lib",
+]

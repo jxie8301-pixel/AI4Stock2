@@ -29,6 +29,12 @@
 pixi run python -m src.collector_akshare --update --workers 8
 ```
 
+`src.collector_akshare` 当前默认只是兼容入口，会委托到 Rust collector：
+```bash
+cargo run --bin ai4stock-collect -- akshare --update --workers 8
+```
+如需临时回到旧 Python 执行路径，可设置 `AI4STOCK_PY_AKSHARE_COLLECTOR_RUNTIME=1`。
+
 如果你要切到 `proxy_patch` 后端，需要显式传入：
 ```bash
 pixi run python -m src.collector_akshare --update --network-backend proxy_patch --proxy-auth-token <TOKEN> --workers 8
@@ -89,15 +95,25 @@ pixi run python -m src.collector_akshare --refresh-stock-list-only
 ```bash
 pixi run python -m src.collector_akshare --rebuild-processed --workers 8
 ```
+这条命令同样默认委托 Rust，并使用 Rust 本地 Parquet merger 重建 `data/processed/combined`。
 
 如需构建或刷新常用股票池文件：
 ```bash
 pixi run python -m src.build_universes
 ```
+该入口默认委托 Rust：
+```bash
+cargo run --bin ai4stock-collect -- universes --universes csi300,csi500,zz1000
+```
+只有在需要旧 pandas 参考路径时才设置 `AI4STOCK_PY_BUILD_UNIVERSES_RUNTIME=1`。
 
 ### Tushare 数据采集
 
 Tushare 路径当前已经支持：
+Rust collector 会在 raw/processed 更新后重建 `data/tushare/source`，包括：
+- packed bucket shards
+- announcement sidecar 的严格下一交易日可用滞后
+- 行业上下文缓存 `data/tushare/raw/meta/industry_context.parquet`
 - 股票列表缓存
 - 交易日历缓存
 - `daily`
@@ -190,6 +206,11 @@ Native 训练前，建议先按当前配置生成本地特征缓存：
 ```bash
 pixi run python -m src.gen_feature --workers 8
 ```
+`src.gen_feature` 当前默认是兼容入口，会解析 config/profile 后委托 Rust binary：
+```bash
+cargo run --bin ai4stock-gen-feature -- generate --parquet-dir data/processed/combined --output-dir data/factor_store/full_factor_space --workers 8
+```
+如需使用 pandas/reference 实现，可设置 `AI4STOCK_PY_GEN_FEATURE_RUNTIME=1`。
 
 现在默认就是先生成一个足够大的全集 cache，然后训练时按需选列：
 ```bash
@@ -201,15 +222,15 @@ pixi run python -m src.gen_feature --workers 8
 pixi run python -m src.gen_feature --data-source tushare --workers 8
 ```
 
-如果只是更新了部分 Parquet，希望尽量少重算特征，可以使用增量模式：
+如果只是更新了部分 Parquet，希望尽量少重算特征，Python reference runtime 仍支持增量模式：
 ```bash
-pixi run python -m src.gen_feature --workers 8 --incremental
+AI4STOCK_PY_GEN_FEATURE_RUNTIME=1 pixi run python -m src.gen_feature --workers 8 --incremental
 ```
 
-当前增量模式的语义是：
+Python reference 增量模式的语义是：
 - 未变化的股票 Parquet 复用已有 shard，不重复计算因子
 - 变化过的股票 Parquet 才重算因子
-- 因子库存储在 `data/factor_store/full_factor_space/shards/` 下
+- Rust 默认路径当前按 source bucket 物化 bucket shards，优先解决全量内存和吞吐问题
 - 会同步刷新根目录 `meta.json`
 
 这意味着它减少的是“因子重算量”，并让训练时可以只读取需要的列。

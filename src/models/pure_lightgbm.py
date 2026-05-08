@@ -394,25 +394,98 @@ class _MinBoostEarlyStoppingCallback:
                 raise lgb_callback.EarlyStopException(self.best_iter[i], self.best_score_list[i])
 
 
-def _sort_frame_by_dates(
-    X: pd.DataFrame,
-    y: pd.Series,
+def _normalize_feature_matrix(
+    X: np.ndarray | pd.DataFrame,
+    *,
+    name: str,
+    feature_names: list[str] | None = None,
+) -> tuple[np.ndarray, list[str]]:
+    if isinstance(X, pd.DataFrame):
+        values = X.to_numpy(dtype=np.float64, copy=False)
+        observed_feature_names = [str(column) for column in X.columns.tolist()]
+    else:
+        values = np.asarray(X, dtype=np.float64)
+        observed_feature_names = None
+    if values.ndim != 2:
+        raise ValueError(f"{name} must be a 2D feature matrix")
+    if feature_names is None:
+        resolved_feature_names = observed_feature_names or [f"f{i}" for i in range(values.shape[1])]
+    else:
+        resolved_feature_names = [str(column) for column in feature_names]
+    if len(resolved_feature_names) != values.shape[1]:
+        raise ValueError(
+            f"{name} feature count mismatch: got {values.shape[1]} columns, "
+            f"but feature_names has {len(resolved_feature_names)} entries"
+        )
+    if observed_feature_names is not None and feature_names is not None:
+        if observed_feature_names != resolved_feature_names:
+            raise ValueError(
+                f"{name} DataFrame columns do not match the provided feature_names"
+            )
+    return values, resolved_feature_names
+
+
+def _normalize_vector(
+    values: np.ndarray | pd.Series,
+    *,
+    expected_len: int | None = None,
+    dtype: np.dtype | str = np.float64,
+    name: str,
+) -> np.ndarray:
+    vector = np.asarray(values, dtype=dtype)
+    if vector.ndim == 0:
+        vector = vector.reshape(1)
+    elif vector.ndim != 1:
+        vector = vector.reshape(-1)
+    if expected_len is not None and len(vector) != int(expected_len):
+        raise ValueError(f"{name} length must match expected_len={expected_len}")
+    return vector
+
+
+def _normalize_optional_vector(
+    values: np.ndarray | pd.Series | None,
+    *,
+    expected_len: int,
+    dtype: np.dtype | str = np.float64,
+    name: str,
+) -> np.ndarray | None:
+    if values is None:
+        return None
+    return _normalize_vector(values, expected_len=expected_len, dtype=dtype, name=name)
+
+
+def _normalize_dates(
     dates: np.ndarray | pd.Series,
-) -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    *,
+    expected_len: int | None = None,
+    name: str,
+) -> np.ndarray:
     date_series = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
-    if len(X) != len(y) or len(X) != len(date_series):
+    if expected_len is not None and len(date_series) != int(expected_len):
+        raise ValueError(f"{name} length must match expected_len={expected_len}")
+    return date_series.to_numpy(dtype="datetime64[ns]", copy=False)
+
+
+def _sort_inputs_by_dates(
+    X: np.ndarray,
+    y: np.ndarray,
+    dates: np.ndarray | pd.Series,
+    *extra_vectors: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray | None, ...]]:
+    date_values = _normalize_dates(dates, expected_len=len(X), name="dates")
+    if len(X) != len(y) or len(X) != len(date_values):
         raise ValueError("X, y, and dates must have the same length")
-    raw_dates = date_series.to_numpy(dtype="datetime64[ns]", copy=False)
+    raw_dates = date_values
     if len(raw_dates) <= 1 or bool(np.all(raw_dates[1:] >= raw_dates[:-1])):
-        x_out = X if isinstance(X.index, pd.RangeIndex) and X.index.equals(pd.RangeIndex(len(X))) else X.reset_index(drop=True)
-        y_out = y if isinstance(y.index, pd.RangeIndex) and y.index.equals(pd.RangeIndex(len(y))) else y.reset_index(drop=True)
-        return x_out, y_out, date_series
+        return X, y, raw_dates, extra_vectors
 
     order = np.argsort(raw_dates, kind="stable")
+    sorted_extras = tuple(None if values is None else np.asarray(values)[order] for values in extra_vectors)
     return (
-        X.iloc[order].reset_index(drop=True),
-        y.iloc[order].reset_index(drop=True),
-        date_series.iloc[order].reset_index(drop=True),
+        X[order],
+        y[order],
+        raw_dates[order],
+        sorted_extras,
     )
 
 
@@ -617,41 +690,64 @@ class NativeLGBM:
 
     def fit(
         self,
-        X_train: pd.DataFrame,
-        y_train: pd.Series,
-        X_valid: pd.DataFrame = None,
-        y_valid: pd.Series = None,
+        X_train: np.ndarray | pd.DataFrame,
+        y_train: np.ndarray | pd.Series,
+        X_valid: np.ndarray | pd.DataFrame = None,
+        y_valid: np.ndarray | pd.Series = None,
         train_dates: np.ndarray | pd.Series | None = None,
         valid_dates: np.ndarray | None = None,
-        valid_eval_labels: pd.Series | None = None,
+        valid_eval_labels: np.ndarray | pd.Series | None = None,
         train_sample_weight: np.ndarray | pd.Series | None = None,
         valid_sample_weight: np.ndarray | pd.Series | None = None,
+        feature_names: list[str] | None = None,
     ):
         """Fit the LightGBM model."""
-        feature_names = X_train.columns.tolist()
+        X_train_values, feature_names = _normalize_feature_matrix(
+            X_train,
+            name="X_train",
+            feature_names=feature_names,
+        )
+        y_train_values = _normalize_vector(
+            y_train,
+            expected_len=len(X_train_values),
+            dtype=np.float64,
+            name="y_train",
+        )
         train_weight = None
         train_group = None
-        train_label_values = y_train.to_numpy(dtype=np.float32, copy=False)
-        X_train_use = X_train
-        y_train_use = y_train
-        train_sample_weight_use = None if train_sample_weight is None else pd.Series(train_sample_weight).reset_index(drop=True)
-        train_dates_use = None if train_dates is None else pd.to_datetime(pd.Series(train_dates)).reset_index(drop=True)
+        train_label_values = y_train_values.astype(np.float32, copy=False)
+        X_train_use = X_train_values
+        y_train_use = y_train_values
+        train_sample_weight_use = _normalize_optional_vector(
+            train_sample_weight,
+            expected_len=len(X_train_values),
+            dtype=np.float64,
+            name="train_sample_weight",
+        )
+        train_dates_use = (
+            None
+            if train_dates is None
+            else _normalize_dates(train_dates, expected_len=len(X_train_values), name="train_dates")
+        )
         if self.train_weight_half_life is not None:
             if train_dates_use is None:
                 raise ValueError("train_dates is required when train_weight_half_life is configured")
-            if len(train_dates_use) != len(X_train):
+            if len(train_dates_use) != len(X_train_values):
                 raise ValueError("train_dates length must match X_train rows")
-        if train_sample_weight_use is not None and len(train_sample_weight_use) != len(X_train):
+        if train_sample_weight_use is not None and len(train_sample_weight_use) != len(X_train_values):
             raise ValueError("train_sample_weight length must match X_train rows")
 
         if self.is_ranking_objective:
             if train_dates is None:
                 raise ValueError("train_dates is required when using a ranking objective")
-            X_train_use, y_train_use, train_dates_use = _sort_frame_by_dates(X_train, y_train, train_dates)
-            if train_sample_weight_use is not None:
-                order = np.argsort(pd.to_datetime(pd.Series(train_dates)).to_numpy(dtype="datetime64[ns]"), kind="stable")
-                train_sample_weight_use = train_sample_weight_use.iloc[order].reset_index(drop=True)
-            train_label_array = y_train_use.to_numpy(dtype=np.float32, copy=False)
+            X_train_use, y_train_use, train_dates_use, extra_vectors = _sort_inputs_by_dates(
+                X_train_values,
+                y_train_values,
+                train_dates_use,
+                train_sample_weight_use,
+            )
+            train_sample_weight_use = extra_vectors[0]
+            train_label_array = y_train_use.astype(np.float32, copy=False)
             if _should_use_direct_ranking_relevance_labels(
                 train_label_array,
                 max_unique_values=self.ranking_num_bins,
@@ -674,7 +770,7 @@ class NativeLGBM:
         train_weight = _combine_sample_weights(train_weight, train_sample_weight_use)
 
         dtrain = lgb.Dataset(
-            X_train_use.values,
+            X_train_use,
             label=train_label_values,
             weight=train_weight,
             group=train_group,
@@ -687,22 +783,53 @@ class NativeLGBM:
         
         valid_label_values = None
         if X_valid is not None and y_valid is not None:
-            X_valid_use = X_valid
-            y_valid_use = y_valid
-            valid_sample_weight_use = None if valid_sample_weight is None else pd.Series(valid_sample_weight).reset_index(drop=True)
-            valid_dates_use = None if valid_dates is None else pd.to_datetime(pd.Series(valid_dates)).reset_index(drop=True)
+            X_valid_values, _ = _normalize_feature_matrix(
+                X_valid,
+                name="X_valid",
+                feature_names=feature_names,
+            )
+            y_valid_values = _normalize_vector(
+                y_valid,
+                expected_len=len(X_valid_values),
+                dtype=np.float64,
+                name="y_valid",
+            )
+            X_valid_use = X_valid_values
+            y_valid_use = y_valid_values
+            valid_sample_weight_use = _normalize_optional_vector(
+                valid_sample_weight,
+                expected_len=len(X_valid_values),
+                dtype=np.float64,
+                name="valid_sample_weight",
+            )
+            valid_dates_use = (
+                None
+                if valid_dates is None
+                else _normalize_dates(valid_dates, expected_len=len(X_valid_values), name="valid_dates")
+            )
             valid_group = None
-            valid_label_values = y_valid.to_numpy(dtype=np.float32, copy=False)
-            if valid_sample_weight_use is not None and len(valid_sample_weight_use) != len(X_valid):
+            valid_label_values = y_valid_values.astype(np.float32, copy=False)
+            if valid_sample_weight_use is not None and len(valid_sample_weight_use) != len(X_valid_values):
                 raise ValueError("valid_sample_weight length must match X_valid rows")
             if self.is_ranking_objective:
                 if valid_dates is None:
                     raise ValueError("valid_dates is required when using a ranking objective with validation")
-                X_valid_use, y_valid_use, valid_dates_use = _sort_frame_by_dates(X_valid, y_valid, valid_dates)
-                if valid_sample_weight_use is not None:
-                    order = np.argsort(pd.to_datetime(pd.Series(valid_dates)).to_numpy(dtype="datetime64[ns]"), kind="stable")
-                    valid_sample_weight_use = valid_sample_weight_use.iloc[order].reset_index(drop=True)
-                valid_label_array = y_valid_use.to_numpy(dtype=np.float32, copy=False)
+                raw_valid_eval_values = _normalize_vector(
+                    valid_eval_labels if valid_eval_labels is not None else y_valid_values,
+                    expected_len=len(X_valid_values),
+                    dtype=np.float64,
+                    name="valid_eval_labels",
+                )
+                X_valid_use, y_valid_use, valid_dates_use, extra_vectors = _sort_inputs_by_dates(
+                    X_valid_values,
+                    y_valid_values,
+                    valid_dates_use,
+                    valid_sample_weight_use,
+                    raw_valid_eval_values,
+                )
+                valid_sample_weight_use = extra_vectors[0]
+                raw_valid_eval_values = extra_vectors[1]
+                valid_label_array = y_valid_use.astype(np.float32, copy=False)
                 if _should_use_direct_ranking_relevance_labels(
                     valid_label_array,
                     max_unique_values=self.ranking_num_bins,
@@ -716,9 +843,9 @@ class NativeLGBM:
                     )
                 valid_group = _compute_ranking_groups(valid_dates_use)
             dvalid = lgb.Dataset(
-                X_valid_use.values,
+                X_valid_use,
                 label=valid_label_values,
-                weight=None if valid_sample_weight_use is None else valid_sample_weight_use.to_numpy(dtype=np.float32, copy=False),
+                weight=None if valid_sample_weight_use is None else valid_sample_weight_use.astype(np.float32, copy=False),
                 group=valid_group,
                 reference=dtrain,
                 feature_name=feature_names,
@@ -726,19 +853,19 @@ class NativeLGBM:
             valid_sets = [dvalid]
             valid_names = ["valid"]
             if valid_dates is not None:
-                if valid_eval_labels is not None:
-                    raw_valid_eval_series = pd.Series(valid_eval_labels).reset_index(drop=True)
-                    if len(raw_valid_eval_series) != len(X_valid):
-                        raise ValueError("valid_eval_labels length must match X_valid rows")
-                else:
-                    raw_valid_eval_series = y_valid.reset_index(drop=True)
+                if not self.is_ranking_objective:
+                    raw_valid_eval_values = _normalize_vector(
+                        valid_eval_labels if valid_eval_labels is not None else y_valid_values,
+                        expected_len=len(X_valid_values),
+                        dtype=np.float64,
+                        name="valid_eval_labels",
+                    )
                 if self.is_ranking_objective:
-                    order = np.argsort(pd.to_datetime(pd.Series(valid_dates)).to_numpy(dtype="datetime64[ns]"), kind="stable")
-                    raw_valid_labels = raw_valid_eval_series.iloc[order].to_numpy(dtype=np.float32, copy=False)
+                    raw_valid_labels = raw_valid_eval_values.astype(np.float32, copy=False)
                     raw_valid_dates = valid_dates_use
                 else:
-                    raw_valid_labels = raw_valid_eval_series.to_numpy(dtype=np.float32, copy=False)
-                    raw_valid_dates = valid_dates
+                    raw_valid_labels = raw_valid_eval_values.astype(np.float32, copy=False)
+                    raw_valid_dates = valid_dates_use
                 metric_context = _prepare_metric_context(raw_valid_labels, raw_valid_dates)
                 def _feval(
                     preds,
@@ -840,11 +967,21 @@ class NativeLGBM:
             self.best_iteration_ = int(getattr(self.model, "current_iteration", lambda: 0)() or 0) or None
         return self
 
-    def predict(self, X_test: pd.DataFrame) -> np.ndarray:
+    def predict(
+        self,
+        X_test: np.ndarray | pd.DataFrame,
+        *,
+        feature_names: list[str] | None = None,
+    ) -> np.ndarray:
         """Predict using the trained model."""
         if self.model is None:
             raise ValueError("Model is not fitted yet.")
-        return self.model.predict(X_test.values)
+        X_test_values, _ = _normalize_feature_matrix(
+            X_test,
+            name="X_test",
+            feature_names=feature_names or list(self.model.feature_name()),
+        )
+        return self.model.predict(X_test_values)
         
     def get_feature_importance(self, importance_type="split"):
         """Get feature importance."""

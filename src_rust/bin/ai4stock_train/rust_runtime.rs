@@ -13,7 +13,7 @@ use parquet::arrow::{
     ArrowWriter, ProjectionMask,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::collections::{BTreeMap, BTreeSet};
@@ -29,6 +29,7 @@ const PREDICTIONS_FILENAME: &str = "final_predictions.parquet";
 const SIGNAL_LABELS_FILENAME: &str = "signal_labels.parquet";
 const BACKTEST_LABELS_FILENAME: &str = "backtest_labels.parquet";
 const TRAINING_SUMMARY_FILENAME: &str = "training_summary.csv";
+const DEFAULT_LGBM_BUNDLE_TIMING_FILENAME: &str = "lgbm_bundle_timing.json";
 const DEFAULT_LABEL_ABS_CAP: f64 = 0.35;
 
 #[derive(Debug, Clone)]
@@ -110,6 +111,30 @@ struct WindowDataPaths {
 }
 
 #[derive(Debug, Clone)]
+struct PythonWindowTrainResult {
+    summary: JsonValue,
+    valid_predictions: Vec<f64>,
+    test_predictions: Vec<f64>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedPythonLgbmWindow {
+    train_rows: usize,
+    valid_rows: usize,
+    test_rows: usize,
+    train_feature_bytes: Vec<u8>,
+    valid_feature_bytes: Vec<u8>,
+    test_feature_bytes: Vec<u8>,
+    train_label_bytes: Vec<u8>,
+    valid_label_bytes: Vec<u8>,
+    raw_valid_label_bytes: Vec<u8>,
+    train_date_ns_bytes: Vec<u8>,
+    valid_date_ns_bytes: Vec<u8>,
+    train_sample_weight_bytes: Option<Vec<u8>>,
+    valid_sample_weight_bytes: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
 struct TrainLabelTransformConfig {
     mode: String,
     neutral_band: f64,
@@ -148,6 +173,75 @@ struct PreparedWindowLabelColumns {
     opportunity_label: Vec<f64>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TimingPhase {
+    seconds: f64,
+    count: usize,
+    rows: usize,
+    windows: usize,
+    files: usize,
+}
+
+#[derive(Debug, Clone)]
+struct RuntimePhaseTimer {
+    started: Instant,
+    phases: BTreeMap<String, TimingPhase>,
+}
+
+impl RuntimePhaseTimer {
+    fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            phases: BTreeMap::new(),
+        }
+    }
+
+    fn add(
+        &mut self,
+        name: &str,
+        seconds: f64,
+        count: usize,
+        rows: usize,
+        windows: usize,
+        files: usize,
+    ) {
+        let phase = self.phases.entry(name.to_owned()).or_default();
+        phase.seconds += seconds;
+        phase.count += count;
+        phase.rows += rows;
+        phase.windows += windows;
+        phase.files += files;
+    }
+
+    fn as_json(&self, path: &Path) -> JsonValue {
+        let phases = self
+            .phases
+            .iter()
+            .map(|(name, phase)| {
+                (
+                    name.clone(),
+                    serde_json::json!({
+                        "seconds": round_six(phase.seconds),
+                        "count": phase.count,
+                        "rows": phase.rows,
+                        "windows": phase.windows,
+                        "files": phase.files,
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, JsonValue>>();
+        serde_json::json!({
+            "wall_seconds": round_six(self.started.elapsed().as_secs_f64()),
+            "semantics": "Window phase seconds are summed across windows and can exceed wall_seconds when phases overlap logically.",
+            "artifact": {
+                "path": path.display().to_string(),
+                "default_filename": DEFAULT_LGBM_BUNDLE_TIMING_FILENAME,
+            },
+            "phases": phases,
+        })
+    }
+}
+
 pub(crate) fn make_bundle_lgbm_rust_runtime(
     options: &LgbmBundleOptions,
 ) -> Result<JsonValue, String> {
@@ -158,25 +252,71 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         );
     }
     let started = Instant::now();
+    let mut phase_timer = RuntimePhaseTimer::new();
+    let mut phase_started = Instant::now();
     let resolved = resolve_runtime_config(options)?;
+    phase_timer.add(
+        "resolve_runtime_config",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        0,
+        0,
+        0,
+    );
     if resolved.selected_feature_names.len() != resolved.selected_feature_sources.len() {
         return Err("selected feature names/sources length mismatch".to_owned());
     }
+    phase_started = Instant::now();
     let mut data = load_factor_data(options, &resolved)?;
+    phase_timer.add(
+        "load_factor_data",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        data.rows.len(),
+        0,
+        0,
+    );
     if data.selected_feature_names.is_empty() {
         return Err("no selected features available for Rust runtime LightGBM training".to_owned());
     }
     if resolved.cross_sectional_rank {
+        phase_started = Instant::now();
         apply_cross_sectional_rank_transform(
             &mut data.rows,
             &data.selected_feature_names,
             &data.selected_feature_sources,
             &resolved.cross_sectional_rank_exclude_columns,
         );
+        phase_timer.add(
+            "cross_sectional_rank_transform",
+            phase_started.elapsed().as_secs_f64(),
+            1,
+            data.rows.len(),
+            0,
+            0,
+        );
     }
+    phase_started = Instant::now();
     let training_context = build_training_context(&resolved, &data)?;
+    phase_timer.add(
+        "build_training_context",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        data.rows.len(),
+        0,
+        0,
+    );
+    phase_started = Instant::now();
     let row_indices_by_date = build_row_indices_by_date(&data.rows);
     let windows = build_rolling_windows(&resolved, &data.full_calendar, &data.test_calendar);
+    phase_timer.add(
+        "build_rolling_windows",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        data.rows.len(),
+        windows.len(),
+        0,
+    );
     if windows.is_empty() {
         return Err("no rolling windows were generated; check train/valid/test dates".to_owned());
     }
@@ -190,6 +330,8 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
     let window_dir = results_dir.join("prepared_lgbm_windows");
     let importance_dir = results_dir.join("feature_importance");
     let history_dir = results_dir.join("training_history");
+    let timing_path = results_dir.join(DEFAULT_LGBM_BUNDLE_TIMING_FILENAME);
+    phase_started = Instant::now();
     fs::create_dir_all(&artifact_dir)
         .map_err(|err| format!("failed to create {}: {err}", artifact_dir.display()))?;
     fs::create_dir_all(&window_dir)
@@ -202,10 +344,30 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         fs::create_dir_all(&models_dir)
             .map_err(|err| format!("failed to create {}: {err}", models_dir.display()))?;
     }
+    phase_timer.add(
+        "create_output_dirs",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        0,
+        0,
+        0,
+    );
 
     let mut prediction_rows = Vec::new();
     let mut training_records = Vec::<BTreeMap<String, String>>::new();
+    let mut window_timing_records = Vec::<JsonValue>::new();
     for window in &windows {
+        let mut window_timing = serde_json::Map::new();
+        window_timing.insert(
+            "window_start".to_owned(),
+            JsonValue::String(format_date_ns(window.test_start_ns)),
+        );
+        window_timing.insert(
+            "window_end".to_owned(),
+            JsonValue::String(format_date_ns(window.test_end_ns)),
+        );
+        let window_started = Instant::now();
+        phase_started = Instant::now();
         let train_indices = collect_indices_for_date_range(
             &row_indices_by_date,
             window.train_start_ns,
@@ -221,6 +383,19 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
             window.test_start_ns,
             window.test_end_ns,
         );
+        let collect_window_indices_seconds = phase_started.elapsed().as_secs_f64();
+        phase_timer.add(
+            "collect_window_indices",
+            collect_window_indices_seconds,
+            1,
+            train_indices.len() + valid_indices.len() + test_indices.len(),
+            1,
+            0,
+        );
+        window_timing.insert(
+            "collect_window_indices_seconds".to_owned(),
+            json_f64_or_null(collect_window_indices_seconds),
+        );
         let paths = build_window_paths(
             &window_dir,
             &models_dir,
@@ -228,6 +403,7 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
             &history_dir,
             window,
         );
+        phase_started = Instant::now();
         write_window_frame_parquet(
             &paths.train_path,
             &data.rows,
@@ -252,17 +428,195 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
             &resolved,
             &training_context,
         )?;
-        let summary = call_python_train_window(
+        let write_window_parquet_seconds = phase_started.elapsed().as_secs_f64();
+        phase_timer.add(
+            "write_window_frame_parquet",
+            write_window_parquet_seconds,
+            3,
+            train_indices.len() + valid_indices.len() + test_indices.len(),
+            1,
+            3,
+        );
+        window_timing.insert(
+            "write_window_frame_parquet_seconds".to_owned(),
+            json_f64_or_null(write_window_parquet_seconds),
+        );
+        phase_started = Instant::now();
+        let train_prepared = build_prepared_window_label_columns(
+            &data.rows,
+            &train_indices,
+            &resolved,
+            &training_context,
+        )?;
+        let valid_prepared = build_prepared_window_label_columns(
+            &data.rows,
+            &valid_indices,
+            &resolved,
+            &training_context,
+        )?;
+        let train_keep_positions =
+            keep_positions_for_training_window(&data.rows, &train_indices, &train_prepared);
+        let valid_keep_positions =
+            keep_positions_for_training_window(&data.rows, &valid_indices, &valid_prepared);
+        let test_keep_positions = keep_positions_for_prediction_window(&data.rows, &test_indices);
+        let python_window = build_python_lgbm_window(
+            &data.rows,
+            &train_indices,
+            &train_keep_positions,
+            &train_prepared,
+            &valid_indices,
+            &valid_keep_positions,
+            &valid_prepared,
+            &test_indices,
+            &test_keep_positions,
+        );
+        let prepare_window_labels_seconds = phase_started.elapsed().as_secs_f64();
+        phase_timer.add(
+            "prepare_window_labels",
+            prepare_window_labels_seconds,
+            2,
+            train_indices.len() + valid_indices.len(),
+            1,
+            0,
+        );
+        window_timing.insert(
+            "prepare_window_labels_seconds".to_owned(),
+            json_f64_or_null(prepare_window_labels_seconds),
+        );
+        phase_started = Instant::now();
+        let python_result = call_python_train_window(
             options,
             &resolved,
             &data.selected_feature_names,
-            window,
             &paths,
+            &python_window,
         )?;
+        let python_train_window_seconds = phase_started.elapsed().as_secs_f64();
+        phase_timer.add(
+            "python_train_window",
+            python_train_window_seconds,
+            1,
+            train_keep_positions.len() + valid_keep_positions.len() + test_keep_positions.len(),
+            1,
+            0,
+        );
+        accumulate_python_phase_timings(&mut phase_timer, &python_result.summary);
+        window_timing.insert(
+            "python_train_window_seconds".to_owned(),
+            json_f64_or_null(python_train_window_seconds),
+        );
+        window_timing.insert(
+            "python_subphases".to_owned(),
+            python_phase_timings_json(&python_result.summary),
+        );
+        phase_started = Instant::now();
+        let mut window_predictions = build_window_prediction_rows(
+            &data.rows,
+            &test_indices,
+            &test_keep_positions,
+            &python_result.test_predictions,
+        )?;
+        write_long_value_parquet(&paths.prediction_path, "prediction", &window_predictions)?;
+        let write_window_prediction_seconds = phase_started.elapsed().as_secs_f64();
+        phase_timer.add(
+            "write_window_prediction",
+            write_window_prediction_seconds,
+            1,
+            window_predictions.len(),
+            1,
+            1,
+        );
+        window_timing.insert(
+            "write_window_prediction_seconds".to_owned(),
+            json_f64_or_null(write_window_prediction_seconds),
+        );
+        phase_started = Instant::now();
+        let valid_topk_summary = compute_validation_topk_summary(
+            &data.rows,
+            &valid_indices,
+            &valid_keep_positions,
+            &valid_prepared,
+            &python_result.valid_predictions,
+            resolved
+                .lgbm_config
+                .get("validation_topk")
+                .and_then(JsonValue::as_u64)
+                .unwrap_or(10) as usize,
+        )?;
+        let compute_validation_topk_seconds = phase_started.elapsed().as_secs_f64();
+        phase_timer.add(
+            "compute_validation_topk_summary",
+            compute_validation_topk_seconds,
+            1,
+            valid_keep_positions.len(),
+            1,
+            0,
+        );
+        window_timing.insert(
+            "compute_validation_topk_summary_seconds".to_owned(),
+            json_f64_or_null(compute_validation_topk_seconds),
+        );
+        phase_started = Instant::now();
+        let summary = build_window_training_summary(
+            &python_result.summary,
+            &paths,
+            window,
+            &resolved,
+            train_indices.len(),
+            valid_indices.len(),
+            test_indices.len(),
+            train_keep_positions.len(),
+            valid_keep_positions.len(),
+            test_keep_positions.len(),
+            data.selected_feature_names.len(),
+            valid_topk_summary,
+        );
         training_records.push(json_object_to_string_map(&summary));
-        let mut window_predictions = read_long_value_parquet(&paths.prediction_path, "prediction")?;
         prediction_rows.append(&mut window_predictions);
+        let assemble_window_summary_seconds = phase_started.elapsed().as_secs_f64();
+        phase_timer.add(
+            "assemble_window_summary",
+            assemble_window_summary_seconds,
+            1,
+            train_keep_positions.len() + valid_keep_positions.len() + test_keep_positions.len(),
+            1,
+            0,
+        );
+        window_timing.insert(
+            "assemble_window_summary_seconds".to_owned(),
+            json_f64_or_null(assemble_window_summary_seconds),
+        );
+        window_timing.insert(
+            "window_total_seconds".to_owned(),
+            json_f64_or_null(window_started.elapsed().as_secs_f64()),
+        );
+        window_timing.insert(
+            "raw_train_rows".to_owned(),
+            serde_json::json!(train_indices.len()),
+        );
+        window_timing.insert(
+            "raw_valid_rows".to_owned(),
+            serde_json::json!(valid_indices.len()),
+        );
+        window_timing.insert(
+            "raw_test_rows".to_owned(),
+            serde_json::json!(test_indices.len()),
+        );
+        window_timing.insert(
+            "train_rows_kept".to_owned(),
+            serde_json::json!(train_keep_positions.len()),
+        );
+        window_timing.insert(
+            "valid_rows_kept".to_owned(),
+            serde_json::json!(valid_keep_positions.len()),
+        );
+        window_timing.insert(
+            "test_rows_kept".to_owned(),
+            serde_json::json!(test_keep_positions.len()),
+        );
+        window_timing_records.push(JsonValue::Object(window_timing));
     }
+    phase_started = Instant::now();
     prediction_rows.sort_by(|left, right| {
         left.date_ns
             .cmp(&right.date_ns)
@@ -272,7 +626,16 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         .iter()
         .map(|row| (row.date_ns, row.instrument.clone()))
         .collect::<BTreeSet<_>>();
+    phase_timer.add(
+        "sort_predictions",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        prediction_rows.len(),
+        0,
+        0,
+    );
 
+    phase_started = Instant::now();
     let test_indices = collect_indices_for_date_range(
         &row_indices_by_date,
         resolved.test_start_ns,
@@ -306,6 +669,15 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
             value: data.rows[*row_index].backtest_label,
         })
         .collect::<Vec<_>>();
+    phase_timer.add(
+        "collect_bundle_labels",
+        phase_started.elapsed().as_secs_f64(),
+        2,
+        signal_label_rows.len() + backtest_label_rows.len(),
+        0,
+        0,
+    );
+    phase_started = Instant::now();
     write_long_value_parquet(
         &artifact_dir.join(PREDICTIONS_FILENAME),
         "prediction",
@@ -321,6 +693,15 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         "label",
         &backtest_label_rows,
     )?;
+    phase_timer.add(
+        "write_bundle_label_prediction_parquet",
+        phase_started.elapsed().as_secs_f64(),
+        3,
+        prediction_rows.len() + signal_label_rows.len() + backtest_label_rows.len(),
+        0,
+        3,
+    );
+    phase_started = Instant::now();
     write_training_summary(
         &artifact_dir.join(TRAINING_SUMMARY_FILENAME),
         &training_records,
@@ -329,17 +710,60 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         &results_dir.join(TRAINING_SUMMARY_FILENAME),
         &training_records,
     )?;
+    phase_timer.add(
+        "write_training_summary",
+        phase_started.elapsed().as_secs_f64(),
+        2,
+        training_records.len(),
+        0,
+        2,
+    );
+    phase_started = Instant::now();
     write_config_snapshot(&results_dir.join("config_snapshot.yaml"), &resolved.cfg)?;
+    phase_timer.add(
+        "write_config_snapshot",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        0,
+        0,
+        1,
+    );
+    phase_started = Instant::now();
     write_metadata(
         &artifact_dir.join(PREDICTION_METADATA_FILENAME),
         &resolved,
         &data,
     )?;
+    phase_timer.add(
+        "write_prediction_metadata",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        0,
+        0,
+        1,
+    );
 
     let finite_predictions = prediction_rows
         .iter()
         .filter(|row| row.value.is_finite())
         .count();
+    let timing_summary =
+        build_lgbm_bundle_timing_summary(&phase_timer, &timing_path, &window_timing_records);
+    phase_started = Instant::now();
+    fs::write(
+        &timing_path,
+        serde_json::to_string_pretty(&timing_summary)
+            .map_err(|err| format!("failed to serialize timing summary: {err}"))?,
+    )
+    .map_err(|err| format!("failed to write {}: {err}", timing_path.display()))?;
+    phase_timer.add(
+        "write_timing_summary",
+        phase_started.elapsed().as_secs_f64(),
+        1,
+        window_timing_records.len(),
+        windows.len(),
+        1,
+    );
     let summary = serde_json::json!({
         "artifact_dir": artifact_dir.display().to_string(),
         "results_dir": results_dir.display().to_string(),
@@ -378,6 +802,7 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         "training_summary_path": results_dir.join(TRAINING_SUMMARY_FILENAME).display().to_string(),
         "prediction_training_summary_path": artifact_dir.join(TRAINING_SUMMARY_FILENAME).display().to_string(),
         "config_snapshot_path": results_dir.join("config_snapshot.yaml").display().to_string(),
+        "timing_path": timing_path.display().to_string(),
         "elapsed_seconds": started.elapsed().as_secs_f64(),
     });
     fs::write(
@@ -1260,9 +1685,9 @@ fn call_python_train_window(
     options: &LgbmBundleOptions,
     resolved: &ResolvedRuntimeConfig,
     selected_feature_names: &[String],
-    window: &RollingWindow,
     paths: &WindowDataPaths,
-) -> Result<JsonValue, String> {
+    prepared_window: &PreparedPythonLgbmWindow,
+) -> Result<PythonWindowTrainResult, String> {
     let repo_root = env::current_dir().map_err(|error| format!("failed to read cwd: {error}"))?;
     let conda_prefix = env::var("CONDA_PREFIX").ok();
     let site_packages_dir = conda_prefix
@@ -1272,27 +1697,7 @@ fn call_python_train_window(
     let feature_names = selected_feature_names.to_vec();
     let lgbm_config_json = serde_json::to_string(&resolved.lgbm_config)
         .map_err(|err| format!("failed to encode lgbm config: {err}"))?;
-    let training_config_json = serde_json::to_string(&resolved.cfg)
-        .map_err(|err| format!("failed to encode training config: {err}"))?;
-    let window_metadata_json = serde_json::to_string(&serde_json::json!({
-        "window_start": format_date_ns(window.test_start_ns),
-        "window_end": format_date_ns(window.test_end_ns),
-        "train_start": format_date_ns(window.train_start_ns),
-        "train_end": format_date_ns(window.train_end_ns),
-        "valid_start": format_date_ns(window.valid_start_ns),
-        "valid_end": format_date_ns(window.valid_end_ns),
-        "signal_horizon": resolved.signal_horizon,
-        "label_embargo_days": resolved.label_embargo_days,
-        "train_label_transform_mode": resolved.train_label_transform.mode,
-        "train_label_space": if resolved.train_label_transform.mode.starts_with("buyability") { "binary_target" } else { "return_target" },
-        "valid_custom_metric_label_space": "raw_return",
-        "opportunity_label_mode": resolved.opportunity.mode,
-        "opportunity_label_threshold": resolved.opportunity.threshold,
-        "opportunity_label_neutral_band": resolved.opportunity.neutral_band,
-        "train_sample_weight_mode": resolved.sample_weight.mode,
-    }))
-    .map_err(|err| format!("failed to encode window metadata: {err}"))?;
-    let summary_json = Python::attach(|python| -> PyResult<String> {
+    Python::attach(|python| -> PyResult<PythonWindowTrainResult> {
         let sys_module = python.import("sys")?;
         sys_module
             .getattr("path")?
@@ -1302,12 +1707,40 @@ fn call_python_train_window(
             .call_method1("insert", (0, site_packages_dir.as_os_str()))?;
         let bridge_module = python.import("src.rust_lgbm_bridge")?;
         let kwargs = PyDict::new(python);
-        kwargs.set_item("train_path", paths.train_path.to_string_lossy().as_ref())?;
-        kwargs.set_item("valid_path", paths.valid_path.to_string_lossy().as_ref())?;
-        kwargs.set_item("test_path", paths.test_path.to_string_lossy().as_ref())?;
         kwargs.set_item(
-            "prediction_path",
-            paths.prediction_path.to_string_lossy().as_ref(),
+            "train_feature_bytes",
+            PyBytes::new(python, &prepared_window.train_feature_bytes),
+        )?;
+        kwargs.set_item(
+            "valid_feature_bytes",
+            PyBytes::new(python, &prepared_window.valid_feature_bytes),
+        )?;
+        kwargs.set_item(
+            "test_feature_bytes",
+            PyBytes::new(python, &prepared_window.test_feature_bytes),
+        )?;
+        kwargs.set_item("train_rows", prepared_window.train_rows)?;
+        kwargs.set_item("valid_rows", prepared_window.valid_rows)?;
+        kwargs.set_item("test_rows", prepared_window.test_rows)?;
+        kwargs.set_item(
+            "train_label_bytes",
+            PyBytes::new(python, &prepared_window.train_label_bytes),
+        )?;
+        kwargs.set_item(
+            "valid_label_bytes",
+            PyBytes::new(python, &prepared_window.valid_label_bytes),
+        )?;
+        kwargs.set_item(
+            "raw_valid_label_bytes",
+            PyBytes::new(python, &prepared_window.raw_valid_label_bytes),
+        )?;
+        kwargs.set_item(
+            "train_date_ns_bytes",
+            PyBytes::new(python, &prepared_window.train_date_ns_bytes),
+        )?;
+        kwargs.set_item(
+            "valid_date_ns_bytes",
+            PyBytes::new(python, &prepared_window.valid_date_ns_bytes),
         )?;
         kwargs.set_item("model_path", paths.model_path.to_string_lossy().as_ref())?;
         kwargs.set_item(
@@ -1319,8 +1752,18 @@ fn call_python_train_window(
             paths.history_path.to_string_lossy().as_ref(),
         )?;
         kwargs.set_item("lgbm_config_json", &lgbm_config_json)?;
-        kwargs.set_item("window_metadata_json", &window_metadata_json)?;
-        kwargs.set_item("training_config_json", &training_config_json)?;
+        if let Some(train_sample_weight_bytes) = &prepared_window.train_sample_weight_bytes {
+            kwargs.set_item(
+                "train_sample_weight_bytes",
+                PyBytes::new(python, train_sample_weight_bytes),
+            )?;
+        }
+        if let Some(valid_sample_weight_bytes) = &prepared_window.valid_sample_weight_bytes {
+            kwargs.set_item(
+                "valid_sample_weight_bytes",
+                PyBytes::new(python, valid_sample_weight_bytes),
+            )?;
+        }
         kwargs.set_item("save_model", options.save_models)?;
         kwargs.set_item("load_model", options.load_models)?;
         kwargs.set_item(
@@ -1328,16 +1771,38 @@ fn call_python_train_window(
             PyList::new(python, feature_names.iter().map(String::as_str))?,
         )?;
         let result = bridge_module
-            .getattr("train_lgbm_window_from_prepared_parquet")?
+            .getattr("train_lgbm_window_from_prepared_arrays")?
             .call((), Some(&kwargs))?;
+        let result_dict = result.cast_into::<PyDict>()?;
+        let valid_prediction_bytes = result_dict
+            .get_item("valid_prediction_bytes")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing valid_prediction_bytes"))?
+            .extract::<Vec<u8>>()?;
+        let test_prediction_bytes = result_dict
+            .get_item("test_prediction_bytes")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing test_prediction_bytes"))?
+            .extract::<Vec<u8>>()?;
+        let summary_value = result_dict
+            .get_item("summary")?
+            .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("missing summary"))?;
         let json_module = python.import("json")?;
-        json_module
-            .call_method1("dumps", (result,))?
-            .extract::<String>()
+        let summary_json = json_module
+            .call_method1("dumps", (summary_value,))?
+            .extract::<String>()?;
+        let summary = serde_json::from_str(&summary_json).map_err(|error| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "Python training summary returned invalid JSON: {error}: {summary_json}"
+            ))
+        })?;
+        Ok(PythonWindowTrainResult {
+            summary,
+            valid_predictions: decode_f64_le_bytes(&valid_prediction_bytes)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?,
+            test_predictions: decode_f64_le_bytes(&test_prediction_bytes)
+                .map_err(pyo3::exceptions::PyValueError::new_err)?,
+        })
     })
-    .map_err(|error| format!("Python LightGBM training failed: {error}"))?;
-    serde_json::from_str(&summary_json)
-        .map_err(|error| format!("Python training returned invalid JSON: {error}: {summary_json}"))
+    .map_err(|error| format!("Python LightGBM training failed: {error}"))
 }
 
 fn build_window_paths(
@@ -1732,6 +2197,495 @@ fn build_sample_weights(
     Ok(weights)
 }
 
+fn keep_positions_for_training_window(
+    rows: &[FactorRow],
+    indices: &[usize],
+    prepared: &PreparedWindowLabelColumns,
+) -> Vec<usize> {
+    indices
+        .iter()
+        .enumerate()
+        .filter_map(|(position, idx)| {
+            if rows[*idx].features.iter().all(|value| !value.is_infinite())
+                && prepared.label[position].is_finite()
+            {
+                Some(position)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn keep_positions_for_prediction_window(rows: &[FactorRow], indices: &[usize]) -> Vec<usize> {
+    indices
+        .iter()
+        .enumerate()
+        .filter_map(|(position, idx)| {
+            if rows[*idx].features.iter().all(|value| !value.is_infinite()) {
+                Some(position)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn build_window_prediction_rows(
+    rows: &[FactorRow],
+    indices: &[usize],
+    keep_positions: &[usize],
+    predictions: &[f64],
+) -> Result<Vec<LongValueRow>, String> {
+    if keep_positions.len() != predictions.len() {
+        return Err(format!(
+            "Python test prediction length mismatch: expected {} rows after filter, got {}",
+            keep_positions.len(),
+            predictions.len()
+        ));
+    }
+    Ok(keep_positions
+        .iter()
+        .zip(predictions.iter())
+        .map(|(position, prediction)| {
+            let row = &rows[indices[*position]];
+            LongValueRow {
+                date_ns: row.date_ns,
+                instrument: row.symbol.clone(),
+                value: *prediction,
+            }
+        })
+        .collect())
+}
+
+fn build_python_lgbm_window(
+    rows: &[FactorRow],
+    train_indices: &[usize],
+    train_keep_positions: &[usize],
+    train_prepared: &PreparedWindowLabelColumns,
+    valid_indices: &[usize],
+    valid_keep_positions: &[usize],
+    valid_prepared: &PreparedWindowLabelColumns,
+    test_indices: &[usize],
+    test_keep_positions: &[usize],
+) -> PreparedPythonLgbmWindow {
+    PreparedPythonLgbmWindow {
+        train_rows: train_keep_positions.len(),
+        valid_rows: valid_keep_positions.len(),
+        test_rows: test_keep_positions.len(),
+        train_feature_bytes: encode_feature_rows_le(rows, train_indices, train_keep_positions),
+        valid_feature_bytes: encode_feature_rows_le(rows, valid_indices, valid_keep_positions),
+        test_feature_bytes: encode_feature_rows_le(rows, test_indices, test_keep_positions),
+        train_label_bytes: encode_f64_values_le(&collect_prepared_values_by_position(
+            &train_prepared.label,
+            train_keep_positions,
+        )),
+        valid_label_bytes: encode_f64_values_le(&collect_prepared_values_by_position(
+            &valid_prepared.label,
+            valid_keep_positions,
+        )),
+        raw_valid_label_bytes: encode_f64_values_le(&collect_prepared_values_by_position(
+            &valid_prepared.raw_label,
+            valid_keep_positions,
+        )),
+        train_date_ns_bytes: encode_i64_values_le(&collect_date_ns_by_position(
+            rows,
+            train_indices,
+            train_keep_positions,
+        )),
+        valid_date_ns_bytes: encode_i64_values_le(&collect_date_ns_by_position(
+            rows,
+            valid_indices,
+            valid_keep_positions,
+        )),
+        train_sample_weight_bytes: encode_optional_f64_values_le(
+            &collect_prepared_values_by_position(
+                &train_prepared.sample_weight,
+                train_keep_positions,
+            ),
+        ),
+        valid_sample_weight_bytes: encode_optional_f64_values_le(
+            &collect_prepared_values_by_position(
+                &valid_prepared.sample_weight,
+                valid_keep_positions,
+            ),
+        ),
+    }
+}
+
+fn encode_feature_rows_le(
+    rows: &[FactorRow],
+    indices: &[usize],
+    keep_positions: &[usize],
+) -> Vec<u8> {
+    let mut values = Vec::new();
+    for position in keep_positions {
+        values.extend_from_slice(&rows[indices[*position]].features);
+    }
+    encode_f64_values_le(&values)
+}
+
+fn collect_prepared_values_by_position(values: &[f64], keep_positions: &[usize]) -> Vec<f64> {
+    keep_positions
+        .iter()
+        .map(|position| values[*position])
+        .collect()
+}
+
+fn collect_date_ns_by_position(
+    rows: &[FactorRow],
+    indices: &[usize],
+    keep_positions: &[usize],
+) -> Vec<i64> {
+    keep_positions
+        .iter()
+        .map(|position| rows[indices[*position]].date_ns)
+        .collect()
+}
+
+fn encode_optional_f64_values_le(values: &[f64]) -> Option<Vec<u8>> {
+    if values.iter().any(|value| value.is_finite()) {
+        Some(encode_f64_values_le(values))
+    } else {
+        None
+    }
+}
+
+fn encode_f64_values_le(values: &[f64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * std::mem::size_of::<f64>());
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn encode_i64_values_le(values: &[i64]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * std::mem::size_of::<i64>());
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
+    }
+    out
+}
+
+fn compute_validation_topk_summary(
+    rows: &[FactorRow],
+    indices: &[usize],
+    keep_positions: &[usize],
+    prepared: &PreparedWindowLabelColumns,
+    predictions: &[f64],
+    topk: usize,
+) -> Result<JsonValue, String> {
+    if keep_positions.len() != predictions.len() {
+        return Err(format!(
+            "Python validation prediction length mismatch: expected {} rows after filter, got {}",
+            keep_positions.len(),
+            predictions.len()
+        ));
+    }
+    if keep_positions.is_empty() {
+        return Ok(empty_validation_topk_summary());
+    }
+
+    let topk = topk.max(1);
+    let mut group_start = 0usize;
+    let mut daily_top1_label = Vec::new();
+    let mut daily_top1_positive = Vec::new();
+    let mut daily_topk_label_mean = Vec::new();
+    let mut daily_topk_label_median = Vec::new();
+    let mut daily_topk_min_label = Vec::new();
+    let mut daily_topk_positive_rate = Vec::new();
+    let mut daily_topk_excess_mean = Vec::new();
+    let mut daily_top1_opportunity = Vec::new();
+    let mut daily_topk_opportunity_rate = Vec::new();
+
+    while group_start < keep_positions.len() {
+        let first_position = keep_positions[group_start];
+        let first_date = rows[indices[first_position]].date_ns;
+        let mut group_end = group_start + 1;
+        while group_end < keep_positions.len() {
+            let position = keep_positions[group_end];
+            if rows[indices[position]].date_ns != first_date {
+                break;
+            }
+            group_end += 1;
+        }
+
+        let group_len = group_end - group_start;
+        if group_len > 0 {
+            let mut order = (group_start..group_end).collect::<Vec<_>>();
+            order.sort_by(|left, right| predictions[*left].total_cmp(&predictions[*right]));
+            let selected_count = topk.min(group_len);
+            let selected = &order[(order.len() - selected_count)..];
+            let mut top1_index = selected[0];
+            for index in selected.iter().copied().skip(1) {
+                if predictions[index] > predictions[top1_index] {
+                    top1_index = index;
+                }
+            }
+
+            let mut selected_labels = Vec::with_capacity(selected.len());
+            let mut selected_opportunity = Vec::with_capacity(selected.len());
+            let mut group_labels = Vec::with_capacity(group_len);
+            for absolute_index in group_start..group_end {
+                let position = keep_positions[absolute_index];
+                group_labels.push(rows[indices[position]].label);
+            }
+            for absolute_index in selected.iter().copied() {
+                let position = keep_positions[absolute_index];
+                selected_labels.push(rows[indices[position]].label);
+                selected_opportunity.push(prepared.opportunity_label[position]);
+            }
+
+            let top1_position = keep_positions[top1_index];
+            daily_top1_label.push(rows[indices[top1_position]].label);
+            daily_top1_positive.push(if rows[indices[top1_position]].label > 0.0 {
+                1.0
+            } else {
+                0.0
+            });
+            daily_topk_label_mean.push(mean(&selected_labels));
+            daily_topk_label_median.push(median(&selected_labels));
+            daily_topk_min_label.push(
+                selected_labels
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min),
+            );
+            daily_topk_positive_rate.push(
+                selected_labels.iter().filter(|value| **value > 0.0).count() as f64
+                    / selected_labels.len() as f64,
+            );
+            daily_topk_excess_mean.push(mean(&selected_labels) - mean(&group_labels));
+            daily_top1_opportunity.push(prepared.opportunity_label[top1_position]);
+            daily_topk_opportunity_rate.push(mean_ignore_nan(&selected_opportunity));
+        }
+
+        group_start = group_end;
+    }
+
+    if daily_top1_label.is_empty() {
+        return Ok(empty_validation_topk_summary());
+    }
+
+    Ok(serde_json::json!({
+        "valid_topk_days": daily_top1_label.len(),
+        "valid_top1_label_mean": json_f64_or_null(mean(&daily_top1_label)),
+        "valid_top1_positive_rate": json_f64_or_null(mean(&daily_top1_positive)),
+        "valid_topk_label_mean": json_f64_or_null(mean(&daily_topk_label_mean)),
+        "valid_topk_label_median": json_f64_or_null(mean(&daily_topk_label_median)),
+        "valid_topk_min_label_mean": json_f64_or_null(mean(&daily_topk_min_label)),
+        "valid_topk_positive_rate": json_f64_or_null(mean(&daily_topk_positive_rate)),
+        "valid_topk_excess_mean": json_f64_or_null(mean(&daily_topk_excess_mean)),
+        "valid_top1_opportunity_rate": json_f64_or_null(mean_ignore_nan(&daily_top1_opportunity)),
+        "valid_topk_opportunity_rate": json_f64_or_null(mean_ignore_nan(&daily_topk_opportunity_rate)),
+    }))
+}
+
+fn empty_validation_topk_summary() -> JsonValue {
+    serde_json::json!({
+        "valid_topk_days": 0,
+        "valid_top1_label_mean": JsonValue::Null,
+        "valid_top1_positive_rate": JsonValue::Null,
+        "valid_topk_label_mean": JsonValue::Null,
+        "valid_topk_label_median": JsonValue::Null,
+        "valid_topk_min_label_mean": JsonValue::Null,
+        "valid_topk_positive_rate": JsonValue::Null,
+        "valid_topk_excess_mean": JsonValue::Null,
+        "valid_top1_opportunity_rate": JsonValue::Null,
+        "valid_topk_opportunity_rate": JsonValue::Null,
+    })
+}
+
+fn build_window_training_summary(
+    python_summary: &JsonValue,
+    paths: &WindowDataPaths,
+    window: &RollingWindow,
+    resolved: &ResolvedRuntimeConfig,
+    raw_train_rows: usize,
+    raw_valid_rows: usize,
+    raw_test_rows: usize,
+    train_rows: usize,
+    valid_rows: usize,
+    test_rows: usize,
+    feature_count: usize,
+    valid_topk_summary: JsonValue,
+) -> JsonValue {
+    let train_label_transform_mode = resolved.train_label_transform.mode.clone();
+    let train_label_space = if resolved
+        .train_label_transform
+        .mode
+        .starts_with("buyability")
+    {
+        "binary_target"
+    } else {
+        "return_target"
+    };
+    let mut summary = serde_json::json!({
+        "window_start": format_date_ns(window.test_start_ns),
+        "window_end": format_date_ns(window.test_end_ns),
+        "train_start": format_date_ns(window.train_start_ns),
+        "train_end": format_date_ns(window.train_end_ns),
+        "valid_start": format_date_ns(window.valid_start_ns),
+        "valid_end": format_date_ns(window.valid_end_ns),
+        "signal_horizon": resolved.signal_horizon,
+        "label_embargo_days": resolved.label_embargo_days,
+        "train_rows": train_rows,
+        "valid_rows": valid_rows,
+        "test_rows": test_rows,
+        "raw_train_rows": raw_train_rows,
+        "raw_valid_rows": raw_valid_rows,
+        "raw_test_rows": raw_test_rows,
+        "train_rows_dropped_after_filter": raw_train_rows.saturating_sub(train_rows),
+        "valid_rows_dropped_after_filter": raw_valid_rows.saturating_sub(valid_rows),
+        "test_rows_dropped_after_filter": raw_test_rows.saturating_sub(test_rows),
+        "train_rows_dropped_after_label_transform": 0,
+        "valid_rows_dropped_after_label_transform": 0,
+        "feature_count": feature_count,
+        "prediction_path": paths.prediction_path.display().to_string(),
+        "train_label_transform_mode": train_label_transform_mode,
+        "train_label_space": train_label_space,
+        "valid_custom_metric_label_space": "raw_return",
+        "opportunity_label_mode": resolved.opportunity.mode,
+        "opportunity_label_threshold": resolved.opportunity.threshold,
+        "opportunity_label_neutral_band": resolved.opportunity.neutral_band,
+        "train_sample_weight_mode": resolved.sample_weight.mode,
+        "validation_topk": resolved
+            .lgbm_config
+            .get("validation_topk")
+            .and_then(JsonValue::as_u64)
+            .unwrap_or(10),
+    });
+    merge_json_object(&mut summary, python_summary);
+    merge_json_object(&mut summary, &valid_topk_summary);
+    summary
+}
+
+fn merge_json_object(target: &mut JsonValue, extra: &JsonValue) {
+    let Some(target_obj) = target.as_object_mut() else {
+        return;
+    };
+    let Some(extra_obj) = extra.as_object() else {
+        return;
+    };
+    for (key, value) in extra_obj {
+        target_obj.insert(key.clone(), value.clone());
+    }
+}
+
+fn mean(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        f64::NAN
+    } else {
+        values.iter().sum::<f64>() / values.len() as f64
+    }
+}
+
+fn mean_ignore_nan(values: &[f64]) -> f64 {
+    let finite = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    mean(&finite)
+}
+
+fn build_lgbm_bundle_timing_summary(
+    phase_timer: &RuntimePhaseTimer,
+    timing_path: &Path,
+    window_timing_records: &[JsonValue],
+) -> JsonValue {
+    let mut summary = phase_timer.as_json(timing_path);
+    if let Some(object) = summary.as_object_mut() {
+        object.insert(
+            "windows".to_owned(),
+            JsonValue::Array(window_timing_records.to_vec()),
+        );
+    }
+    summary
+}
+
+fn python_phase_seconds(summary: &JsonValue, key: &str) -> f64 {
+    summary.get(key).and_then(JsonValue::as_f64).unwrap_or(0.0)
+}
+
+fn python_phase_timings_json(summary: &JsonValue) -> JsonValue {
+    serde_json::json!({
+        "import_native_lgbm_seconds": json_f64_or_null(python_phase_seconds(summary, "python_import_native_lgbm_seconds")),
+        "materialize_inputs_seconds": json_f64_or_null(python_phase_seconds(summary, "python_materialize_inputs_seconds")),
+        "model_load_seconds": json_f64_or_null(python_phase_seconds(summary, "python_model_load_seconds")),
+        "fit_seconds": json_f64_or_null(python_phase_seconds(summary, "python_fit_seconds")),
+        "model_save_seconds": json_f64_or_null(python_phase_seconds(summary, "python_model_save_seconds")),
+        "feature_importance_seconds": json_f64_or_null(python_phase_seconds(summary, "python_feature_importance_seconds")),
+        "training_history_seconds": json_f64_or_null(python_phase_seconds(summary, "python_training_history_seconds")),
+        "predict_valid_seconds": json_f64_or_null(python_phase_seconds(summary, "python_predict_valid_seconds")),
+        "predict_test_seconds": json_f64_or_null(python_phase_seconds(summary, "python_predict_test_seconds")),
+        "summary_build_seconds": json_f64_or_null(python_phase_seconds(summary, "python_summary_build_seconds")),
+        "bridge_total_seconds": json_f64_or_null(python_phase_seconds(summary, "python_bridge_total_seconds")),
+    })
+}
+
+fn accumulate_python_phase_timings(phase_timer: &mut RuntimePhaseTimer, summary: &JsonValue) {
+    for (phase_name, key) in [
+        (
+            "python_import_native_lgbm",
+            "python_import_native_lgbm_seconds",
+        ),
+        (
+            "python_materialize_inputs",
+            "python_materialize_inputs_seconds",
+        ),
+        ("python_model_load", "python_model_load_seconds"),
+        ("python_fit", "python_fit_seconds"),
+        ("python_model_save", "python_model_save_seconds"),
+        (
+            "python_feature_importance",
+            "python_feature_importance_seconds",
+        ),
+        ("python_training_history", "python_training_history_seconds"),
+        ("python_predict_valid", "python_predict_valid_seconds"),
+        ("python_predict_test", "python_predict_test_seconds"),
+        ("python_summary_build", "python_summary_build_seconds"),
+        ("python_bridge_total", "python_bridge_total_seconds"),
+    ] {
+        let seconds = python_phase_seconds(summary, key);
+        if seconds > 0.0 {
+            phase_timer.add(phase_name, seconds, 1, 0, 1, 0);
+        }
+    }
+}
+
+fn round_six(value: f64) -> f64 {
+    (value * 1_000_000.0).round() / 1_000_000.0
+}
+
+fn json_f64_or_null(value: f64) -> JsonValue {
+    if value.is_finite() {
+        serde_json::Number::from_f64(value)
+            .map(JsonValue::Number)
+            .unwrap_or(JsonValue::Null)
+    } else {
+        JsonValue::Null
+    }
+}
+
+fn decode_f64_le_bytes(bytes: &[u8]) -> Result<Vec<f64>, String> {
+    if bytes.len() % std::mem::size_of::<f64>() != 0 {
+        return Err(format!(
+            "prediction byte payload length {} is not divisible by {}",
+            bytes.len(),
+            std::mem::size_of::<f64>()
+        ));
+    }
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<f64>())
+        .map(|chunk| {
+            let mut raw = [0u8; std::mem::size_of::<f64>()];
+            raw.copy_from_slice(chunk);
+            f64::from_le_bytes(raw)
+        })
+        .collect())
+}
+
 fn write_window_frame_parquet(
     path: &Path,
     rows: &[FactorRow],
@@ -1850,33 +2804,6 @@ fn write_record_batch_parquet(
         .close()
         .map_err(|err| format!("failed to close {}: {err}", path.display()))?;
     Ok(())
-}
-
-fn read_long_value_parquet(path: &Path, value_column: &str) -> Result<Vec<LongValueRow>, String> {
-    let reader = open_projected_parquet_reader(
-        path,
-        &[
-            "datetime".to_owned(),
-            "instrument".to_owned(),
-            value_column.to_owned(),
-        ],
-        65_536,
-    )?;
-    let mut rows = Vec::new();
-    for batch in reader {
-        let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-        let date_array = required_column(&batch, "datetime", path)?;
-        let instrument_array = required_column(&batch, "instrument", path)?;
-        let value_array = required_column(&batch, value_column, path)?;
-        for row_index in 0..batch.num_rows() {
-            rows.push(LongValueRow {
-                date_ns: date_value_ns(date_array, row_index, path)?,
-                instrument: string_value(instrument_array, row_index, path)?,
-                value: numeric_value(value_array, row_index, path)?,
-            });
-        }
-    }
-    Ok(rows)
 }
 
 fn write_training_summary(path: &Path, records: &[BTreeMap<String, String>]) -> Result<(), String> {
@@ -3080,6 +4007,75 @@ mod tests {
         assert!(weights.iter().all(|value| value.is_finite()));
         assert!(((weights[0] + weights[1]) / 2.0 - 1.0).abs() < 1e-12);
         assert!(((weights[2] + weights[3]) / 2.0 - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn validation_topk_summary_matches_expected_daily_aggregation() {
+        let rows = vec![
+            FactorRow {
+                date_ns: 1,
+                symbol: "a".into(),
+                label: 0.01,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 1,
+                symbol: "b".into(),
+                label: 0.03,
+                backtest_label: 0.0,
+                features: vec![2.0],
+            },
+            FactorRow {
+                date_ns: 2,
+                symbol: "c".into(),
+                label: -0.02,
+                backtest_label: 0.0,
+                features: vec![3.0],
+            },
+            FactorRow {
+                date_ns: 2,
+                symbol: "d".into(),
+                label: 0.04,
+                backtest_label: 0.0,
+                features: vec![4.0],
+            },
+        ];
+        let prepared = PreparedWindowLabelColumns {
+            label: vec![0.01, 0.03, -0.02, 0.04],
+            raw_label: vec![0.01, 0.03, -0.02, 0.04],
+            sample_weight: vec![f64::NAN; 4],
+            opportunity_label: vec![1.0, 1.0, 0.0, 1.0],
+        };
+        let summary = compute_validation_topk_summary(
+            &rows,
+            &[0, 1, 2, 3],
+            &[0, 1, 2, 3],
+            &prepared,
+            &[0.2, 0.9, 0.1, 0.8],
+            1,
+        )
+        .unwrap();
+        let object = summary.as_object().unwrap();
+        assert_eq!(object["valid_topk_days"], serde_json::json!(2));
+        assert_eq!(object["valid_top1_label_mean"], serde_json::json!(0.035));
+        assert_eq!(object["valid_top1_positive_rate"], serde_json::json!(1.0));
+        assert_eq!(object["valid_topk_label_mean"], serde_json::json!(0.035));
+        assert_eq!(object["valid_topk_label_median"], serde_json::json!(0.035));
+        assert_eq!(
+            object["valid_topk_min_label_mean"],
+            serde_json::json!(0.035)
+        );
+        assert_eq!(object["valid_topk_positive_rate"], serde_json::json!(1.0));
+        assert!((object["valid_topk_excess_mean"].as_f64().unwrap() - 0.02).abs() < 1e-12);
+        assert_eq!(
+            object["valid_top1_opportunity_rate"],
+            serde_json::json!(1.0)
+        );
+        assert_eq!(
+            object["valid_topk_opportunity_rate"],
+            serde_json::json!(1.0)
+        );
     }
 
     #[test]

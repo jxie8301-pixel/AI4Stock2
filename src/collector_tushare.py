@@ -3,6 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -3619,7 +3622,31 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _rust_collector_command() -> list[str]:
+    env_value = os.environ.get("AI4STOCK_COLLECT_BIN")
+    if env_value:
+        return shlex.split(env_value)
+    return ["cargo", "run", "--bin", "ai4stock-collect", "--"]
+
+
+def _rust_collector_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pixi_lib = Path(".pixi/envs/default/lib")
+    if pixi_lib.exists():
+        current = env.get("LD_LIBRARY_PATH", "")
+        parts = [str(pixi_lib), *([current] if current else [])]
+        env["LD_LIBRARY_PATH"] = ":".join(parts)
+    return env
+
+
 def main() -> None:
+    if os.environ.get("AI4STOCK_PY_COLLECTOR_RUNTIME", "").strip() != "1":
+        command = _rust_collector_command()
+        command.extend(["tushare", *sys.argv[1:]])
+        print(f"[run] {shlex.join(command)}", flush=True)
+        completed = subprocess.run(command, check=False, env=_rust_collector_env())
+        raise SystemExit(int(completed.returncode))
+
     parser = build_parser()
     args = parser.parse_args()
     try:

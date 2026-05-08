@@ -307,7 +307,7 @@ Current status:
 
 Audit status on 2026-04-30:
 
-- The active performance-critical LightGBM path is now `run_native_rolling.py` -> resolved `config_snapshot.yaml` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet` -> `ai4stock-backtest run-bundle`.
+- The active performance-critical LightGBM path is now `run_native_rolling.py` -> resolved `config_snapshot.yaml` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays` -> `ai4stock-backtest run-bundle`.
   `run_native_rolling.py` is a compatibility wrapper and should not regain factor-store loading, rolling-window construction, or backtest evaluation logic.
 - The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `run_single_factor_diagnostics.py` / `run_single_factor_diagnostics_batch.py` -> `ai4stock-diagnostics single-factor`.
   The Python diagnostics path is retained as a reference/fallback path, not as the default runtime for supported label spaces.
@@ -365,7 +365,8 @@ Completed optimization slices:
 - [x] Add a factor-engine parity harness before migrating Rust feature generation:
   - `src.feature_engine_parity` treats the pandas engine as the reference and can compare a candidate parquet/CSV snapshot on date / symbol / selected columns
 - [x] Keep Python and Rust feature generation as separate executable paths:
-  - Python `src.gen_feature` remains the pandas/reference implementation and does not import or call Rust kernels
+  - `src.gen_feature` now defaults to a compatibility wrapper that resolves config/profile and delegates to `ai4stock-gen-feature`
+  - Python pandas/reference generation remains available with `AI4STOCK_PY_GEN_FEATURE_RUNTIME=1`
   - Rust feature generation is exposed through the standalone `ai4stock-gen-feature` binary
   - removed the PyO3/maturin feature-kernel bridge, wrapper modules, and native-wrapper tests so missing Rust code cannot silently fall back inside the Python path
   - retained the earlier kernel benchmark notes as migration evidence: rank `0.002269s -> 0.000434s`, idxmax `0.009380s -> 0.000726s`, Aroon extreme age `0.009189s -> 0.000758s`, CCI MAD `0.055208s -> 0.000206s`
@@ -397,12 +398,16 @@ Completed optimization slices:
   - benchmark checkpoints from the migration remain: `legacy158` `0.185866s -> 0.079414s`, `lgbm_purified` `0.013656s -> 0.010247s`, `temporal` `0.040649s -> 0.032321s`, `technical` `0.127573s -> 0.011126s`, `TS_` `0.112160s -> 0.035429s`
 - [x] Move LightGBM bundle runtime ownership to Rust while keeping Python only for training:
   - `ai4stock-train make-bundle-lgbm` is a standalone Rust binary entrypoint that now resolves config/profile state, reads Parquet factor-store buckets, applies universe membership, materializes selected feature aliases, builds rolling windows, writes prepared window Parquet, and assembles final prediction-bundle artifacts
-  - Python bridge scope is narrowed to `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet`, which receives prepared train/valid/test frames and calls `src.models.pure_lightgbm.NativeLGBM`
+  - Python bridge scope is narrowed to `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays`, which receives prepared train/valid/test arrays and calls `src.models.pure_lightgbm.NativeLGBM`
+  - the bridge no longer receives the full resolved training config; Rust passes only explicit LightGBM hyperparameters plus per-window metadata required for artifact summaries
+  - the bridge no longer writes per-window prediction parquet or computes validation top-k summaries; Rust now owns final prediction artifact writes and training-summary assembly after Python returns prediction vectors plus model metrics
+  - `ai4stock-train make-bundle-lgbm` now also writes `lgbm_bundle_timing.json`, with Rust-side phase timing plus per-window Python subphase timing (`import NativeLGBM`, input materialization, fit, predict, feature-importance/history writes, summary build)
   - direct `cargo` uses `.cargo/config.toml` to point PyO3 at `.pixi/envs/default/bin/python`; `pixi run` is not required for Cargo itself, only for Python-only commands
   - the old hand-written rank-IC trainer and whole-pipeline Python bridge path are intentionally removed; non-ML factor baselines remain only as optional reference artifacts
   - bundle metadata records the training signal label, daily realized backtest label, universe, cross-sectional-rank policy, and rank-excluded columns; Rust `run-bundle` rejects multi-day backtest labels to prevent overlapping-horizon returns from being compounded as daily portfolio returns
   - validation smoke: explicit 3-feature CSi300 one-day bundle produced `284` aligned prediction/label rows with `core_axes_match=true`; full `core_v4_techlite` profile smoke produced `46` features and `core_axes_match=true`
   - Rust now prepares training-label transforms, opportunity labels, sample weights, and point-in-time industry / benchmark context for relative label modes before calling Python LightGBM
+  - release profiling smoke on `core_v4_lgbm_default_10x20x10`, `KMID/KLEN/RSV20`, `2024-01-02` to `2024-01-31`: `3` windows, total `78.13s`, `load_factor_data` `68.63s`, summed `python_train_window` `9.18s`, summed `python_import_native_lgbm` `1.79s`, summed `python_materialize_inputs` `0.12s`, summed `python_fit` `1.55s`; current bottleneck is factor-store loading rather than remaining Python bridge work
   - smoke after the migration:
     - `raw` 3-feature slice, `2024-01-02` to `2024-01-31`: `3` windows, `6534` predictions
     - `buyability_binary + benchmark_excess` 3-feature slice, same dates: `3` windows, `6534` predictions
@@ -411,6 +416,10 @@ Completed optimization slices:
   - `benchmark_excess` supports the existing `cross_section_mean` benchmark and file benchmarks with `.csv`, `.txt`, `.parquet`, or `.pq` input
   - Python single/batch diagnostic entrypoints now auto-delegate all supported label spaces to Rust while still writing selected-feature JSON, metadata, and resolved config snapshots
   - benchmark-excess smoke on `KMID,KLEN`, `2024-01-02` to `2024-01-31`, CSI300 file benchmark, horizon `10`: `109689` rows in `46.48s` under the debug binary
+- [x] Migrate universe-file building to the Rust collection binary:
+  - `ai4stock-collect universes` now owns CLI parsing, universe-name validation, point-in-time interval validation, symbol/date normalization, and tab-separated output writes
+  - Python remains only as the AkShare provider adapter behind `src.rust_collector_bridge.fetch_akshare_index_constituents`
+  - `src.build_universes` is kept as a compatibility wrapper and delegates to Rust by default; `AI4STOCK_PY_BUILD_UNIVERSES_RUNTIME=1` preserves the old pandas reference path
 
 Feature build v2 direction:
 

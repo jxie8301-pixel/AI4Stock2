@@ -24,6 +24,10 @@ path = "src_rust/bin/ai4stock_diagnostics.rs"
 name = "ai4stock-train"
 path = "src_rust/bin/ai4stock_train.rs"
 
+[[bin]]
+name = "ai4stock-collect"
+path = "src_rust/bin/ai4stock_collect.rs"
+
 [dependencies]
 arrow-array = "56"
 arrow-schema = "56"

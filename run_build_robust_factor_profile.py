@@ -1,31 +1,26 @@
-"""Build a conservative feature profile from raw + industry-neutral diagnostics."""
+"""Compatibility wrapper for Rust robust feature profile building."""
 
 from __future__ import annotations
 
 import argparse
 from datetime import datetime
+import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
 
-from src.factor_store import load_factor_frame
-from src.feature_prefilter import (
-    DEFAULT_MAX_ABS_CORR,
-    DEFAULT_MAX_SEGMENT_RANK_IC_MEAN_RANGE,
-    DEFAULT_MIN_ABS_RANK_IC,
-    DEFAULT_MIN_ABS_RANK_IC_IR,
-    DEFAULT_MIN_COVERAGE_PCT,
-    DEFAULT_MIN_MONTHLY_POSITIVE_RATE,
-    DEFAULT_MIN_SEGMENT_DIRECTIONAL_HIT_MEAN,
-    build_robust_feature_summary,
-    load_diagnostics_summary,
-    prefilter_feature_summary,
-    prune_correlated_features,
-    prune_exact_duplicate_features,
-    save_profile_yaml,
-)
-from src.feature_profiles import get_native_factor_store_dir
-from src.label_utils import get_label_column_name, resolve_signal_horizon
+from src.feature_profiles import resolve_feature_profile
 from src.research_safety import check_config_profile_write_safety
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
+
+DEFAULT_MAX_ABS_CORR = 0.97
+DEFAULT_MIN_ABS_RANK_IC = 0.02
+DEFAULT_MIN_ABS_RANK_IC_IR = 0.10
+DEFAULT_MIN_COVERAGE_PCT = 0.95
+DEFAULT_MIN_MONTHLY_POSITIVE_RATE = 0.45
+DEFAULT_MIN_SEGMENT_DIRECTIONAL_HIT_MEAN = 0.55
+DEFAULT_MAX_SEGMENT_RANK_IC_MEAN_RANGE = 0.14
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -79,6 +74,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--max-features", type=int, help="Optional cap applied after redundancy pruning.")
     parser.add_argument(
+        "--summary-engine",
+        choices=["auto", "rust"],
+        default="auto",
+        help="Compatibility option. The active runtime is Rust.",
+    )
+    parser.add_argument(
+        "--correlation-engine",
+        choices=["auto", "rust"],
+        default="auto",
+        help="Compatibility option. The active runtime is Rust.",
+    )
+    parser.add_argument(
         "--profile-name",
         required=True,
         help="Output profile name, for example core_v6_relative_alpha_v1",
@@ -120,41 +127,161 @@ def _resolve_output_dir(args: argparse.Namespace) -> Path:
     return Path("results") / "diagnostics" / "robust_profiles" / f"{stamp}__{args.profile_name}"
 
 
+def _rust_diagnostics_command() -> list[str]:
+    env_value = os.environ.get("AI4STOCK_DIAGNOSTICS_BIN")
+    if env_value:
+        return shlex.split(env_value)
+    return ["cargo", "run", "--bin", "ai4stock-diagnostics", "--"]
+
+
+def _rust_env() -> dict[str, str]:
+    env = os.environ.copy()
+    pixi_lib = Path(".pixi/envs/default/lib")
+    if pixi_lib.exists():
+        current = env.get("LD_LIBRARY_PATH", "")
+        env["LD_LIBRARY_PATH"] = ":".join([str(pixi_lib), *([current] if current else [])])
+    return env
+
+
+def _append_optional_float(command: list[str], flag: str, value: float | None) -> None:
+    if value is not None:
+        command.extend([flag, str(float(value))])
+
+
+def _factor_store_name(feature_resolution: dict) -> str:
+    raw = feature_resolution.get("raw")
+    if isinstance(raw, dict):
+        return str(raw.get("factor_store_name") or "full_factor_space")
+    return "full_factor_space"
+
+
+def _run_rust_builder(
+    args: argparse.Namespace,
+    *,
+    cfg: dict,
+    feature_resolution: dict,
+    output_dir: Path,
+    date_start: str,
+    date_end: str,
+    profile_write_safe: bool,
+    profile_write_warning: str | None,
+) -> dict:
+    command = _rust_diagnostics_command()
+    command.extend(
+        [
+            "build-robust-profile",
+            "--raw-summary",
+            str(args.raw_summary),
+            "--neutral-summary",
+            str(args.neutral_summary),
+            "--factor-store",
+            str(feature_resolution["factor_store_dir"]),
+            "--output-dir",
+            str(output_dir),
+            "--profile-name",
+            str(args.profile_name),
+            "--date-start",
+            date_start,
+            "--date-end",
+            date_end,
+            "--universe-name",
+            str(cfg.get("universe", "all")),
+            "--universe-dir",
+            str(cfg.get("native", {}).get("universe_dir", "data/universes")),
+            "--corr-threshold",
+            str(float(args.max_abs_corr)),
+            "--factor-store-name",
+            _factor_store_name(feature_resolution),
+            "--min-coverage-pct",
+            str(float(args.min_coverage_pct)),
+            "--min-abs-rank-ic",
+            str(float(args.min_abs_rank_ic)),
+            "--min-abs-rank-ic-ir",
+            str(float(args.min_abs_rank_ic_ir)),
+            "--min-monthly-positive-rate",
+            str(float(args.min_monthly_positive_rate)),
+            "--setting",
+            f"raw_summary={args.raw_summary}",
+            "--setting",
+            f"raw_segment_comparison={args.raw_segment_comparison}",
+            "--setting",
+            f"neutral_summary={args.neutral_summary}",
+            "--setting",
+            f"neutral_segment_comparison={args.neutral_segment_comparison}",
+            "--setting",
+            f"data_source={cfg.get('data', {}).get('source', '')}",
+            "--setting",
+            f"universe={cfg.get('universe', '')}",
+            "--setting",
+            f"period={args.period}",
+            "--setting",
+            f"date_start={date_start}",
+            "--setting",
+            f"date_end={date_end}",
+            "--setting",
+            f"write_config_profile={args.write_config_profile}",
+            "--setting",
+            f"profile_write_safety={'training_only' if profile_write_safe else 'unsafe_override'}",
+            "--setting",
+            f"min_coverage_pct={args.min_coverage_pct}",
+            "--setting",
+            f"min_abs_rank_ic={args.min_abs_rank_ic}",
+            "--setting",
+            f"min_abs_rank_ic_ir={args.min_abs_rank_ic_ir}",
+            "--setting",
+            f"min_monthly_positive_rate={args.min_monthly_positive_rate}",
+            "--setting",
+            f"min_segment_directional_hit_mean={args.min_segment_directional_hit_mean}",
+            "--setting",
+            f"max_segment_rank_ic_mean_range={args.max_segment_rank_ic_mean_range}",
+            "--setting",
+            f"exclude_direction_flip={args.exclude_direction_flip}",
+            "--setting",
+            f"max_abs_corr={args.max_abs_corr}",
+            "--setting",
+            f"max_features={args.max_features}",
+            "--setting",
+            f"correlation_space={'cross_sectional_rank' if not args.no_cross_sectional_rank_corr else 'raw'}",
+            "--json",
+        ]
+    )
+    if args.raw_segment_comparison:
+        command.extend(["--raw-segment-comparison", str(args.raw_segment_comparison)])
+    if args.neutral_segment_comparison:
+        command.extend(["--neutral-segment-comparison", str(args.neutral_segment_comparison)])
+    _append_optional_float(command, "--min-segment-directional-hit-mean", args.min_segment_directional_hit_mean)
+    _append_optional_float(command, "--max-segment-rank-ic-mean-range", args.max_segment_rank_ic_mean_range)
+    if args.exclude_direction_flip:
+        command.append("--exclude-direction-flip")
+    if args.no_cross_sectional_rank_corr:
+        command.append("--raw-values")
+    else:
+        command.append("--cross-sectional-rank")
+    if args.max_features is not None:
+        command.extend(["--max-features", str(int(args.max_features))])
+    if args.write_config_profile:
+        command.append("--write-config-profile")
+        command.extend(["--config-profile-path", str(Path("configs") / "features" / f"{args.profile_name}.yaml")])
+    if profile_write_warning:
+        command.extend(["--safety-warning", profile_write_warning])
+    print(f"[*] Rust robust profile build: {shlex.join(command)}", flush=True)
+    completed = subprocess.run(command, check=False, env=_rust_env(), text=True, capture_output=True)
+    if completed.returncode != 0:
+        if completed.stdout:
+            print(completed.stdout, end="")
+        if completed.stderr:
+            print(completed.stderr, end="")
+        raise SystemExit(int(completed.returncode))
+    if completed.stderr:
+        print(completed.stderr, end="")
+    return json.loads(completed.stdout)
+
+
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     cfg = load_validated_config_from_args(args, parser)
-    signal_horizon = int(resolve_signal_horizon(cfg))
-    label_column = get_label_column_name(signal_horizon)
-    factor_store_dir = get_native_factor_store_dir(cfg)
-
-    raw_summary = load_diagnostics_summary(
-        args.raw_summary,
-        segment_comparison_path=args.raw_segment_comparison,
-    )
-    neutral_summary = load_diagnostics_summary(
-        args.neutral_summary,
-        segment_comparison_path=args.neutral_segment_comparison,
-    )
-    robust_summary = build_robust_feature_summary(raw_summary, neutral_summary)
-
-    kept, dropped = prefilter_feature_summary(
-        robust_summary,
-        min_coverage_pct=float(args.min_coverage_pct),
-        min_abs_rank_ic=float(args.min_abs_rank_ic),
-        min_abs_rank_ic_ir=float(args.min_abs_rank_ic_ir),
-        min_monthly_positive_rate=float(args.min_monthly_positive_rate),
-        min_segment_directional_hit_mean=args.min_segment_directional_hit_mean,
-        max_segment_rank_ic_mean_range=args.max_segment_rank_ic_mean_range,
-        exclude_direction_flip=bool(args.exclude_direction_flip),
-    )
-    if kept.empty:
-        raise ValueError("No factors survived the robust prefilter thresholds.")
-
-    kept_exact, dropped_exact = prune_exact_duplicate_features(kept)
-    if kept_exact.empty:
-        raise ValueError("No factors remained after exact-duplicate pruning.")
-
+    feature_resolution = resolve_feature_profile(cfg)
     date_start, date_end = _resolve_period_dates(cfg, args)
     profile_write_safe = True
     profile_write_warning = None
@@ -172,128 +299,30 @@ def main() -> None:
                 args.neutral_segment_comparison,
             ],
         )
-    factor_frame = load_factor_frame(
-        store_dir=factor_store_dir,
-        columns=kept_exact["feature"].tolist(),
-        label_column=label_column,
+    summary = _run_rust_builder(
+        args,
+        cfg=cfg,
+        feature_resolution=feature_resolution,
+        output_dir=_resolve_output_dir(args),
         date_start=date_start,
         date_end=date_end,
-        universe_name=str(cfg.get("universe", "all")),
-        universe_dir=cfg.get("native", {}).get("universe_dir", "data/universes"),
-        sort_by=("date", "symbol"),
-        progress_desc="loading factor frame for robust correlation pruning",
+        profile_write_safe=profile_write_safe,
+        profile_write_warning=profile_write_warning,
     )
-    if factor_frame.empty:
-        raise ValueError("Factor frame is empty for the requested pruning period.")
-
-    kept_pruned, dropped_corr = prune_correlated_features(
-        factor_frame,
-        kept_exact,
-        corr_threshold=float(args.max_abs_corr),
-        use_cross_sectional_rank=not args.no_cross_sectional_rank_corr,
-    )
-    selected_frame = kept_pruned.copy()
-    if args.max_features is not None:
-        selected_frame = selected_frame.head(int(args.max_features)).reset_index(drop=True)
-    selected_columns = selected_frame["feature"].tolist()
-    if not selected_columns:
-        raise ValueError("No factors remained after correlation pruning.")
-
-    output_dir = _resolve_output_dir(args)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    robust_summary_path = output_dir / "robust_summary.csv"
-    prefilter_path = output_dir / "robust_prefilter_kept.csv"
-    dropped_path = output_dir / "robust_prefilter_dropped.csv"
-    kept_exact_path = output_dir / "exact_duplicate_kept.csv"
-    dropped_exact_path = output_dir / "exact_duplicate_pruned.csv"
-    dropped_corr_path = output_dir / "correlation_pruned.csv"
-    robust_summary.to_csv(robust_summary_path, index=False)
-    kept.to_csv(prefilter_path, index=False)
-    dropped.to_csv(dropped_path, index=False)
-    kept_exact.to_csv(kept_exact_path, index=False)
-    dropped_exact.to_csv(dropped_exact_path, index=False)
-    dropped_corr.to_csv(dropped_corr_path, index=False)
-
-    profile_output_path = output_dir / f"{args.profile_name}.yaml"
-    save_profile_yaml(selected_columns, output_path=profile_output_path)
-
-    if args.write_config_profile:
-        config_profile_path = Path("configs") / "features" / f"{args.profile_name}.yaml"
-        save_profile_yaml(selected_columns, output_path=config_profile_path)
-        print(f"[*] Config profile written: {config_profile_path}")
-
-    readme_path = output_dir / "README.md"
-    readme_lines = [
-        f"# {args.profile_name}",
-        "",
-        "## Robust Summary Logic",
-        "",
-        "- Robust `rank_ic_mean` / `rank_ic_ir` keep the shared direction and take the smaller "
-        "absolute value across raw and industry-neutral passes.",
-        "- Coverage and directional-hit metrics use the lower of the two passes.",
-        "- Segment drift uses the worse of the two passes.",
-        "- `direction_flip=true` also covers raw/neutral sign disagreement.",
-        "",
-        "## Source Diagnostics",
-        "",
-        f"- raw_summary: `{args.raw_summary}`",
-        f"- raw_segment_comparison: `{args.raw_segment_comparison}`",
-        f"- neutral_summary: `{args.neutral_summary}`",
-        f"- neutral_segment_comparison: `{args.neutral_segment_comparison}`",
-        "",
-        "## Filter Settings",
-        "",
-        f"- data_source: `{cfg.get('data', {}).get('source', '')}`",
-        f"- universe: `{cfg.get('universe', '')}`",
-        f"- period: `{args.period}`",
-        f"- date_start: `{date_start}`",
-        f"- date_end: `{date_end}`",
-        f"- write_config_profile: `{args.write_config_profile}`",
-        f"- profile_write_safety: `{'training_only' if profile_write_safe else 'unsafe_override'}`",
-        f"- min_coverage_pct: `{args.min_coverage_pct}`",
-        f"- min_abs_rank_ic: `{args.min_abs_rank_ic}`",
-        f"- min_abs_rank_ic_ir: `{args.min_abs_rank_ic_ir}`",
-        f"- min_monthly_positive_rate: `{args.min_monthly_positive_rate}`",
-        f"- min_segment_directional_hit_mean: `{args.min_segment_directional_hit_mean}`",
-        f"- max_segment_rank_ic_mean_range: `{args.max_segment_rank_ic_mean_range}`",
-        f"- exclude_direction_flip: `{args.exclude_direction_flip}`",
-        f"- max_abs_corr: `{args.max_abs_corr}`",
-        f"- max_features: `{args.max_features}`",
-        f"- correlation_space: `{'cross_sectional_rank' if not args.no_cross_sectional_rank_corr else 'raw'}`",
-        "",
-        "## Counts",
-        "",
-        f"- original_features: `{len(robust_summary)}`",
-        f"- after_prefilter: `{len(kept)}`",
-        f"- after_exact_duplicate_prune: `{len(kept_exact)}`",
-        f"- after_corr_prune: `{len(selected_columns)}`",
-        "",
-        "## Selected Features",
-        "",
-        *[f"- `{name}`" for name in selected_columns],
-    ]
-    if profile_write_warning:
-        readme_lines.extend(
-            [
-                "",
-                "## Safety Warning",
-                "",
-                f"- {profile_write_warning}",
-            ]
-        )
-    with open(readme_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(readme_lines).strip() + "\n")
-
-    print(f"[+] Robust-profile artifacts saved to: {output_dir}")
-    print(f"    robust summary: {robust_summary_path}")
-    print(f"    kept summary: {prefilter_path}")
-    print(f"    exact-duplicate kept: {kept_exact_path}")
-    print(f"    exact-duplicate drops: {dropped_exact_path}")
-    print(f"    corr-pruned drops: {dropped_corr_path}")
-    print(f"    profile yaml: {profile_output_path}")
-    print(f"[*] Selected features ({len(selected_columns)}):")
-    for name in selected_columns:
+    profile_artifacts = summary["profile_artifacts"]
+    prefilter_summary = summary["prefilter_summary"]
+    corr_summary = summary["corr_prune_summary"]
+    if args.write_config_profile and profile_artifacts.get("config_profile_path"):
+        print(f"[*] Config profile written: {profile_artifacts['config_profile_path']}")
+    print(f"[+] Robust-profile artifacts saved to: {summary['output_dir']}")
+    print(f"    robust summary: {prefilter_summary.get('robust_summary_path')}")
+    print(f"    kept summary: {prefilter_summary['kept_path']}")
+    print(f"    exact-duplicate kept: {prefilter_summary['exact_kept_path']}")
+    print(f"    exact-duplicate drops: {prefilter_summary['exact_dropped_path']}")
+    print(f"    corr-pruned drops: {corr_summary['dropped_path']}")
+    print(f"    profile yaml: {profile_artifacts['profile_path']}")
+    print(f"[*] Selected features ({profile_artifacts['selected_feature_count']}):")
+    for name in profile_artifacts["selected_features"]:
         print(f"    - {name}")
 
 

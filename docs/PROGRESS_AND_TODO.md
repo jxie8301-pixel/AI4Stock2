@@ -310,7 +310,7 @@ Audit status on 2026-04-30:
 - The active performance-critical LightGBM path is now `run_native_rolling.py` -> resolved `config_snapshot.yaml` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays` -> `ai4stock-backtest run-bundle`.
   `run_native_rolling.py` is a compatibility wrapper and should not regain factor-store loading, rolling-window construction, or backtest evaluation logic.
 - The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `run_single_factor_diagnostics.py` / `run_single_factor_diagnostics_batch.py` -> `ai4stock-diagnostics single-factor`.
-  The Python diagnostics path is retained as a reference/fallback path, not as the default runtime for supported label spaces.
+  The Python entrypoints are now compatibility wrappers for config/profile resolution, selected-feature JSON, metadata, and batch summaries; the pandas diagnostics fallback path has been removed.
 - The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
 - Non-training runtime can still be dominated by factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
 - LSTM sequence context is now prepared once per rolling run, but each rolling window still rebuilds `Dataset` / `DataLoader` wrappers and computes validation IC through pandas.
@@ -414,12 +414,19 @@ Completed optimization slices:
 - [x] Migrate single-factor diagnostics to the standalone Rust binary:
   - `ai4stock-diagnostics single-factor` now covers `raw_return`, `industry_excess`, and `benchmark_excess`
   - `benchmark_excess` supports the existing `cross_section_mean` benchmark and file benchmarks with `.csv`, `.txt`, `.parquet`, or `.pq` input
-  - Python single/batch diagnostic entrypoints now auto-delegate all supported label spaces to Rust while still writing selected-feature JSON, metadata, and resolved config snapshots
+  - Python single/batch diagnostic entrypoints now always delegate diagnostics computation to Rust while still writing selected-feature JSON, metadata, resolved config snapshots, and batch-level summary TSVs
   - benchmark-excess smoke on `KMID,KLEN`, `2024-01-02` to `2024-01-31`, CSI300 file benchmark, horizon `10`: `109689` rows in `46.48s` under the debug binary
 - [x] Migrate universe-file building to the Rust collection binary:
   - `ai4stock-collect universes` now owns CLI parsing, universe-name validation, point-in-time interval validation, symbol/date normalization, and tab-separated output writes
   - Python remains only as the AkShare provider adapter behind `src.rust_collector_bridge.fetch_akshare_index_constituents`
   - `src.build_universes` is kept as a compatibility wrapper and delegates to Rust by default; `AI4STOCK_PY_BUILD_UNIVERSES_RUNTIME=1` preserves the old pandas reference path
+- [x] Move feature-profile prefilter summary rules to Rust:
+  - `ai4stock-diagnostics prefilter-summary` now owns diagnostics-summary filtering, score sorting, and exact-duplicate pruning
+  - `ai4stock-diagnostics robust-prefilter-summary` now owns raw/industry-neutral robust summary synthesis plus the same prefilter and exact-duplicate pruning
+  - `ai4stock-diagnostics corr-prune` now owns factor-store correlation pruning directly from Parquet buckets
+  - `ai4stock-diagnostics write-profile` now owns selected-feature YAML and README/profile artifact writing
+  - `ai4stock-diagnostics build-prefilter-profile` and `build-robust-profile` now compose the full diagnostics-summary -> correlation-prune -> profile-artifact pipeline in one Rust command
+  - `run_build_prefiltered_profile.py` and `run_build_robust_factor_profile.py` are compatibility wrappers for config loading and safety checks; pandas summary/correlation fallback paths are removed
 
 Feature build v2 direction:
 
@@ -674,7 +681,7 @@ Priority fixes:
 - [x] Extend single-factor diagnostics with yearly slices, industry-neutral mode, and detailed daily / monthly artifacts
 - [x] Add a standalone Rust single-factor diagnostics engine for raw-return / industry-excess diagnostics:
   - `ai4stock-diagnostics single-factor` scans projected Parquet factor-store buckets directly, applies universe membership, optional point-in-time industry-excess labels, optional date x industry neutralization, segmented summaries, and detailed CSV artifacts
-  - Python single/batch diagnostics entrypoints are compatibility wrappers using Rust by default for supported label spaces and falling back to Python for benchmark-excess diagnostics
+  - Python single/batch diagnostics entrypoints are now compatibility wrappers around Rust diagnostics; the pandas diagnostics fallback has been removed
 - [~] Add automated prefiltering by minimum coverage plus minimum rolling IC / RankIC threshold
   Current state: standalone diagnostics-based prefilter tooling now exists; it still needs promotion into a repeatable experiment workflow and selection policy.
 - [~] Add redundancy pruning on the selected feature set using correlation clustering before model training

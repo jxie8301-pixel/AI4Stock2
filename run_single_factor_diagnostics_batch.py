@@ -1,4 +1,4 @@
-"""Run multiple single-factor diagnostics cases with one shared factor-store load."""
+"""Run multiple single-factor diagnostics cases through the Rust engine."""
 
 from __future__ import annotations
 
@@ -13,29 +13,16 @@ import subprocess
 from time import perf_counter
 from typing import Any
 
-import numpy as np
 import pandas as pd
 
-from run_single_factor_diagnostics import (
-    _build_rust_single_factor_command,
-    _rust_supported,
-)
-from src.factor_store import load_factor_frame, load_factor_store_metadata
+from run_single_factor_diagnostics import _build_rust_single_factor_command
+from src.factor_store import load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import resolve_selected_feature_columns
 from src.label_utils import get_label_column_name, resolve_signal_horizon
 from src.override_utils import parse_override_arg
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
-from src.single_factor_runtime import (
-    apply_industry_neutralization,
-    derive_diagnostic_label_series,
-    resolve_period_dates,
-    resolve_segments,
-)
-from src.single_factor_diagnostics import (
-    build_single_factor_diagnostics_bundle,
-    save_single_factor_diagnostics,
-)
+from src.single_factor_runtime import resolve_period_dates, resolve_segments
 
 
 @dataclass(frozen=True)
@@ -51,7 +38,7 @@ class DiagnosticsBatchCase:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run multiple single-factor diagnostics cases while reusing one in-memory factor frame."
+        description="Run multiple single-factor diagnostics cases through the Rust diagnostics engine."
     )
     add_common_runtime_args(parser, include_model_arg=False)
     parser.add_argument(
@@ -127,9 +114,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--engine",
-        choices=["auto", "rust", "python"],
+        choices=["auto", "rust"],
         default="auto",
-        help="Diagnostics engine. auto uses Rust when all cases are supported.",
+        help="Compatibility option. The active runtime is Rust.",
     )
     parser.add_argument(
         "--feature-chunk-size",
@@ -559,8 +546,6 @@ def main() -> None:
     factor_store_meta = load_factor_store_metadata(factor_store_dir)
     case_feature_map: dict[str, list[str]] = {}
     case_incremental_feature_map: dict[str, list[str]] = {}
-    union_features: list[str] = []
-    seen_union: set[str] = set()
     for case in cases:
         if bool(getattr(args, "all_features", False)):
             feature_names = list(factor_store_meta.get("feature_names", []))
@@ -576,221 +561,25 @@ def main() -> None:
         incremental_feature_names = _resolve_incremental_feature_names(feature_names, baseline_feature_names)
         case_feature_map[case.name] = feature_names
         case_incremental_feature_map[case.name] = incremental_feature_names
-        for feature_name in feature_names:
-            if feature_name not in seen_union:
-                union_features.append(feature_name)
-                seen_union.add(feature_name)
-
-    unsupported_rust_cases = [case.name for case in cases if not _rust_supported(_case_namespace(args, case))]
-    engine = str(getattr(args, "engine", "auto") or "auto")
-    if engine == "rust" and unsupported_rust_cases:
-        raise ValueError(f"Rust diagnostics does not support these cases: {unsupported_rust_cases}")
-    if engine == "rust" or (engine == "auto" and not unsupported_rust_cases):
-        segments = resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
-        _run_rust_batch(
-            cfg=cfg,
-            args=args,
-            cases=cases,
-            case_feature_map=case_feature_map,
-            case_incremental_feature_map=case_incremental_feature_map,
-            factor_store_dir=Path(factor_store_dir),
-            label_column=label_column,
-            signal_horizon=signal_horizon,
-            date_start=date_start,
-            date_end=date_end,
-            segments=segments,
-            base_output_dir=base_output_dir,
-            summary_path=summary_path,
-            manifest_path=manifest_path,
-            overall_started=overall_started,
-        )
-        return
-
-    print(
-        f"[*] Single-factor diagnostics batch: cases={len(cases)}, "
-        f"date_start={date_start}, date_end={date_end}, union_features={len(union_features)}"
-    )
-    load_started = perf_counter()
-    base_frame = load_factor_frame(
-        store_dir=factor_store_dir,
-        columns=union_features,
-        label_column=label_column,
-        date_start=date_start,
-        date_end=date_end,
-        universe_name=str(cfg.get("universe", "all")),
-        universe_dir=cfg.get("native", {}).get("universe_dir", "data/universes"),
-        sort_by=("date", "symbol"),
-        progress_desc="loading diagnostics factor store",
-    )
-    if base_frame.empty:
-        raise ValueError("Factor store returned no rows for the requested diagnostics period.")
-    load_elapsed = perf_counter() - load_started
 
     segments = resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
-    label_cache: dict[tuple[str, float], tuple[np.ndarray, np.ndarray]] = {}
-    for case in cases:
-        label_key = (case.diagnostic_label_space, float(case.diagnostic_threshold))
-        if label_key in label_cache:
-            continue
-        case_labels = derive_diagnostic_label_series(
-            base_frame,
-            cfg=cfg,
-            signal_horizon=signal_horizon,
-            diagnostic_label_space=case.diagnostic_label_space,
-            diagnostic_threshold=case.diagnostic_threshold,
-        )
-        label_values = case_labels.to_numpy(dtype=float, copy=False)
-        valid_mask = np.isfinite(label_values)
-        label_cache[label_key] = (label_values, valid_mask)
-
-    print(f"[*] Shared load done in {load_elapsed:.2f}s; running cases in-memory...")
-    for idx, case in enumerate(cases, start=1):
-        case_started = perf_counter()
-        feature_names = case_feature_map[case.name]
-        incremental_feature_names = case_incremental_feature_map[case.name]
-        label_values, valid_mask = label_cache[(case.diagnostic_label_space, float(case.diagnostic_threshold))]
-        selected_columns = ["date", "symbol", *feature_names]
-        case_frame = base_frame.loc[valid_mask, selected_columns].copy()
-        case_frame["label"] = label_values[valid_mask]
-        if case_frame.empty:
-            raise ValueError(f"Case '{case.name}' dropped all rows after applying diagnostic labels.")
-
-        neutralized_feature_count = 0
-        neutralize_elapsed = 0.0
-        if bool(getattr(args, "industry_neutral", False)):
-            neutralize_started = perf_counter()
-            case_frame, neutralized_feature_count = apply_industry_neutralization(
-                case_frame,
-                cfg=cfg,
-                feature_names=feature_names,
-            )
-            neutralize_elapsed = perf_counter() - neutralize_started
-        diagnostics_started = perf_counter()
-        bundle = build_single_factor_diagnostics_bundle(
-            case_frame,
-            feature_names=feature_names,
-            label_column="label",
-            quantile_bins=max(int(args.quantile_bins), 2),
-            segments=segments,
-            include_details=not bool(getattr(args, "no_detail_artifacts", False)),
-        )
-        diagnostics_elapsed = perf_counter() - diagnostics_started
-        summary = bundle.summary
-        detail_frames = bundle.detail_frames
-        segment_comparison = bundle.segment_comparison
-        segment_summaries = bundle.segment_summaries
-        incremental_summary = _filter_summary_for_features(summary, incremental_feature_names)
-
-        output_dir = _resolve_case_output_dir(base_output_dir, case)
-        metadata = {
-            "data_source": cfg.get("data", {}).get("source", ""),
-            "universe": cfg.get("universe", ""),
-            "feature_profile": case.feature_profile,
-            "baseline_feature_profile": case.baseline_feature_profile or "",
-            "factor_store_dir": factor_store_dir,
-            "signal_horizon": signal_horizon,
-            "period": args.period,
-            "date_start": date_start,
-            "date_end": date_end,
-            "diagnostic_label_space": case.diagnostic_label_space,
-            "diagnostic_threshold": float(case.diagnostic_threshold),
-            "industry_neutral": bool(getattr(args, "industry_neutral", False)),
-            "neutralized_feature_count": neutralized_feature_count,
-            "feature_count": len(feature_names),
-            "incremental_feature_count": len(incremental_feature_names),
-            "incremental_features": incremental_feature_names,
-            "row_count": len(case_frame),
-            "quantile_bins": max(int(args.quantile_bins), 2),
-            "detail_artifacts": detail_frames is not None,
-            "segment_scheme": args.segment_scheme,
-            "segment_count": len(segment_summaries),
-            "shared_load_elapsed_sec": round(load_elapsed, 6),
-            "neutralize_elapsed_sec": round(neutralize_elapsed, 6),
-            "diagnostics_elapsed_sec": round(diagnostics_elapsed, 6),
-            "case_elapsed_sec": round(perf_counter() - case_started, 6),
-        }
-        case_cfg_snapshot = deepcopy(cfg)
-        case_cfg_snapshot.setdefault("features", {})
-        case_cfg_snapshot["features"]["profile"] = case.feature_profile
-        artifacts = save_single_factor_diagnostics(
-            summary,
-            output_dir=output_dir,
-            config_snapshot=case_cfg_snapshot,
-            metadata=metadata,
-            top_n=max(int(args.top_n), 1),
-            segment_comparison=segment_comparison,
-            segment_summaries=segment_summaries,
-            detail_frames=detail_frames,
-        )
-        incremental_artifacts = _write_single_factor_subset_artifacts(
-            incremental_summary,
-            output_dir=output_dir,
-            prefix="incremental",
-            top_n=max(int(args.top_n), 1),
-            segment_comparison=segment_comparison,
-            feature_names=incremental_feature_names,
-        )
-        artifacts.update(incremental_artifacts)
-        _merge_artifacts_into_manifest(output_dir, incremental_artifacts)
-
-        top = summary.iloc[0] if not summary.empty else pd.Series(dtype=object)
-        incremental_top = incremental_summary.iloc[0] if not incremental_summary.empty else pd.Series(dtype=object)
-        _append_tsv_row(
-            summary_path,
-            [
-                case.name,
-                case.feature_profile,
-                case.baseline_feature_profile or "",
-                case.diagnostic_label_space,
-                case.diagnostic_threshold,
-                len(feature_names),
-                len(incremental_feature_names),
-                len(case_frame),
-                top.get("feature", ""),
-                top.get("rank_ic_mean", ""),
-                top.get("rank_ic_abs_mean", ""),
-                top.get("rank_ic_ir", ""),
-                top.get("monotonicity_mean", ""),
-                top.get("monthly_rank_ic_directional_hit_rate", ""),
-                incremental_top.get("feature", ""),
-                incremental_top.get("rank_ic_mean", ""),
-                incremental_top.get("rank_ic_abs_mean", ""),
-                incremental_top.get("rank_ic_ir", ""),
-                incremental_top.get("monotonicity_mean", ""),
-                incremental_top.get("monthly_rank_ic_directional_hit_rate", ""),
-                _count_abs_metric_ge(incremental_summary, "rank_ic_mean", 0.03),
-                _count_abs_metric_ge(incremental_summary, "rank_ic_mean", 0.05),
-                str(output_dir),
-            ],
-        )
-        _append_tsv_row(
-            manifest_path,
-            [
-                case.name,
-                case.feature_profile,
-                case.baseline_feature_profile or "",
-                case.diagnostic_label_space,
-                case.diagnostic_threshold,
-                str(output_dir),
-                artifacts.get("readme_path", ""),
-                artifacts.get("summary_csv", ""),
-                artifacts.get("incremental_summary_csv", ""),
-                artifacts.get("segment_comparison_csv", ""),
-                artifacts.get("incremental_segment_comparison_csv", ""),
-            ],
-        )
-        print(
-            f"[{idx}/{len(cases)}] {case.name}: "
-            f"rows={len(case_frame)}, features={len(feature_names)}, "
-            f"incremental_features={len(incremental_feature_names)}, "
-            f"label_space={case.diagnostic_label_space}, "
-            f"elapsed={perf_counter() - case_started:.2f}s"
-        )
-
-    print(f"[+] Batch outputs: {base_output_dir}")
-    print(f"    summary: {summary_path}")
-    print(f"    manifest: {manifest_path}")
-    print(f"    total elapsed: {perf_counter() - overall_started:.2f}s")
+    _run_rust_batch(
+        cfg=cfg,
+        args=args,
+        cases=cases,
+        case_feature_map=case_feature_map,
+        case_incremental_feature_map=case_incremental_feature_map,
+        factor_store_dir=Path(factor_store_dir),
+        label_column=label_column,
+        signal_horizon=signal_horizon,
+        date_start=date_start,
+        date_end=date_end,
+        segments=segments,
+        base_output_dir=base_output_dir,
+        summary_path=summary_path,
+        manifest_path=manifest_path,
+        overall_started=overall_started,
+    )
 
 
 if __name__ == "__main__":

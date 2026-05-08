@@ -1,3 +1,9 @@
+use ai4stock2_native::feature_prefilter::{
+    run_build_prefilter_profile, run_build_robust_profile, run_corr_prune, run_prefilter_summary,
+    run_robust_prefilter_summary, write_profile_artifacts, CorrPruneOptions, PrefilterOptions,
+    PrefilterProfileBuildOptions, PrefilterThresholds, ProfileArtifactOptions, ProfileReadmeMode,
+    RobustPrefilterOptions, RobustProfileBuildOptions,
+};
 use ai4stock2_native::single_factor_diagnostics::{
     run_single_factor_diagnostics, BenchmarkMode, BenchmarkOptions, BenchmarkValueType,
     DiagnosticLabelSpace, SegmentSpec, SingleFactorOptions,
@@ -14,6 +20,12 @@ ai4stock-diagnostics: Rust diagnostics entrypoint for AI4Stock2
 
 Usage:
   ai4stock-diagnostics single-factor --factor-store <PATH> --output-dir <PATH> --label-column <COL> (--feature <NAME> | --features-json <PATH>)... [options]
+  ai4stock-diagnostics prefilter-summary --diagnostics-summary <CSV> --output-dir <PATH> [options]
+  ai4stock-diagnostics robust-prefilter-summary --raw-summary <CSV> --neutral-summary <CSV> --output-dir <PATH> [options]
+  ai4stock-diagnostics corr-prune --factor-store <PATH> --candidates <CSV> --output-dir <PATH> [options]
+  ai4stock-diagnostics write-profile --selected-csv <CSV> --profile-name <NAME> --output-dir <PATH> [options]
+  ai4stock-diagnostics build-prefilter-profile --diagnostics-summary <CSV> --factor-store <PATH> --profile-name <NAME> --output-dir <PATH> [options]
+  ai4stock-diagnostics build-robust-profile --raw-summary <CSV> --neutral-summary <CSV> --factor-store <PATH> --profile-name <NAME> --output-dir <PATH> [options]
 
 Options:
   --factor-store <PATH>       Factor-store root. Supports <root>/buckets/part-*.parquet.
@@ -47,6 +59,44 @@ Options:
   --config-snapshot <PATH>    Optional resolved config snapshot to copy into output.
   --json                      Print machine-readable JSON summary.
   -h, --help                  Show this help.
+
+Prefilter options:
+  --diagnostics-summary <CSV> Single-factor summary CSV.
+  --segment-comparison <CSV>  Optional segment comparison CSV.
+  --raw-summary <CSV>         Raw-return summary CSV for robust prefiltering.
+  --neutral-summary <CSV>     Industry-neutral summary CSV for robust prefiltering.
+  --raw-segment-comparison <CSV>
+                              Optional raw segment comparison CSV.
+  --neutral-segment-comparison <CSV>
+                              Optional neutral segment comparison CSV.
+  --min-coverage-pct <X>      Default: 0.95.
+  --min-abs-rank-ic <X>       Default: 0.02.
+  --min-abs-rank-ic-ir <X>    Default: 0.10.
+  --min-monthly-positive-rate <X>
+                              Default: 0.45.
+  --min-segment-directional-hit-mean <X>
+                              Optional segment stability floor.
+  --max-segment-rank-ic-mean-range <X>
+                              Optional segment drift cap.
+  --exclude-direction-flip    Drop direction-flip features.
+
+Correlation-prune options:
+  --candidates <CSV>          Candidate feature CSV with a feature column.
+  --corr-threshold <X>        Absolute correlation drop threshold. Default: 0.97.
+  --cross-sectional-rank      Rank each feature within date before correlation. Default.
+  --raw-values                Use raw factor values for correlation.
+
+Profile artifact options:
+  --selected-csv <CSV>        Selected feature CSV, usually correlation_kept.csv.
+  --profile-name <NAME>       Output profile name.
+  --max-features <N>          Optional selected feature cap.
+  --write-config-profile      Also write configs/features/<profile-name>.yaml.
+  --config-profile-path <PATH>
+                              Override config profile output path.
+  --factor-store-name <NAME>  YAML factor_store_name. Default: full_factor_space.
+  --readme-mode <NAME>        prefilter or robust. Default: prefilter.
+  --setting <KEY=VALUE>       README setting row. Can be repeated.
+  --safety-warning <TEXT>     Optional README safety warning.
 "
 }
 
@@ -77,6 +127,42 @@ struct CliOptions {
     json: bool,
 }
 
+#[derive(Debug, Clone)]
+struct PrefilterCliOptions {
+    options: PrefilterOptions,
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RobustPrefilterCliOptions {
+    options: RobustPrefilterOptions,
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+struct CorrPruneCliOptions {
+    options: CorrPruneOptions,
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ProfileArtifactCliOptions {
+    options: ProfileArtifactOptions,
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PrefilterProfileBuildCliOptions {
+    options: PrefilterProfileBuildOptions,
+    json: bool,
+}
+
+#[derive(Debug, Clone)]
+struct RobustProfileBuildCliOptions {
+    options: RobustProfileBuildOptions,
+    json: bool,
+}
+
 fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match run(&args) {
@@ -99,8 +185,151 @@ fn run(args: &[String]) -> Result<(), String> {
     match command.as_str() {
         "-h" | "--help" => Err(usage().to_owned()),
         "single-factor" => run_single_factor(&args[1..]),
+        "prefilter-summary" => run_prefilter_summary_command(&args[1..]),
+        "robust-prefilter-summary" => run_robust_prefilter_summary_command(&args[1..]),
+        "corr-prune" => run_corr_prune_command(&args[1..]),
+        "write-profile" => run_write_profile_command(&args[1..]),
+        "build-prefilter-profile" => run_build_prefilter_profile_command(&args[1..]),
+        "build-robust-profile" => run_build_robust_profile_command(&args[1..]),
         other => Err(format!("unknown command: {other}\n\n{}", usage())),
     }
+}
+
+fn run_prefilter_summary_command(args: &[String]) -> Result<(), String> {
+    let options = parse_prefilter_options(args)?;
+    let json = options.json;
+    let summary = run_prefilter_summary(&options.options)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .map_err(|err| format!("failed to encode JSON summary: {err}"))?
+        );
+    } else {
+        println!("output_dir={}", summary.output_dir);
+        println!("original_features={}", summary.original_features);
+        println!("after_prefilter={}", summary.after_prefilter);
+        println!(
+            "after_exact_duplicate_prune={}",
+            summary.after_exact_duplicate_prune
+        );
+    }
+    Ok(())
+}
+
+fn run_robust_prefilter_summary_command(args: &[String]) -> Result<(), String> {
+    let options = parse_robust_prefilter_options(args)?;
+    let json = options.json;
+    let summary = run_robust_prefilter_summary(&options.options)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .map_err(|err| format!("failed to encode JSON summary: {err}"))?
+        );
+    } else {
+        println!("output_dir={}", summary.output_dir);
+        println!("original_features={}", summary.original_features);
+        println!("after_prefilter={}", summary.after_prefilter);
+        println!(
+            "after_exact_duplicate_prune={}",
+            summary.after_exact_duplicate_prune
+        );
+    }
+    Ok(())
+}
+
+fn run_corr_prune_command(args: &[String]) -> Result<(), String> {
+    let options = parse_corr_prune_options(args)?;
+    let json = options.json;
+    let summary = run_corr_prune(&options.options)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .map_err(|err| format!("failed to encode JSON summary: {err}"))?
+        );
+    } else {
+        println!("output_dir={}", summary.output_dir);
+        println!("input_features={}", summary.input_features);
+        println!("kept_features={}", summary.kept_features);
+        println!("dropped_features={}", summary.dropped_features);
+        println!("row_count={}", summary.row_count);
+    }
+    Ok(())
+}
+
+fn run_write_profile_command(args: &[String]) -> Result<(), String> {
+    let options = parse_profile_artifact_options(args)?;
+    let json = options.json;
+    let summary = write_profile_artifacts(&options.options)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .map_err(|err| format!("failed to encode JSON summary: {err}"))?
+        );
+    } else {
+        println!("output_dir={}", summary.output_dir);
+        println!("profile_path={}", summary.profile_path);
+        println!("selected_feature_count={}", summary.selected_feature_count);
+        if let Some(path) = summary.config_profile_path {
+            println!("config_profile_path={path}");
+        }
+    }
+    Ok(())
+}
+
+fn run_build_prefilter_profile_command(args: &[String]) -> Result<(), String> {
+    let options = parse_prefilter_profile_build_options(args)?;
+    let json = options.json;
+    let summary = run_build_prefilter_profile(&options.options)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .map_err(|err| format!("failed to encode JSON summary: {err}"))?
+        );
+    } else {
+        println!("output_dir={}", summary.output_dir);
+        println!("profile_name={}", summary.profile_name);
+        println!("original_features={}", summary.original_features);
+        println!("after_prefilter={}", summary.after_prefilter);
+        println!(
+            "after_exact_duplicate_prune={}",
+            summary.after_exact_duplicate_prune
+        );
+        println!("after_corr_prune={}", summary.after_corr_prune);
+        println!("selected_feature_count={}", summary.selected_feature_count);
+        println!("profile_path={}", summary.profile_artifacts.profile_path);
+    }
+    Ok(())
+}
+
+fn run_build_robust_profile_command(args: &[String]) -> Result<(), String> {
+    let options = parse_robust_profile_build_options(args)?;
+    let json = options.json;
+    let summary = run_build_robust_profile(&options.options)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary)
+                .map_err(|err| format!("failed to encode JSON summary: {err}"))?
+        );
+    } else {
+        println!("output_dir={}", summary.output_dir);
+        println!("profile_name={}", summary.profile_name);
+        println!("original_features={}", summary.original_features);
+        println!("after_prefilter={}", summary.after_prefilter);
+        println!(
+            "after_exact_duplicate_prune={}",
+            summary.after_exact_duplicate_prune
+        );
+        println!("after_corr_prune={}", summary.after_corr_prune);
+        println!("selected_feature_count={}", summary.selected_feature_count);
+        println!("profile_path={}", summary.profile_artifacts.profile_path);
+    }
+    Ok(())
 }
 
 fn run_single_factor(args: &[String]) -> Result<(), String> {
@@ -431,6 +660,912 @@ fn parse_single_factor_options(args: &[String]) -> Result<CliOptions, String> {
     })
 }
 
+fn parse_prefilter_options(args: &[String]) -> Result<PrefilterCliOptions, String> {
+    let mut diagnostics_summary = None;
+    let mut segment_comparison = None;
+    let mut output_dir = None;
+    let mut thresholds = PrefilterThresholds::default();
+    let mut json = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--json" => json = true,
+            "--diagnostics-summary" => {
+                index += 1;
+                diagnostics_summary = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--diagnostics-summary",
+                )?));
+            }
+            value if value.starts_with("--diagnostics-summary=") => {
+                diagnostics_summary =
+                    Some(PathBuf::from(split_value(value, "--diagnostics-summary")?));
+            }
+            "--segment-comparison" => {
+                index += 1;
+                segment_comparison = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--segment-comparison",
+                )?));
+            }
+            value if value.starts_with("--segment-comparison=") => {
+                segment_comparison =
+                    Some(PathBuf::from(split_value(value, "--segment-comparison")?));
+            }
+            "--output-dir" => {
+                index += 1;
+                output_dir = Some(PathBuf::from(next_value(args, index, "--output-dir")?));
+            }
+            value if value.starts_with("--output-dir=") => {
+                output_dir = Some(PathBuf::from(split_value(value, "--output-dir")?));
+            }
+            "--min-coverage-pct" => {
+                index += 1;
+                thresholds.min_coverage_pct = parse_f64(
+                    next_value(args, index, "--min-coverage-pct")?,
+                    "--min-coverage-pct",
+                )?;
+            }
+            value if value.starts_with("--min-coverage-pct=") => {
+                thresholds.min_coverage_pct = parse_f64(
+                    split_value(value, "--min-coverage-pct")?,
+                    "--min-coverage-pct",
+                )?;
+            }
+            "--min-abs-rank-ic" => {
+                index += 1;
+                thresholds.min_abs_rank_ic = parse_f64(
+                    next_value(args, index, "--min-abs-rank-ic")?,
+                    "--min-abs-rank-ic",
+                )?;
+            }
+            value if value.starts_with("--min-abs-rank-ic=") => {
+                thresholds.min_abs_rank_ic = parse_f64(
+                    split_value(value, "--min-abs-rank-ic")?,
+                    "--min-abs-rank-ic",
+                )?;
+            }
+            "--min-abs-rank-ic-ir" => {
+                index += 1;
+                thresholds.min_abs_rank_ic_ir = parse_f64(
+                    next_value(args, index, "--min-abs-rank-ic-ir")?,
+                    "--min-abs-rank-ic-ir",
+                )?;
+            }
+            value if value.starts_with("--min-abs-rank-ic-ir=") => {
+                thresholds.min_abs_rank_ic_ir = parse_f64(
+                    split_value(value, "--min-abs-rank-ic-ir")?,
+                    "--min-abs-rank-ic-ir",
+                )?;
+            }
+            "--min-monthly-positive-rate" => {
+                index += 1;
+                thresholds.min_monthly_positive_rate = parse_f64(
+                    next_value(args, index, "--min-monthly-positive-rate")?,
+                    "--min-monthly-positive-rate",
+                )?;
+            }
+            value if value.starts_with("--min-monthly-positive-rate=") => {
+                thresholds.min_monthly_positive_rate = parse_f64(
+                    split_value(value, "--min-monthly-positive-rate")?,
+                    "--min-monthly-positive-rate",
+                )?;
+            }
+            "--min-segment-directional-hit-mean" => {
+                index += 1;
+                thresholds.min_segment_directional_hit_mean = Some(parse_f64(
+                    next_value(args, index, "--min-segment-directional-hit-mean")?,
+                    "--min-segment-directional-hit-mean",
+                )?);
+            }
+            value if value.starts_with("--min-segment-directional-hit-mean=") => {
+                thresholds.min_segment_directional_hit_mean = Some(parse_f64(
+                    split_value(value, "--min-segment-directional-hit-mean")?,
+                    "--min-segment-directional-hit-mean",
+                )?);
+            }
+            "--max-segment-rank-ic-mean-range" => {
+                index += 1;
+                thresholds.max_segment_rank_ic_mean_range = Some(parse_f64(
+                    next_value(args, index, "--max-segment-rank-ic-mean-range")?,
+                    "--max-segment-rank-ic-mean-range",
+                )?);
+            }
+            value if value.starts_with("--max-segment-rank-ic-mean-range=") => {
+                thresholds.max_segment_rank_ic_mean_range = Some(parse_f64(
+                    split_value(value, "--max-segment-rank-ic-mean-range")?,
+                    "--max-segment-rank-ic-mean-range",
+                )?);
+            }
+            "--exclude-direction-flip" => thresholds.exclude_direction_flip = true,
+            other => return Err(format!("unknown option for prefilter-summary: {other}")),
+        }
+        index += 1;
+    }
+    Ok(PrefilterCliOptions {
+        options: PrefilterOptions {
+            diagnostics_summary: diagnostics_summary
+                .ok_or_else(|| "--diagnostics-summary is required".to_owned())?,
+            segment_comparison,
+            output_dir: output_dir.ok_or_else(|| "--output-dir is required".to_owned())?,
+            thresholds,
+        },
+        json,
+    })
+}
+
+fn parse_robust_prefilter_options(args: &[String]) -> Result<RobustPrefilterCliOptions, String> {
+    let mut raw_summary = None;
+    let mut neutral_summary = None;
+    let mut raw_segment_comparison = None;
+    let mut neutral_segment_comparison = None;
+    let mut output_dir = None;
+    let mut thresholds = PrefilterThresholds {
+        min_segment_directional_hit_mean: Some(0.55),
+        max_segment_rank_ic_mean_range: Some(0.14),
+        ..Default::default()
+    };
+    let mut json = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--json" => json = true,
+            "--raw-summary" => {
+                index += 1;
+                raw_summary = Some(PathBuf::from(next_value(args, index, "--raw-summary")?));
+            }
+            value if value.starts_with("--raw-summary=") => {
+                raw_summary = Some(PathBuf::from(split_value(value, "--raw-summary")?));
+            }
+            "--neutral-summary" => {
+                index += 1;
+                neutral_summary =
+                    Some(PathBuf::from(next_value(args, index, "--neutral-summary")?));
+            }
+            value if value.starts_with("--neutral-summary=") => {
+                neutral_summary = Some(PathBuf::from(split_value(value, "--neutral-summary")?));
+            }
+            "--raw-segment-comparison" => {
+                index += 1;
+                raw_segment_comparison = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--raw-segment-comparison",
+                )?));
+            }
+            value if value.starts_with("--raw-segment-comparison=") => {
+                raw_segment_comparison = Some(PathBuf::from(split_value(
+                    value,
+                    "--raw-segment-comparison",
+                )?));
+            }
+            "--neutral-segment-comparison" => {
+                index += 1;
+                neutral_segment_comparison = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--neutral-segment-comparison",
+                )?));
+            }
+            value if value.starts_with("--neutral-segment-comparison=") => {
+                neutral_segment_comparison = Some(PathBuf::from(split_value(
+                    value,
+                    "--neutral-segment-comparison",
+                )?));
+            }
+            "--output-dir" => {
+                index += 1;
+                output_dir = Some(PathBuf::from(next_value(args, index, "--output-dir")?));
+            }
+            value if value.starts_with("--output-dir=") => {
+                output_dir = Some(PathBuf::from(split_value(value, "--output-dir")?));
+            }
+            other => {
+                let parsed =
+                    parse_prefilter_threshold_option(other, args, &mut index, &mut thresholds)?;
+                if !parsed {
+                    return Err(format!(
+                        "unknown option for robust-prefilter-summary: {other}"
+                    ));
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(RobustPrefilterCliOptions {
+        options: RobustPrefilterOptions {
+            raw_summary: raw_summary.ok_or_else(|| "--raw-summary is required".to_owned())?,
+            neutral_summary: neutral_summary
+                .ok_or_else(|| "--neutral-summary is required".to_owned())?,
+            raw_segment_comparison,
+            neutral_segment_comparison,
+            output_dir: output_dir.ok_or_else(|| "--output-dir is required".to_owned())?,
+            thresholds,
+        },
+        json,
+    })
+}
+
+fn parse_corr_prune_options(args: &[String]) -> Result<CorrPruneCliOptions, String> {
+    let mut factor_store = None;
+    let mut candidates_csv = None;
+    let mut output_dir = None;
+    let mut date_start = None;
+    let mut date_end = None;
+    let mut universe_name = "all".to_owned();
+    let mut universe_dir = PathBuf::from("data/universes");
+    let mut corr_threshold = 0.97f64;
+    let mut use_cross_sectional_rank = true;
+    let mut batch_size = 65_536usize;
+    let mut json = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--json" => json = true,
+            "--factor-store" => {
+                index += 1;
+                factor_store = Some(PathBuf::from(next_value(args, index, "--factor-store")?));
+            }
+            value if value.starts_with("--factor-store=") => {
+                factor_store = Some(PathBuf::from(split_value(value, "--factor-store")?));
+            }
+            "--candidates" => {
+                index += 1;
+                candidates_csv = Some(PathBuf::from(next_value(args, index, "--candidates")?));
+            }
+            value if value.starts_with("--candidates=") => {
+                candidates_csv = Some(PathBuf::from(split_value(value, "--candidates")?));
+            }
+            "--output-dir" => {
+                index += 1;
+                output_dir = Some(PathBuf::from(next_value(args, index, "--output-dir")?));
+            }
+            value if value.starts_with("--output-dir=") => {
+                output_dir = Some(PathBuf::from(split_value(value, "--output-dir")?));
+            }
+            "--date-start" => {
+                index += 1;
+                date_start = Some(next_value(args, index, "--date-start")?);
+            }
+            value if value.starts_with("--date-start=") => {
+                date_start = Some(split_value(value, "--date-start")?);
+            }
+            "--date-end" => {
+                index += 1;
+                date_end = Some(next_value(args, index, "--date-end")?);
+            }
+            value if value.starts_with("--date-end=") => {
+                date_end = Some(split_value(value, "--date-end")?);
+            }
+            "--universe-name" => {
+                index += 1;
+                universe_name = next_value(args, index, "--universe-name")?;
+            }
+            value if value.starts_with("--universe-name=") => {
+                universe_name = split_value(value, "--universe-name")?;
+            }
+            "--universe-dir" => {
+                index += 1;
+                universe_dir = PathBuf::from(next_value(args, index, "--universe-dir")?);
+            }
+            value if value.starts_with("--universe-dir=") => {
+                universe_dir = PathBuf::from(split_value(value, "--universe-dir")?);
+            }
+            "--corr-threshold" => {
+                index += 1;
+                corr_threshold = parse_f64(
+                    next_value(args, index, "--corr-threshold")?,
+                    "--corr-threshold",
+                )?;
+            }
+            value if value.starts_with("--corr-threshold=") => {
+                corr_threshold =
+                    parse_f64(split_value(value, "--corr-threshold")?, "--corr-threshold")?;
+            }
+            "--cross-sectional-rank" => use_cross_sectional_rank = true,
+            "--raw-values" | "--no-cross-sectional-rank" => use_cross_sectional_rank = false,
+            "--batch-size" => {
+                index += 1;
+                batch_size = parse_usize(next_value(args, index, "--batch-size")?, "--batch-size")?;
+            }
+            value if value.starts_with("--batch-size=") => {
+                batch_size = parse_usize(split_value(value, "--batch-size")?, "--batch-size")?;
+            }
+            other => return Err(format!("unknown option for corr-prune: {other}")),
+        }
+        index += 1;
+    }
+    Ok(CorrPruneCliOptions {
+        options: CorrPruneOptions {
+            factor_store: factor_store.ok_or_else(|| "--factor-store is required".to_owned())?,
+            candidates_csv: candidates_csv.ok_or_else(|| "--candidates is required".to_owned())?,
+            output_dir: output_dir.ok_or_else(|| "--output-dir is required".to_owned())?,
+            date_start,
+            date_end,
+            universe_name,
+            universe_dir,
+            corr_threshold,
+            use_cross_sectional_rank,
+            batch_size,
+        },
+        json,
+    })
+}
+
+fn parse_profile_artifact_options(args: &[String]) -> Result<ProfileArtifactCliOptions, String> {
+    let mut selected_csv = None;
+    let mut output_dir = None;
+    let mut profile_name = None;
+    let mut max_features = None;
+    let mut write_config_profile = false;
+    let mut config_profile_path = None;
+    let mut factor_store_name = "full_factor_space".to_owned();
+    let mut readme_mode = ProfileReadmeMode::Prefilter;
+    let mut settings = Vec::new();
+    let mut safety_warning = None;
+    let mut json = false;
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--json" => json = true,
+            "--write-config-profile" => write_config_profile = true,
+            "--selected-csv" => {
+                index += 1;
+                selected_csv = Some(PathBuf::from(next_value(args, index, "--selected-csv")?));
+            }
+            value if value.starts_with("--selected-csv=") => {
+                selected_csv = Some(PathBuf::from(split_value(value, "--selected-csv")?));
+            }
+            "--output-dir" => {
+                index += 1;
+                output_dir = Some(PathBuf::from(next_value(args, index, "--output-dir")?));
+            }
+            value if value.starts_with("--output-dir=") => {
+                output_dir = Some(PathBuf::from(split_value(value, "--output-dir")?));
+            }
+            "--profile-name" => {
+                index += 1;
+                profile_name = Some(next_value(args, index, "--profile-name")?);
+            }
+            value if value.starts_with("--profile-name=") => {
+                profile_name = Some(split_value(value, "--profile-name")?);
+            }
+            "--max-features" => {
+                index += 1;
+                max_features = Some(parse_usize(
+                    next_value(args, index, "--max-features")?,
+                    "--max-features",
+                )?);
+            }
+            value if value.starts_with("--max-features=") => {
+                max_features = Some(parse_usize(
+                    split_value(value, "--max-features")?,
+                    "--max-features",
+                )?);
+            }
+            "--config-profile-path" => {
+                index += 1;
+                config_profile_path = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--config-profile-path",
+                )?));
+            }
+            value if value.starts_with("--config-profile-path=") => {
+                config_profile_path =
+                    Some(PathBuf::from(split_value(value, "--config-profile-path")?));
+            }
+            "--factor-store-name" => {
+                index += 1;
+                factor_store_name = next_value(args, index, "--factor-store-name")?;
+            }
+            value if value.starts_with("--factor-store-name=") => {
+                factor_store_name = split_value(value, "--factor-store-name")?;
+            }
+            "--readme-mode" => {
+                index += 1;
+                readme_mode = parse_readme_mode(&next_value(args, index, "--readme-mode")?)?;
+            }
+            value if value.starts_with("--readme-mode=") => {
+                readme_mode = parse_readme_mode(&split_value(value, "--readme-mode")?)?;
+            }
+            "--setting" => {
+                index += 1;
+                settings.push(parse_setting(&next_value(args, index, "--setting")?)?);
+            }
+            value if value.starts_with("--setting=") => {
+                settings.push(parse_setting(&split_value(value, "--setting")?)?);
+            }
+            "--safety-warning" => {
+                index += 1;
+                safety_warning = Some(next_value(args, index, "--safety-warning")?);
+            }
+            value if value.starts_with("--safety-warning=") => {
+                safety_warning = Some(split_value(value, "--safety-warning")?);
+            }
+            other => return Err(format!("unknown option for write-profile: {other}")),
+        }
+        index += 1;
+    }
+    Ok(ProfileArtifactCliOptions {
+        options: ProfileArtifactOptions {
+            output_dir: output_dir.ok_or_else(|| "--output-dir is required".to_owned())?,
+            selected_csv: selected_csv.ok_or_else(|| "--selected-csv is required".to_owned())?,
+            profile_name: profile_name.ok_or_else(|| "--profile-name is required".to_owned())?,
+            max_features,
+            write_config_profile,
+            config_profile_path,
+            factor_store_name,
+            readme_mode,
+            settings,
+            safety_warning,
+        },
+        json,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct ProfileBuildCommonOptions {
+    output_dir: Option<PathBuf>,
+    factor_store: Option<PathBuf>,
+    date_start: Option<String>,
+    date_end: Option<String>,
+    universe_name: String,
+    universe_dir: PathBuf,
+    corr_threshold: f64,
+    use_cross_sectional_rank: bool,
+    batch_size: usize,
+    profile_name: Option<String>,
+    max_features: Option<usize>,
+    write_config_profile: bool,
+    config_profile_path: Option<PathBuf>,
+    factor_store_name: String,
+    settings: Vec<(String, String)>,
+    safety_warning: Option<String>,
+    json: bool,
+}
+
+impl Default for ProfileBuildCommonOptions {
+    fn default() -> Self {
+        Self {
+            output_dir: None,
+            factor_store: None,
+            date_start: None,
+            date_end: None,
+            universe_name: "all".to_owned(),
+            universe_dir: PathBuf::from("data/universes"),
+            corr_threshold: 0.97,
+            use_cross_sectional_rank: true,
+            batch_size: 65_536,
+            profile_name: None,
+            max_features: None,
+            write_config_profile: false,
+            config_profile_path: None,
+            factor_store_name: "full_factor_space".to_owned(),
+            settings: Vec::new(),
+            safety_warning: None,
+            json: false,
+        }
+    }
+}
+
+fn parse_prefilter_profile_build_options(
+    args: &[String],
+) -> Result<PrefilterProfileBuildCliOptions, String> {
+    let mut diagnostics_summary = None;
+    let mut segment_comparison = None;
+    let mut thresholds = PrefilterThresholds::default();
+    let mut common = ProfileBuildCommonOptions::default();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--diagnostics-summary" => {
+                index += 1;
+                diagnostics_summary = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--diagnostics-summary",
+                )?));
+            }
+            value if value.starts_with("--diagnostics-summary=") => {
+                diagnostics_summary =
+                    Some(PathBuf::from(split_value(value, "--diagnostics-summary")?));
+            }
+            "--segment-comparison" => {
+                index += 1;
+                segment_comparison = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--segment-comparison",
+                )?));
+            }
+            value if value.starts_with("--segment-comparison=") => {
+                segment_comparison =
+                    Some(PathBuf::from(split_value(value, "--segment-comparison")?));
+            }
+            other => {
+                if !parse_prefilter_threshold_option(other, args, &mut index, &mut thresholds)?
+                    && !parse_profile_build_common_option(other, args, &mut index, &mut common)?
+                {
+                    return Err(format!(
+                        "unknown option for build-prefilter-profile: {other}"
+                    ));
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(PrefilterProfileBuildCliOptions {
+        json: common.json,
+        options: PrefilterProfileBuildOptions {
+            diagnostics_summary: diagnostics_summary
+                .ok_or_else(|| "--diagnostics-summary is required".to_owned())?,
+            segment_comparison,
+            output_dir: common
+                .output_dir
+                .ok_or_else(|| "--output-dir is required".to_owned())?,
+            thresholds,
+            factor_store: common
+                .factor_store
+                .ok_or_else(|| "--factor-store is required".to_owned())?,
+            date_start: common.date_start,
+            date_end: common.date_end,
+            universe_name: common.universe_name,
+            universe_dir: common.universe_dir,
+            corr_threshold: common.corr_threshold,
+            use_cross_sectional_rank: common.use_cross_sectional_rank,
+            batch_size: common.batch_size,
+            profile_name: common
+                .profile_name
+                .ok_or_else(|| "--profile-name is required".to_owned())?,
+            max_features: common.max_features,
+            write_config_profile: common.write_config_profile,
+            config_profile_path: common.config_profile_path,
+            factor_store_name: common.factor_store_name,
+            settings: common.settings,
+            safety_warning: common.safety_warning,
+        },
+    })
+}
+
+fn parse_robust_profile_build_options(
+    args: &[String],
+) -> Result<RobustProfileBuildCliOptions, String> {
+    let mut raw_summary = None;
+    let mut neutral_summary = None;
+    let mut raw_segment_comparison = None;
+    let mut neutral_segment_comparison = None;
+    let mut thresholds = PrefilterThresholds {
+        min_segment_directional_hit_mean: Some(0.55),
+        max_segment_rank_ic_mean_range: Some(0.14),
+        ..Default::default()
+    };
+    let mut common = ProfileBuildCommonOptions::default();
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--raw-summary" => {
+                index += 1;
+                raw_summary = Some(PathBuf::from(next_value(args, index, "--raw-summary")?));
+            }
+            value if value.starts_with("--raw-summary=") => {
+                raw_summary = Some(PathBuf::from(split_value(value, "--raw-summary")?));
+            }
+            "--neutral-summary" => {
+                index += 1;
+                neutral_summary =
+                    Some(PathBuf::from(next_value(args, index, "--neutral-summary")?));
+            }
+            value if value.starts_with("--neutral-summary=") => {
+                neutral_summary = Some(PathBuf::from(split_value(value, "--neutral-summary")?));
+            }
+            "--raw-segment-comparison" => {
+                index += 1;
+                raw_segment_comparison = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--raw-segment-comparison",
+                )?));
+            }
+            value if value.starts_with("--raw-segment-comparison=") => {
+                raw_segment_comparison = Some(PathBuf::from(split_value(
+                    value,
+                    "--raw-segment-comparison",
+                )?));
+            }
+            "--neutral-segment-comparison" => {
+                index += 1;
+                neutral_segment_comparison = Some(PathBuf::from(next_value(
+                    args,
+                    index,
+                    "--neutral-segment-comparison",
+                )?));
+            }
+            value if value.starts_with("--neutral-segment-comparison=") => {
+                neutral_segment_comparison = Some(PathBuf::from(split_value(
+                    value,
+                    "--neutral-segment-comparison",
+                )?));
+            }
+            other => {
+                if !parse_prefilter_threshold_option(other, args, &mut index, &mut thresholds)?
+                    && !parse_profile_build_common_option(other, args, &mut index, &mut common)?
+                {
+                    return Err(format!("unknown option for build-robust-profile: {other}"));
+                }
+            }
+        }
+        index += 1;
+    }
+    Ok(RobustProfileBuildCliOptions {
+        json: common.json,
+        options: RobustProfileBuildOptions {
+            raw_summary: raw_summary.ok_or_else(|| "--raw-summary is required".to_owned())?,
+            neutral_summary: neutral_summary
+                .ok_or_else(|| "--neutral-summary is required".to_owned())?,
+            raw_segment_comparison,
+            neutral_segment_comparison,
+            output_dir: common
+                .output_dir
+                .ok_or_else(|| "--output-dir is required".to_owned())?,
+            thresholds,
+            factor_store: common
+                .factor_store
+                .ok_or_else(|| "--factor-store is required".to_owned())?,
+            date_start: common.date_start,
+            date_end: common.date_end,
+            universe_name: common.universe_name,
+            universe_dir: common.universe_dir,
+            corr_threshold: common.corr_threshold,
+            use_cross_sectional_rank: common.use_cross_sectional_rank,
+            batch_size: common.batch_size,
+            profile_name: common
+                .profile_name
+                .ok_or_else(|| "--profile-name is required".to_owned())?,
+            max_features: common.max_features,
+            write_config_profile: common.write_config_profile,
+            config_profile_path: common.config_profile_path,
+            factor_store_name: common.factor_store_name,
+            settings: common.settings,
+            safety_warning: common.safety_warning,
+        },
+    })
+}
+
+fn parse_profile_build_common_option(
+    option: &str,
+    args: &[String],
+    index: &mut usize,
+    common: &mut ProfileBuildCommonOptions,
+) -> Result<bool, String> {
+    match option {
+        "--json" => common.json = true,
+        "--write-config-profile" => common.write_config_profile = true,
+        "--factor-store" => {
+            *index += 1;
+            common.factor_store = Some(PathBuf::from(next_value(args, *index, option)?));
+        }
+        value if value.starts_with("--factor-store=") => {
+            common.factor_store = Some(PathBuf::from(split_value(value, "--factor-store")?));
+        }
+        "--output-dir" => {
+            *index += 1;
+            common.output_dir = Some(PathBuf::from(next_value(args, *index, option)?));
+        }
+        value if value.starts_with("--output-dir=") => {
+            common.output_dir = Some(PathBuf::from(split_value(value, "--output-dir")?));
+        }
+        "--date-start" => {
+            *index += 1;
+            common.date_start = Some(next_value(args, *index, option)?);
+        }
+        value if value.starts_with("--date-start=") => {
+            common.date_start = Some(split_value(value, "--date-start")?);
+        }
+        "--date-end" => {
+            *index += 1;
+            common.date_end = Some(next_value(args, *index, option)?);
+        }
+        value if value.starts_with("--date-end=") => {
+            common.date_end = Some(split_value(value, "--date-end")?);
+        }
+        "--universe-name" => {
+            *index += 1;
+            common.universe_name = next_value(args, *index, option)?;
+        }
+        value if value.starts_with("--universe-name=") => {
+            common.universe_name = split_value(value, "--universe-name")?;
+        }
+        "--universe-dir" => {
+            *index += 1;
+            common.universe_dir = PathBuf::from(next_value(args, *index, option)?);
+        }
+        value if value.starts_with("--universe-dir=") => {
+            common.universe_dir = PathBuf::from(split_value(value, "--universe-dir")?);
+        }
+        "--corr-threshold" | "--max-abs-corr" => {
+            *index += 1;
+            common.corr_threshold = parse_f64(next_value(args, *index, option)?, option)?;
+        }
+        value if value.starts_with("--corr-threshold=") => {
+            common.corr_threshold =
+                parse_f64(split_value(value, "--corr-threshold")?, "--corr-threshold")?;
+        }
+        value if value.starts_with("--max-abs-corr=") => {
+            common.corr_threshold =
+                parse_f64(split_value(value, "--max-abs-corr")?, "--max-abs-corr")?;
+        }
+        "--cross-sectional-rank" => common.use_cross_sectional_rank = true,
+        "--raw-values" | "--no-cross-sectional-rank" | "--no-cross-sectional-rank-corr" => {
+            common.use_cross_sectional_rank = false;
+        }
+        "--batch-size" => {
+            *index += 1;
+            common.batch_size = parse_usize(next_value(args, *index, option)?, option)?;
+        }
+        value if value.starts_with("--batch-size=") => {
+            common.batch_size = parse_usize(split_value(value, "--batch-size")?, "--batch-size")?;
+        }
+        "--profile-name" => {
+            *index += 1;
+            common.profile_name = Some(next_value(args, *index, option)?);
+        }
+        value if value.starts_with("--profile-name=") => {
+            common.profile_name = Some(split_value(value, "--profile-name")?);
+        }
+        "--max-features" => {
+            *index += 1;
+            common.max_features = Some(parse_usize(next_value(args, *index, option)?, option)?);
+        }
+        value if value.starts_with("--max-features=") => {
+            common.max_features = Some(parse_usize(
+                split_value(value, "--max-features")?,
+                "--max-features",
+            )?);
+        }
+        "--config-profile-path" => {
+            *index += 1;
+            common.config_profile_path = Some(PathBuf::from(next_value(args, *index, option)?));
+        }
+        value if value.starts_with("--config-profile-path=") => {
+            common.config_profile_path =
+                Some(PathBuf::from(split_value(value, "--config-profile-path")?));
+        }
+        "--factor-store-name" => {
+            *index += 1;
+            common.factor_store_name = next_value(args, *index, option)?;
+        }
+        value if value.starts_with("--factor-store-name=") => {
+            common.factor_store_name = split_value(value, "--factor-store-name")?;
+        }
+        "--setting" => {
+            *index += 1;
+            common
+                .settings
+                .push(parse_setting(&next_value(args, *index, option)?)?);
+        }
+        value if value.starts_with("--setting=") => {
+            common
+                .settings
+                .push(parse_setting(&split_value(value, "--setting")?)?);
+        }
+        "--safety-warning" => {
+            *index += 1;
+            common.safety_warning = Some(next_value(args, *index, option)?);
+        }
+        value if value.starts_with("--safety-warning=") => {
+            common.safety_warning = Some(split_value(value, "--safety-warning")?);
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn parse_readme_mode(raw: &str) -> Result<ProfileReadmeMode, String> {
+    match raw.trim() {
+        "prefilter" => Ok(ProfileReadmeMode::Prefilter),
+        "robust" => Ok(ProfileReadmeMode::Robust),
+        other => Err(format!(
+            "invalid --readme-mode {other}; expected prefilter or robust"
+        )),
+    }
+}
+
+fn parse_setting(raw: &str) -> Result<(String, String), String> {
+    let (key, value) = raw
+        .split_once('=')
+        .ok_or_else(|| format!("invalid --setting {raw}; expected KEY=VALUE"))?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("invalid --setting with empty key".to_owned());
+    }
+    Ok((key.to_owned(), value.to_owned()))
+}
+
+fn parse_prefilter_threshold_option(
+    option: &str,
+    args: &[String],
+    index: &mut usize,
+    thresholds: &mut PrefilterThresholds,
+) -> Result<bool, String> {
+    match option {
+        "--min-coverage-pct" => {
+            *index += 1;
+            thresholds.min_coverage_pct = parse_f64(next_value(args, *index, option)?, option)?;
+        }
+        value if value.starts_with("--min-coverage-pct=") => {
+            thresholds.min_coverage_pct = parse_f64(
+                split_value(value, "--min-coverage-pct")?,
+                "--min-coverage-pct",
+            )?;
+        }
+        "--min-abs-rank-ic" => {
+            *index += 1;
+            thresholds.min_abs_rank_ic = parse_f64(next_value(args, *index, option)?, option)?;
+        }
+        value if value.starts_with("--min-abs-rank-ic=") => {
+            thresholds.min_abs_rank_ic = parse_f64(
+                split_value(value, "--min-abs-rank-ic")?,
+                "--min-abs-rank-ic",
+            )?;
+        }
+        "--min-abs-rank-ic-ir" => {
+            *index += 1;
+            thresholds.min_abs_rank_ic_ir = parse_f64(next_value(args, *index, option)?, option)?;
+        }
+        value if value.starts_with("--min-abs-rank-ic-ir=") => {
+            thresholds.min_abs_rank_ic_ir = parse_f64(
+                split_value(value, "--min-abs-rank-ic-ir")?,
+                "--min-abs-rank-ic-ir",
+            )?;
+        }
+        "--min-monthly-positive-rate" => {
+            *index += 1;
+            thresholds.min_monthly_positive_rate =
+                parse_f64(next_value(args, *index, option)?, option)?;
+        }
+        value if value.starts_with("--min-monthly-positive-rate=") => {
+            thresholds.min_monthly_positive_rate = parse_f64(
+                split_value(value, "--min-monthly-positive-rate")?,
+                "--min-monthly-positive-rate",
+            )?;
+        }
+        "--min-segment-directional-hit-mean" => {
+            *index += 1;
+            thresholds.min_segment_directional_hit_mean =
+                Some(parse_f64(next_value(args, *index, option)?, option)?);
+        }
+        value if value.starts_with("--min-segment-directional-hit-mean=") => {
+            thresholds.min_segment_directional_hit_mean = Some(parse_f64(
+                split_value(value, "--min-segment-directional-hit-mean")?,
+                "--min-segment-directional-hit-mean",
+            )?);
+        }
+        "--max-segment-rank-ic-mean-range" => {
+            *index += 1;
+            thresholds.max_segment_rank_ic_mean_range =
+                Some(parse_f64(next_value(args, *index, option)?, option)?);
+        }
+        value if value.starts_with("--max-segment-rank-ic-mean-range=") => {
+            thresholds.max_segment_rank_ic_mean_range = Some(parse_f64(
+                split_value(value, "--max-segment-rank-ic-mean-range")?,
+                "--max-segment-rank-ic-mean-range",
+            )?);
+        }
+        "--exclude-direction-flip" => thresholds.exclude_direction_flip = true,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn read_feature_list_json(path: &Path) -> Result<Vec<String>, String> {
     let raw = fs::read_to_string(path)
         .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -540,5 +1675,85 @@ mod tests {
         assert_eq!(parsed.segments.len(), 1);
         assert!(parsed.industry_neutral);
         assert!(parsed.json);
+    }
+
+    #[test]
+    fn parses_prefilter_profile_build_options() {
+        let args = vec![
+            "--diagnostics-summary".to_owned(),
+            "summary.csv".to_owned(),
+            "--segment-comparison".to_owned(),
+            "segments.csv".to_owned(),
+            "--factor-store".to_owned(),
+            "data/factor_store/x".to_owned(),
+            "--output-dir".to_owned(),
+            "results/profile".to_owned(),
+            "--profile-name".to_owned(),
+            "profile_x".to_owned(),
+            "--date-start".to_owned(),
+            "2024-01-01".to_owned(),
+            "--date-end".to_owned(),
+            "2024-01-31".to_owned(),
+            "--universe-name".to_owned(),
+            "csi300".to_owned(),
+            "--max-abs-corr".to_owned(),
+            "0.95".to_owned(),
+            "--raw-values".to_owned(),
+            "--max-features".to_owned(),
+            "12".to_owned(),
+            "--setting".to_owned(),
+            "period=train".to_owned(),
+            "--json".to_owned(),
+        ];
+        let parsed = parse_prefilter_profile_build_options(&args).unwrap();
+        assert_eq!(
+            parsed.options.diagnostics_summary.to_string_lossy(),
+            "summary.csv"
+        );
+        assert_eq!(parsed.options.profile_name, "profile_x");
+        assert_eq!(parsed.options.universe_name, "csi300");
+        assert_eq!(parsed.options.corr_threshold, 0.95);
+        assert!(!parsed.options.use_cross_sectional_rank);
+        assert_eq!(parsed.options.max_features, Some(12));
+        assert_eq!(
+            parsed.options.settings,
+            vec![("period".to_owned(), "train".to_owned())]
+        );
+        assert!(parsed.json);
+    }
+
+    #[test]
+    fn parses_robust_profile_build_options() {
+        let args = vec![
+            "--raw-summary=raw.csv".to_owned(),
+            "--neutral-summary=neutral.csv".to_owned(),
+            "--factor-store=data/factor_store/x".to_owned(),
+            "--output-dir=results/robust".to_owned(),
+            "--profile-name=robust_x".to_owned(),
+            "--raw-segment-comparison=raw_segments.csv".to_owned(),
+            "--neutral-segment-comparison=neutral_segments.csv".to_owned(),
+            "--write-config-profile".to_owned(),
+            "--config-profile-path=configs/features/robust_x.yaml".to_owned(),
+            "--factor-store-name=custom_store".to_owned(),
+            "--safety-warning=unsafe".to_owned(),
+        ];
+        let parsed = parse_robust_profile_build_options(&args).unwrap();
+        assert_eq!(parsed.options.raw_summary.to_string_lossy(), "raw.csv");
+        assert_eq!(
+            parsed.options.neutral_summary.to_string_lossy(),
+            "neutral.csv"
+        );
+        assert_eq!(parsed.options.profile_name, "robust_x");
+        assert_eq!(parsed.options.factor_store_name, "custom_store");
+        assert!(parsed.options.write_config_profile);
+        assert_eq!(parsed.options.safety_warning.as_deref(), Some("unsafe"));
+        assert_eq!(
+            parsed
+                .options
+                .raw_segment_comparison
+                .unwrap()
+                .to_string_lossy(),
+            "raw_segments.csv"
+        );
     }
 }

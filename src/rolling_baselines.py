@@ -296,7 +296,8 @@ def build_sign_aligned_factor_baseline_predictions(
         runtime_data,
         unique_source_columns,
         train_mask=train_mask,
-    ).reindex(unique_source_columns).fillna(0.0)
+    )
+    rank_ic_weights = rank_ic_weights.reindex(unique_source_columns).fillna(0.0)
     sign_values = pd.Series(
         np.where(rank_ic_weights.to_numpy(dtype=float, copy=False) < 0.0, -1.0, 1.0),
         index=unique_source_columns,

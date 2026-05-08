@@ -207,8 +207,10 @@ def summarize_score_bucket_report(report: pd.DataFrame) -> dict[str, Any]:
             "opportunity_rate_monotonicity_spearman": None,
         }
 
-    top = report.sort_values("bucket").iloc[0]
-    bottom = report.sort_values("bucket").iloc[-1]
+    sorted_report = report.sort_values("bucket")
+    has_opportunity = "opportunity_rate" in sorted_report.columns and sorted_report["opportunity_rate"].notna().any()
+    top = sorted_report.iloc[0]
+    bottom = sorted_report.iloc[-1]
     bucket_score = -pd.Series(report["bucket"].astype(float))
     summary = {
         "bucket_count": int(len(report)),
@@ -219,7 +221,7 @@ def summarize_score_bucket_report(report: pd.DataFrame) -> dict[str, Any]:
         "positive_rate_monotonicity_spearman": _spearman_corr(bucket_score, report["positive_rate"]),
         "opportunity_rate_monotonicity_spearman": None,
     }
-    if "opportunity_rate" in report.columns and report["opportunity_rate"].notna().any():
+    if has_opportunity:
         summary["top_minus_bottom_opportunity_rate"] = float(top["opportunity_rate"] - bottom["opportunity_rate"])
         summary["opportunity_rate_monotonicity_spearman"] = _spearman_corr(bucket_score, report["opportunity_rate"])
     return summary
@@ -236,6 +238,7 @@ def summarize_topk_opportunity_daily_report(report: pd.DataFrame) -> dict[str, A
             "selected_opportunity_rate": None,
             "selected_minus_universe_opportunity_rate": None,
         }
+    has_opportunity = "selected_opportunity_rate" in report.columns
     summary = {
         "date_count": int(len(report)),
         "selected_label_mean": float(report["selected_label_mean"].mean()),
@@ -245,7 +248,7 @@ def summarize_topk_opportunity_daily_report(report: pd.DataFrame) -> dict[str, A
         "selected_opportunity_rate": None,
         "selected_minus_universe_opportunity_rate": None,
     }
-    if "selected_opportunity_rate" in report.columns:
+    if has_opportunity:
         summary["selected_opportunity_rate"] = float(report["selected_opportunity_rate"].mean())
         summary["selected_minus_universe_opportunity_rate"] = float(
             report["selected_minus_universe_opportunity_rate"].mean()

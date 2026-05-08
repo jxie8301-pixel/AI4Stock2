@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -85,6 +86,18 @@ def test_bucket_reports_and_summary_include_opportunity_rates() -> None:
     assert summary["bucket_count"] == 3
     assert summary["return_monotonicity_spearman"] is not None
     assert summary["opportunity_rate_monotonicity_spearman"] is not None
+
+
+def test_bucket_report_matches_qcut_on_integer_quantile_edges() -> None:
+    dates = [pd.Timestamp("2024-01-02")] * 13
+    instruments = [f"S{i:02d}" for i in range(13)]
+    index = pd.MultiIndex.from_arrays([dates, instruments], names=["datetime", "instrument"])
+    predictions = pd.Series(np.arange(13, 0, -1, dtype=float), index=index)
+    labels = pd.Series(np.linspace(-0.06, 0.06, 13), index=index)
+
+    bucket_report = build_score_bucket_report(predictions, labels, n_buckets=10)
+
+    assert bucket_report["count"].tolist() == [2, 1, 1, 1, 2, 1, 1, 1, 1, 2]
 
 
 def test_save_opportunity_diagnostics_writes_expected_artifacts(tmp_path) -> None:

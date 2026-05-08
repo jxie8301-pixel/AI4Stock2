@@ -22,11 +22,11 @@ def select_trace_dates(report: pd.DataFrame, top_n: int = 5) -> list[pd.Timestam
         return []
 
     top_n = max(0, int(top_n))
-    candidates: list[pd.Timestamp] = []
     report = report.copy()
     report.index = pd.to_datetime(report.index)
 
     return_series = get_backtest_return_series(report)
+    candidates: list[pd.Timestamp] = []
     if top_n > 0 and return_series is not None:
         candidates.extend(pd.to_datetime(return_series.abs().nlargest(top_n).index).tolist())
     if top_n > 0 and "turnover" in report.columns:
@@ -40,7 +40,6 @@ def select_trace_dates(report: pd.DataFrame, top_n: int = 5) -> list[pd.Timestam
         if not drawdown.empty:
             candidates.append(pd.Timestamp(drawdown.idxmin()))
 
-    # Preserve chronological order while removing duplicates.
     unique_dates = sorted({pd.Timestamp(date) for date in candidates})
     return unique_dates
 

@@ -143,8 +143,8 @@ def build_intraperiod_residual_return_matrix(
     remaining_steps: pd.Series,
 ) -> pd.DataFrame:
     values = label_matrix.to_numpy(dtype=float, copy=False)
-    out = np.full(values.shape, np.nan, dtype=float)
     steps_array = remaining_steps.reindex(label_matrix.index).to_numpy(dtype=int, copy=False)
+    out = np.full(values.shape, np.nan, dtype=float)
 
     for pos, steps in enumerate(steps_array):
         if steps <= 0:
@@ -232,6 +232,7 @@ def estimate_intraperiod_expected_returns(
     if history_scores.size == 0:
         return out
 
+    current_values = score_row.to_numpy(dtype=float, copy=False)
     bin_count = max(1, min(int(n_bins), int(history_scores.size)))
     if bin_count == 1:
         out.loc[score_row.notna()] = float(history_returns.mean())
@@ -252,7 +253,6 @@ def estimate_intraperiod_expected_returns(
     nonzero = bucket_counts > 0
     bucket_means[nonzero] = bucket_sums[nonzero] / bucket_counts[nonzero]
 
-    current_values = score_row.to_numpy(dtype=float, copy=False)
     valid_current = np.isfinite(current_values)
     if not valid_current.any():
         return out
@@ -448,9 +448,9 @@ def build_benchmark_ma_schedule(
     if benchmark_returns.empty:
         raise ValueError("benchmark_returns is empty while risk_control.mode needs benchmark context")
 
-    nav = (1.0 + benchmark_returns.fillna(0.0)).cumprod()
     fast_window = int(risk_control["fast_window"])
     slow_window = int(risk_control["slow_window"])
+    nav = (1.0 + benchmark_returns.fillna(0.0)).cumprod()
     fast_ma = nav.rolling(fast_window, min_periods=1).mean()
     slow_ma = nav.rolling(slow_window, min_periods=1).mean()
 
@@ -483,10 +483,11 @@ def build_signal_schedule_from_series(
     risk_control: dict[str, float | int | str],
 ) -> tuple[pd.Series, pd.Series]:
     signal_values = pd.Series(signal_values, copy=False).astype(float).sort_index()
-    min_threshold = pd.Series(float(risk_control["min_signal"]), index=signal_values.index, dtype=float)
-    max_threshold = pd.Series(float(risk_control["max_signal"]), index=signal_values.index, dtype=float)
     min_q = risk_control.get("min_signal_quantile")
     max_q = risk_control.get("max_signal_quantile")
+
+    min_threshold = pd.Series(float(risk_control["min_signal"]), index=signal_values.index, dtype=float)
+    max_threshold = pd.Series(float(risk_control["max_signal"]), index=signal_values.index, dtype=float)
     shifted = signal_values.shift(1)
     if min_q is not None:
         min_threshold = shifted.expanding(min_periods=1).quantile(float(min_q)).reindex(signal_values.index)
@@ -515,16 +516,21 @@ def build_combined_validation_metric_schedule(
     primary_metric = str(risk_control["validation_metric"])
     if primary_metric not in signal_values_by_metric:
         raise ValueError(f"Missing primary validation metric series: {primary_metric}")
-    primary_schedule, primary_signal_values = build_signal_schedule_from_series(
-        signal_values_by_metric[primary_metric],
-        risk_control=risk_control,
-    )
     secondary_metric = risk_control.get("secondary_validation_metric")
     if secondary_metric is None:
-        return primary_schedule, primary_signal_values
+        return build_signal_schedule_from_series(
+            signal_values_by_metric[primary_metric],
+            risk_control=risk_control,
+        )
     secondary_metric = str(secondary_metric)
     if secondary_metric not in signal_values_by_metric:
         raise ValueError(f"Missing secondary validation metric series: {secondary_metric}")
+    primary_signal_values = pd.Series(signal_values_by_metric[primary_metric], copy=False).astype(float).sort_index()
+    secondary_signal_values = pd.Series(signal_values_by_metric[secondary_metric], copy=False).astype(float).sort_index()
+    primary_schedule, primary_signal_values = build_signal_schedule_from_series(
+        primary_signal_values,
+        risk_control=risk_control,
+    )
     secondary_cfg: dict[str, float | int | str] = {
         "min_signal": float(risk_control["secondary_min_signal"]),
         "max_signal": float(risk_control["secondary_max_signal"]),
@@ -540,7 +546,7 @@ def build_combined_validation_metric_schedule(
     if "secondary_max_signal_quantile" in risk_control:
         secondary_cfg["max_signal_quantile"] = float(risk_control["secondary_max_signal_quantile"])
     secondary_schedule, _ = build_signal_schedule_from_series(
-        signal_values_by_metric[secondary_metric],
+        secondary_signal_values,
         risk_control=secondary_cfg,
     )
     combined = pd.concat(

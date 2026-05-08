@@ -50,6 +50,30 @@ def _transform_scores(series: pd.Series, transform: str) -> pd.Series:
     raise ValueError(f"Unsupported score transform for fusion: {transform}")
 
 
+def _fusion_summary(
+    frame: pd.DataFrame,
+    *,
+    fusion_cfg: dict[str, Any],
+    primary_t: pd.Series,
+    secondary_t: pd.Series,
+    fused: pd.Series,
+) -> dict[str, Any]:
+    return {
+        "fusion_mode": str(fusion_cfg["mode"]),
+        "fusion_primary_transform": str(fusion_cfg["primary_transform"]),
+        "fusion_secondary_transform": str(fusion_cfg["secondary_transform"]),
+        "fusion_primary_power": float(fusion_cfg["primary_power"]),
+        "fusion_secondary_power": float(fusion_cfg["secondary_power"]),
+        "fusion_blend_weight": float(fusion_cfg["blend_weight"]),
+        "fusion_filter_threshold": float(fusion_cfg["filter_threshold"]),
+        "fusion_overlap_rows": int(len(frame)),
+        "fusion_overlap_dates": int(pd.Index(frame.index.get_level_values(0)).nunique()) if isinstance(frame.index, pd.MultiIndex) else int(pd.Index(frame.index).nunique()),
+        "fusion_primary_mean": float(primary_t.mean()),
+        "fusion_secondary_mean": float(secondary_t.mean()),
+        "fusion_output_mean": float(fused.mean()),
+    }
+
+
 def fuse_prediction_series(
     primary_predictions: pd.Series,
     secondary_predictions: pd.Series,
@@ -66,11 +90,11 @@ def fuse_prediction_series(
     if frame.empty:
         raise ValueError("No overlapping finite prediction pairs between primary and secondary bundles")
 
+    mode = str(fusion_cfg["mode"])
     primary_t = _transform_scores(frame["primary"], str(fusion_cfg["primary_transform"]))
     secondary_t = _transform_scores(frame["secondary"], str(fusion_cfg["secondary_transform"]))
     primary_p = primary_t.pow(float(fusion_cfg["primary_power"]))
     secondary_p = secondary_t.pow(float(fusion_cfg["secondary_power"]))
-    mode = str(fusion_cfg["mode"])
 
     if mode == "multiply":
         fused = primary_p * secondary_p
@@ -85,20 +109,13 @@ def fuse_prediction_series(
     else:
         raise ValueError(f"Unsupported fusion mode: {mode}")
 
-    summary = {
-        "fusion_mode": mode,
-        "fusion_primary_transform": str(fusion_cfg["primary_transform"]),
-        "fusion_secondary_transform": str(fusion_cfg["secondary_transform"]),
-        "fusion_primary_power": float(fusion_cfg["primary_power"]),
-        "fusion_secondary_power": float(fusion_cfg["secondary_power"]),
-        "fusion_blend_weight": float(fusion_cfg["blend_weight"]),
-        "fusion_filter_threshold": float(fusion_cfg["filter_threshold"]),
-        "fusion_overlap_rows": int(len(frame)),
-        "fusion_overlap_dates": int(pd.Index(frame.index.get_level_values(0)).nunique()) if isinstance(frame.index, pd.MultiIndex) else int(pd.Index(frame.index).nunique()),
-        "fusion_primary_mean": float(primary_t.mean()),
-        "fusion_secondary_mean": float(secondary_t.mean()),
-        "fusion_output_mean": float(fused.mean()),
-    }
+    summary = _fusion_summary(
+        frame,
+        fusion_cfg=fusion_cfg,
+        primary_t=primary_t,
+        secondary_t=secondary_t,
+        fused=fused,
+    )
     return fused.rename(primary_predictions.name), summary
 
 

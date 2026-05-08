@@ -7,6 +7,7 @@ from src.backtest_engine import (
     DEFAULT_SLIPPAGE,
     DEFAULT_TRANSACTION_COST,
     run_native_backtest,
+    run_native_backtest_batch,
 )
 from src.backtest_scoring import (
     DEFAULT_SCORE_TRANSFORM,
@@ -44,4 +45,5 @@ __all__ = [
     "INTRAPERIOD_PRICE_CONFIRM_SIGNAL_TIMING",
     "INTRAPERIOD_PRICE_CONFIRM_EXECUTION_TIMING",
     "run_native_backtest",
+    "run_native_backtest_batch",
 ]

@@ -41,6 +41,59 @@ DEFAULT_SLIPPAGE = 0.0
 DEFAULT_TRANSACTION_COST = 0.001
 
 
+def _build_intraperiod_price_confirm_matrix_for_backtest(
+    market_data: pd.DataFrame | None,
+    pred_matrix: pd.DataFrame,
+    intraperiod_exit_cfg: dict[str, float | int | str] | None,
+) -> pd.DataFrame | None:
+    if intraperiod_exit_cfg is None or "price_confirm_mode" not in intraperiod_exit_cfg:
+        return None
+    if market_data is None or "close" not in market_data.columns:
+        raise ValueError("market_data with a 'close' column is required when intraperiod_exit.price_confirm is enabled")
+    close_series = market_data["close"]
+    if not isinstance(close_series.index, pd.MultiIndex):
+        raise ValueError("market_data must use a MultiIndex of (datetime, instrument)")
+    close_series = close_series.copy()
+    close_series.index = close_series.index.set_names(["datetime", "instrument"])
+    close_matrix = (
+        close_series.astype(float)
+        .unstack(level="instrument")
+        .reindex(index=pred_matrix.index, columns=pred_matrix.columns)
+    )
+    return build_intraperiod_price_confirm_matrix(
+        close_matrix,
+        confirm_mode=str(intraperiod_exit_cfg["price_confirm_mode"]),
+        ma_window=int(intraperiod_exit_cfg["price_confirm_ma_window"]),
+    )
+
+
+def _risk_control_requires_score_matrix(risk_control_cfg: dict[str, float | int | str]) -> bool:
+    mode = str(risk_control_cfg.get("mode") or "fixed")
+    signal_source = str(risk_control_cfg.get("signal_source") or "score_strength")
+    return mode in {"signal_strength", "benchmark_ma_signal_strength"} and signal_source != "validation_metric"
+
+
+def _build_instrument_group_series(
+    instrument_groups: pd.Series | dict[str, str] | None,
+    instruments: pd.Index,
+) -> pd.Series | None:
+    if instrument_groups is None:
+        return None
+    if isinstance(instrument_groups, pd.Series):
+        instrument_group_series = instrument_groups.copy()
+    else:
+        instrument_group_series = pd.Series(instrument_groups, dtype=object)
+    instrument_group_series.index = instrument_group_series.index.map(str)
+    instrument_group_series = instrument_group_series.reindex(instruments.map(str))
+    instrument_group_series.index = instruments
+    fallback_groups = pd.Series(
+        [f"__ungrouped__{symbol}" for symbol in instrument_group_series.index.astype(str)],
+        index=instrument_group_series.index,
+        dtype=object,
+    )
+    return instrument_group_series.fillna(fallback_groups).astype(str)
+
+
 def _build_exit_score_matrix(
     pred_matrix: pd.DataFrame,
     *,
@@ -62,6 +115,139 @@ def _build_exit_score_matrix(
     raise ValueError(
         f"Unsupported intraperiod exit score_source: {source}. Supported: {', '.join(SUPPORTED_EXIT_SCORE_SOURCES)}"
     )
+
+
+def _loop_native_backtests(preds_list: list[pd.Series], **kwargs) -> list[pd.DataFrame]:
+    return [run_native_backtest(preds=preds, **kwargs) for preds in preds_list]
+
+
+def _matrix_to_dense_series(matrix: pd.DataFrame) -> pd.Series:
+    index = pd.MultiIndex.from_product(
+        [matrix.index, matrix.columns],
+        names=["datetime", "instrument"],
+    )
+    return pd.Series(matrix.to_numpy(dtype=float, copy=False).reshape(-1), index=index)
+
+
+def _loop_native_backtests_with_batch_alignment(
+    preds_list: list[pd.Series],
+    labels: pd.Series,
+    fallback_kwargs: dict[str, object],
+) -> list[pd.DataFrame]:
+    aligned = _align_prediction_matrices(preds_list, labels)
+    if aligned is None:
+        return _loop_native_backtests(preds_list, **fallback_kwargs)
+    pred_matrices, label_matrix = aligned
+    aligned_kwargs = dict(fallback_kwargs)
+    aligned_kwargs["labels"] = _matrix_to_dense_series(label_matrix)
+    aligned_preds = [_matrix_to_dense_series(matrix) for matrix in pred_matrices]
+    return _loop_native_backtests(aligned_preds, **aligned_kwargs)
+
+
+def _align_prediction_matrices(
+    preds_list: list[pd.Series],
+    labels: pd.Series,
+) -> tuple[list[pd.DataFrame], pd.DataFrame] | None:
+    if not preds_list:
+        return [], pd.DataFrame()
+    if not isinstance(labels.index, pd.MultiIndex) or "instrument" not in labels.index.names:
+        return None
+
+    common_idx = labels.index
+    for preds in preds_list:
+        if not isinstance(preds.index, pd.MultiIndex) or "instrument" not in preds.index.names:
+            return None
+        common_idx = common_idx.intersection(preds.index)
+    if len(common_idx) == 0:
+        raise ValueError("Native backtest received no overlapping prediction/label index.")
+
+    aligned_labels = sanitize_label_series(labels.loc[common_idx]).sort_index()
+    pred_matrices = [
+        pd.to_numeric(preds.loc[common_idx], errors="coerce")
+        .astype(float)
+        .sort_index()
+        .unstack(level="instrument")
+        .sort_index()
+        for preds in preds_list
+    ]
+    label_matrix = (
+        aligned_labels.unstack(level="instrument")
+        .reindex(index=pred_matrices[0].index, columns=pred_matrices[0].columns)
+        .sort_index()
+    )
+    valid_dates = label_matrix.notna().any(axis=1)
+    if not valid_dates.any():
+        raise ValueError("Native backtest received no dates with any realized returns.")
+    label_matrix = label_matrix.loc[valid_dates]
+    pred_matrices = [
+        matrix.reindex(index=label_matrix.index, columns=label_matrix.columns)
+        for matrix in pred_matrices
+    ]
+    return pred_matrices, label_matrix
+
+
+def run_native_backtest_batch(
+    preds_list: list[pd.Series],
+    labels: pd.Series,
+    topk: int = 30,
+    n_drop: int = 5,
+    cost_buy: float = DEFAULT_TRANSACTION_COST,
+    cost_sell: float = DEFAULT_TRANSACTION_COST,
+    min_cost: float = DEFAULT_MIN_COST,
+    account: float = DEFAULT_ACCOUNT,
+    risk_degree: float = DEFAULT_RISK_DEGREE,
+    slippage: float = DEFAULT_SLIPPAGE,
+    rebalance_freq: int = 1,
+    weighting: str = DEFAULT_WEIGHTING,
+    score_transform: str = DEFAULT_SCORE_TRANSFORM,
+    score_zscore_clip: float = 3.0,
+    max_weight: float | None = None,
+    max_industry_weight: float | None = None,
+    desticky_signal_threshold: float | None = None,
+    desticky_n_drop: int | None = None,
+    keep_top_n: int | None = None,
+    min_score: float | None = None,
+    instrument_groups: pd.Series | dict[str, str] | None = None,
+    benchmark_returns: pd.Series | None = None,
+    market_data: pd.DataFrame | None = None,
+    risk_control: dict[str, object] | None = None,
+    risk_control_signal_values: pd.Series | dict[str, pd.Series] | None = None,
+    intraperiod_exit: dict[str, object] | None = None,
+    dynamic_risk: dict[str, object] | None = None,
+) -> list[pd.DataFrame]:
+    preds_items = [preds for preds in preds_list if preds is not None]
+    if not preds_items:
+        return []
+
+    fallback_kwargs = {
+        "labels": labels,
+        "topk": topk,
+        "n_drop": n_drop,
+        "cost_buy": cost_buy,
+        "cost_sell": cost_sell,
+        "min_cost": min_cost,
+        "account": account,
+        "risk_degree": risk_degree,
+        "slippage": slippage,
+        "rebalance_freq": rebalance_freq,
+        "weighting": weighting,
+        "score_transform": score_transform,
+        "score_zscore_clip": score_zscore_clip,
+        "max_weight": max_weight,
+        "max_industry_weight": max_industry_weight,
+        "desticky_signal_threshold": desticky_signal_threshold,
+        "desticky_n_drop": desticky_n_drop,
+        "keep_top_n": keep_top_n,
+        "min_score": min_score,
+        "instrument_groups": instrument_groups,
+        "benchmark_returns": benchmark_returns,
+        "market_data": market_data,
+        "risk_control": risk_control,
+        "risk_control_signal_values": risk_control_signal_values,
+        "intraperiod_exit": intraperiod_exit,
+        "dynamic_risk": dynamic_risk,
+    }
+    return _loop_native_backtests_with_batch_alignment(preds_items, labels, fallback_kwargs)
 
 
 def run_native_backtest(
@@ -120,13 +306,19 @@ def run_native_backtest(
     open_rate = float(cost_buy) + float(slippage)
     close_rate = float(cost_sell) + float(slippage)
 
-    common_idx = preds.index.intersection(labels.index)
-    preds = preds.loc[common_idx].sort_index()
-    labels = sanitize_label_series(labels.loc[common_idx].sort_index())
+    if preds.index.equals(labels.index) and preds.index.is_monotonic_increasing:
+        aligned_preds = preds
+        aligned_labels = labels
+    else:
+        common_idx = preds.index.intersection(labels.index)
+        aligned_preds = preds.loc[common_idx].sort_index()
+        aligned_labels = labels.loc[common_idx].sort_index()
+    preds = pd.to_numeric(aligned_preds, errors="coerce").astype(float)
+    labels = sanitize_label_series(aligned_labels)
     if preds.empty:
         raise ValueError("Native backtest received no overlapping prediction/label index.")
 
-    pred_matrix = preds.unstack(level="instrument").sort_index().apply(pd.to_numeric, errors="coerce").astype(float)
+    pred_matrix = preds.unstack(level="instrument").sort_index()
     label_matrix = labels.unstack(level="instrument").reindex(pred_matrix.index).sort_index()
     valid_dates = label_matrix.notna().any(axis=1)
     pred_matrix = pred_matrix.loc[valid_dates]
@@ -139,40 +331,40 @@ def run_native_backtest(
         score_transform=score_transform,
         zscore_clip=score_zscore_clip,
     )
+    risk_needs_strategy_scores = _risk_control_requires_score_matrix(risk_control_cfg)
+    risk_score_matrix = (
+        strategy_score_matrix
+        if risk_needs_strategy_scores
+        else pred_matrix.iloc[:, :0]
+    )
     risk_schedule, risk_signal_schedule = build_risk_control_schedule(
         benchmark_returns,
-        strategy_score_matrix,
+        risk_score_matrix,
         risk_control=risk_control_cfg,
         fallback_risk_degree=risk_degree,
         topk=topk,
         min_score=min_score,
         external_signal_values=risk_control_signal_values,
     )
+    intraperiod_price_confirm_matrix = _build_intraperiod_price_confirm_matrix_for_backtest(
+        market_data,
+        pred_matrix,
+        intraperiod_exit_cfg,
+    )
+
+    trace_dates_norm = {pd.Timestamp(date) for date in trace_dates} if trace_dates is not None else None
+    instruments = pred_matrix.columns
+    instrument_to_col = {str(symbol): idx for idx, symbol in enumerate(instruments)}
+    instrument_group_series = _build_instrument_group_series(instrument_groups, instruments)
+    label_values = label_matrix.to_numpy(dtype=float, copy=False)
+    bench_values = label_matrix.mean(axis=1, skipna=True).fillna(0.0).to_numpy(dtype=float, copy=False)
+
     intraperiod_score_matrix = _build_exit_score_matrix(
         pred_matrix,
         intraperiod_exit_cfg=intraperiod_exit_cfg,
         strategy_score_matrix=strategy_score_matrix,
         zscore_clip=score_zscore_clip,
     )
-    intraperiod_price_confirm_matrix = None
-    if intraperiod_exit_cfg is not None and "price_confirm_mode" in intraperiod_exit_cfg:
-        if market_data is None or "close" not in market_data.columns:
-            raise ValueError("market_data with a 'close' column is required when intraperiod_exit.price_confirm is enabled")
-        market_frame = market_data.copy()
-        if not isinstance(market_frame.index, pd.MultiIndex):
-            raise ValueError("market_data must use a MultiIndex of (datetime, instrument)")
-        market_frame.index = market_frame.index.set_names(["datetime", "instrument"])
-        close_matrix = (
-            market_frame["close"]
-            .astype(float)
-            .unstack(level="instrument")
-            .reindex(index=pred_matrix.index, columns=pred_matrix.columns)
-        )
-        intraperiod_price_confirm_matrix = build_intraperiod_price_confirm_matrix(
-            close_matrix,
-            confirm_mode=str(intraperiod_exit_cfg["price_confirm_mode"]),
-            ma_window=int(intraperiod_exit_cfg["price_confirm_ma_window"]),
-        )
     intraperiod_remaining_steps = build_intraperiod_remaining_steps(pred_matrix.index, rebalance_freq=rebalance_freq)
     intraperiod_residual_matrix = None
     intraperiod_history: dict[int, dict[str, object]] | None = None
@@ -183,27 +375,6 @@ def run_native_backtest(
         )
     if intraperiod_exit_cfg is not None and str(intraperiod_exit_cfg["mode"]) == "expected_return_threshold":
         intraperiod_history = {}
-
-    trace_dates_norm = {pd.Timestamp(date) for date in trace_dates} if trace_dates is not None else None
-    instruments = pred_matrix.columns
-    instrument_to_col = {str(symbol): idx for idx, symbol in enumerate(instruments)}
-    instrument_group_series: pd.Series | None = None
-    if instrument_groups is not None:
-        if isinstance(instrument_groups, pd.Series):
-            instrument_group_series = instrument_groups.copy()
-        else:
-            instrument_group_series = pd.Series(instrument_groups, dtype=object)
-        instrument_group_series.index = instrument_group_series.index.map(str)
-        instrument_group_series = instrument_group_series.reindex(instruments.map(str))
-        instrument_group_series.index = instruments
-        fallback_groups = pd.Series(
-            [f"__ungrouped__{symbol}" for symbol in instrument_group_series.index.astype(str)],
-            index=instrument_group_series.index,
-            dtype=object,
-        )
-        instrument_group_series = instrument_group_series.fillna(fallback_groups).astype(str)
-    label_values = label_matrix.to_numpy(dtype=float, copy=False)
-    bench_values = label_matrix.mean(axis=1, skipna=True).fillna(0.0).to_numpy(dtype=float, copy=False)
     strategy_score_values = strategy_score_matrix.to_numpy(dtype=float, copy=False)
     intraperiod_score_values = (
         intraperiod_score_matrix.to_numpy(dtype=float, copy=False)
@@ -338,7 +509,7 @@ def run_native_backtest(
                     continue
                 cost_value = trade_cost(trade_value, close_rate, min_cost)
                 cash += trade_value - cost_value
-                holdings[stock] = current_value - trade_value
+                holdings[stock] = target_value
                 if holdings[stock] <= 1e-12:
                     holdings.pop(stock, None)
                 trade_cost_value += cost_value
@@ -347,7 +518,7 @@ def run_native_backtest(
                 if stock not in trade_sell_list:
                     trade_sell_list.append(stock)
 
-            for stock in target_values.sort_values(ascending=False).index:
+            for stock in target_values.sort_values(ascending=False, kind="stable").index:
                 target_value = float(target_values.get(stock, 0.0))
                 current_value = float(holdings.get(stock, 0.0))
                 deficit_value = target_value - current_value

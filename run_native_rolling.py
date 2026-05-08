@@ -92,9 +92,9 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_rolling_pipeline() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
+def run_rolling_pipeline_from_args(args: argparse.Namespace, parser: argparse.ArgumentParser | None = None) -> None:
+    if parser is None:
+        parser = build_parser()
     if args.load_predictions_dir:
         cfg = load_validated_config_from_args(
             args,
@@ -187,6 +187,12 @@ def run_rolling_pipeline() -> None:
         bundle,
         model_name=model_name,
     )
+
+
+def run_rolling_pipeline(argv: list[str] | None = None) -> None:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    run_rolling_pipeline_from_args(args, parser=parser)
 
 
 if __name__ == "__main__":

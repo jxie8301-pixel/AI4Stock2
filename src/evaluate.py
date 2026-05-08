@@ -30,30 +30,65 @@ def safe_cross_sectional_corr(
     return float(frame["pred"].corr(frame["label"], method=method))
 
 
-def _compute_return_distribution_metrics(returns: pd.Series) -> dict[str, float | int | None]:
-    """Summarize win/loss asymmetry for a return series."""
+def _none_if_nan(value: float) -> float | None:
+    return None if pd.isna(value) else float(value)
+
+
+def _compute_return_stats(returns: pd.Series) -> dict[str, float | int | None]:
     clean_returns = returns.astype(float).dropna()
+    if clean_returns.empty:
+        return {
+            "count": 0,
+            "mean": 0.0,
+            "std": 0.0,
+            "max_drawdown": 0.0,
+            "win_rate": 0.0,
+            "win_days": 0,
+            "loss_days": 0,
+            "flat_days": 0,
+            "avg_win": None,
+            "avg_loss": None,
+            "payoff_ratio": None,
+            "profit_factor": None,
+        }
     wins = clean_returns[clean_returns > 0]
     losses = clean_returns[clean_returns < 0]
-    flat_days = int((clean_returns == 0).sum())
+    mean_ret = float(clean_returns.mean())
+    std_ret = float(clean_returns.std()) if len(clean_returns) > 1 else 0.0
+    if pd.isna(std_ret):
+        std_ret = 0.0
     avg_win = float(wins.mean()) if not wins.empty else None
     avg_loss = float(losses.mean()) if not losses.empty else None
-    payoff_ratio = None
-    if avg_win is not None and avg_loss is not None and avg_loss != 0:
-        payoff_ratio = float(avg_win / abs(avg_loss))
-    gross_profit = float(wins.sum()) if not wins.empty else 0.0
     gross_loss = float(abs(losses.sum())) if not losses.empty else 0.0
-    profit_factor = None
-    if gross_loss > 0:
-        profit_factor = float(gross_profit / gross_loss)
     return {
+        "count": int(len(clean_returns)),
+        "mean": mean_ret,
+        "std": std_ret,
+        "max_drawdown": _compute_max_drawdown(clean_returns),
+        "win_rate": float((clean_returns > 0).mean()),
         "win_days": int(len(wins)),
         "loss_days": int(len(losses)),
-        "flat_days": flat_days,
+        "flat_days": int((clean_returns == 0).sum()),
         "avg_win": avg_win,
         "avg_loss": avg_loss,
-        "payoff_ratio": payoff_ratio,
-        "profit_factor": profit_factor,
+        "payoff_ratio": float(avg_win / abs(avg_loss))
+        if avg_win is not None and avg_loss is not None and avg_loss != 0
+        else None,
+        "profit_factor": float(wins.sum() / gross_loss) if gross_loss > 0 else None,
+    }
+
+
+def _compute_return_distribution_metrics(returns: pd.Series) -> dict[str, float | int | None]:
+    """Summarize win/loss asymmetry for a return series."""
+    stats = _compute_return_stats(returns)
+    return {
+        "win_days": stats["win_days"],
+        "loss_days": stats["loss_days"],
+        "flat_days": stats["flat_days"],
+        "avg_win": stats["avg_win"],
+        "avg_loss": stats["avg_loss"],
+        "payoff_ratio": stats["payoff_ratio"],
+        "profit_factor": stats["profit_factor"],
     }
 
 
@@ -62,6 +97,7 @@ def _compute_chunked_period_returns(returns: pd.Series, period_size: int) -> pd.
     if clean_returns.empty:
         return pd.Series(dtype=float)
     period_size = max(int(period_size), 1)
+
     rows: list[dict[str, object]] = []
     for start in range(0, len(clean_returns), period_size):
         chunk = clean_returns.iloc[start : start + period_size]
@@ -76,6 +112,47 @@ def _compute_chunked_period_returns(returns: pd.Series, period_size: int) -> pd.
     if not rows:
         return pd.Series(dtype=float)
     out = pd.DataFrame(rows).set_index("period_end")["return"].astype(float).sort_index()
+    out.index.name = "date"
+    return out
+
+
+def _report_return_columns(report: pd.DataFrame) -> list[str]:
+    columns = ["return"]
+    if "bench" in report.columns:
+        columns.append("bench")
+    for prefix, _ in ALL_REFERENCE_BASELINE_SPECS:
+        column = f"{prefix}_return"
+        if column in report.columns:
+            columns.append(column)
+    return columns
+
+
+def _monthly_return_frame(report: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    if report.empty or not columns:
+        return pd.DataFrame(columns=columns, dtype=float)
+    frames = {
+        column: _resample_compound_returns(report[column].astype(float), "ME")
+        for column in columns
+        if column in report.columns
+    }
+    out = pd.DataFrame(frames, dtype=float)
+    out.index.name = "date"
+    return out
+
+
+def _rebalance_return_frame(
+    report: pd.DataFrame,
+    columns: list[str],
+    rebalance_freq: int,
+) -> pd.DataFrame:
+    if report.empty or not columns:
+        return pd.DataFrame(columns=columns, dtype=float)
+    frames = {
+        column: _compute_chunked_period_returns(report[column].astype(float), rebalance_freq)
+        for column in columns
+        if column in report.columns
+    }
+    out = pd.DataFrame(frames, dtype=float)
     out.index.name = "date"
     return out
 
@@ -120,6 +197,9 @@ def _attach_reference_metrics(
     ann_factor: int,
     monthly_ret: pd.Series,
     rebalance_freq: int,
+    monthly_reference: pd.Series | None = None,
+    strategy_rebalance: pd.Series | None = None,
+    reference_rebalance: pd.Series | None = None,
 ) -> None:
     if reference_column not in report.columns:
         return
@@ -127,16 +207,13 @@ def _attach_reference_metrics(
     if reference_returns.empty:
         return
 
-    reference_mean = float(reference_returns.mean())
-    reference_std = float(reference_returns.std()) if len(reference_returns) > 1 else 0.0
-    if pd.isna(reference_std):
-        reference_std = 0.0
+    reference_stats = _compute_return_stats(reference_returns)
+    reference_mean = float(reference_stats["mean"])
+    reference_std = float(reference_stats["std"])
     aligned_strategy, aligned_reference = strategy_returns.align(reference_returns, join="inner")
-    excess_returns = aligned_strategy - aligned_reference
-    excess_mean = float(excess_returns.mean()) if not excess_returns.empty else 0.0
-    excess_std = float(excess_returns.std()) if len(excess_returns) > 1 else 0.0
-    if pd.isna(excess_std):
-        excess_std = 0.0
+    excess_stats = _compute_return_stats(aligned_strategy - aligned_reference)
+    excess_mean = float(excess_stats["mean"])
+    excess_std = float(excess_stats["std"])
 
     result[f"{prefix}_name"] = display_name
     result[f"{prefix}_annualized_return"] = {"risk": reference_mean * ann_factor}
@@ -144,13 +221,14 @@ def _attach_reference_metrics(
     reference_sharpe = (reference_mean / reference_std) * np.sqrt(ann_factor) if reference_std > 0 else 0.0
     result[f"{prefix}_sharpe_ratio"] = {"risk": reference_sharpe}
     result[f"{prefix}_information_ratio"] = {"risk": reference_sharpe}
-    result[f"{prefix}_max_drawdown"] = {"risk": _compute_max_drawdown(reference_returns)}
+    result[f"{prefix}_max_drawdown"] = {"risk": reference_stats["max_drawdown"]}
     result[f"{prefix}_excess_annualized_return"] = {"risk": excess_mean * ann_factor}
     result[f"{prefix}_excess_information_ratio"] = {
         "risk": (excess_mean / excess_std) * np.sqrt(ann_factor) if excess_std > 0 else 0.0
     }
 
-    monthly_reference = _resample_compound_returns(reference_returns, "ME")
+    if monthly_reference is None:
+        monthly_reference = _resample_compound_returns(reference_returns, "ME")
     monthly_reference_positive_count = int((monthly_reference > 0).sum()) if not monthly_reference.empty else 0
     monthly_reference_total_count = int(len(monthly_reference))
     result[f"{prefix}_monthly_win_rate"] = {
@@ -177,7 +255,8 @@ def _attach_reference_metrics(
     result[f"months_beating_{prefix}_summary"] = _format_count_ratio(monthly_beats, monthly_total)
 
     if rebalance_freq > 0:
-        reference_rebalance = _compute_chunked_period_returns(reference_returns, rebalance_freq)
+        if reference_rebalance is None:
+            reference_rebalance = _compute_chunked_period_returns(reference_returns, rebalance_freq)
         rebalance_reference_positive_count = int((reference_rebalance > 0).sum()) if not reference_rebalance.empty else 0
         rebalance_reference_total_count = int(len(reference_rebalance))
         result[f"{prefix}_rebalance_win_rate"] = {
@@ -193,7 +272,8 @@ def _attach_reference_metrics(
             rebalance_reference_positive_count,
             rebalance_reference_total_count,
         )
-        strategy_rebalance = _compute_chunked_period_returns(strategy_returns, rebalance_freq)
+        if strategy_rebalance is None:
+            strategy_rebalance = _compute_chunked_period_returns(strategy_returns, rebalance_freq)
         aligned_rebalance_strategy, aligned_rebalance_reference = strategy_rebalance.align(
             reference_rebalance,
             join="inner",
@@ -460,15 +540,15 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         report["gross_return"] = report["return"].astype(float)
         report["return"] = report["gross_return"] - report["cost"].astype(float)
 
+    benchmark_name = str(report.attrs.get("benchmark_name") or "").strip()
     returns = report["return"].astype(float)
     valid_returns = returns.dropna()
     ann_factor = 242  # A-share average trading days per year
-    
+
     # Calculate native metrics
-    mean_ret = valid_returns.mean() if not valid_returns.empty else 0.0
-    std_ret = valid_returns.std() if not valid_returns.empty else 0.0
-    if pd.isna(std_ret):
-        std_ret = 0.0
+    return_stats = _compute_return_stats(valid_returns)
+    mean_ret = float(return_stats["mean"])
+    std_ret = float(return_stats["std"])
     ann_ret = mean_ret * ann_factor
     ann_vol = std_ret * np.sqrt(ann_factor)
     
@@ -476,14 +556,9 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     # because historical experiment summaries already use that field name.
     sharpe_ratio = (mean_ret / std_ret) * np.sqrt(ann_factor) if std_ret > 0 else 0.0
     
-    # Max Drawdown
-    cum_returns = (1 + returns).cumprod()
-    max_drawdown = ((cum_returns / cum_returns.cummax()) - 1.0).min() if not cum_returns.empty else 0.0
-    
-    benchmark_name = str(report.attrs.get("benchmark_name") or "").strip()
+    max_drawdown = float(return_stats["max_drawdown"])
 
     # Mimic Qlib's risk_analysis return structure
-    distribution_metrics = _compute_return_distribution_metrics(valid_returns)
     result = {
         "mean": {"risk": mean_ret},
         "std": {"risk": std_ret},
@@ -492,41 +567,44 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         "sharpe_ratio": {"risk": sharpe_ratio},
         "information_ratio": {"risk": sharpe_ratio},
         "max_drawdown": {"risk": max_drawdown},
-        "daily_win_rate": {"risk": float((valid_returns > 0).mean()) if not valid_returns.empty else 0.0},
-        "avg_win": {"risk": distribution_metrics["avg_win"]},
-        "avg_loss": {"risk": distribution_metrics["avg_loss"]},
-        "payoff_ratio": {"risk": distribution_metrics["payoff_ratio"]},
-        "profit_factor": {"risk": distribution_metrics["profit_factor"]},
+        "daily_win_rate": {"risk": float(return_stats["win_rate"])},
+        "avg_win": {"risk": return_stats["avg_win"]},
+        "avg_loss": {"risk": return_stats["avg_loss"]},
+        "payoff_ratio": {"risk": return_stats["payoff_ratio"]},
+        "profit_factor": {"risk": return_stats["profit_factor"]},
     }
     if "bench" in report.columns:
         bench_returns = report["bench"].astype(float).dropna()
         if not bench_returns.empty:
-            bench_mean = float(bench_returns.mean())
-            bench_std = float(bench_returns.std()) if len(bench_returns) > 1 else 0.0
-            if pd.isna(bench_std):
-                bench_std = 0.0
+            bench_stats = _compute_return_stats(bench_returns)
+            bench_mean = float(bench_stats["mean"])
+            bench_std = float(bench_stats["std"])
             bench_ann_ret = bench_mean * ann_factor
             bench_ann_vol = bench_std * np.sqrt(ann_factor)
-            bench_max_drawdown = _compute_max_drawdown(bench_returns)
             aligned_strategy, aligned_bench = valid_returns.align(bench_returns, join="inner")
             excess_returns = aligned_strategy - aligned_bench
-            excess_mean = float(excess_returns.mean()) if not excess_returns.empty else 0.0
-            excess_std = float(excess_returns.std()) if len(excess_returns) > 1 else 0.0
-            if pd.isna(excess_std):
-                excess_std = 0.0
+            excess_stats = _compute_return_stats(excess_returns)
+            excess_mean = float(excess_stats["mean"])
+            excess_std = float(excess_stats["std"])
             excess_info_ratio = (
                 (excess_mean / excess_std) * np.sqrt(ann_factor) if excess_std > 0 else 0.0
             )
             result["benchmark_name"] = benchmark_name or "Benchmark"
             result["benchmark_annualized_return"] = {"risk": bench_ann_ret}
             result["benchmark_annualized_volatility"] = {"risk": bench_ann_vol}
-            result["benchmark_max_drawdown"] = {"risk": bench_max_drawdown}
+            result["benchmark_max_drawdown"] = {"risk": bench_stats["max_drawdown"]}
             result["excess_annualized_return"] = {"risk": excess_mean * ann_factor}
             result["excess_information_ratio"] = {"risk": excess_info_ratio}
     
     # Add monthly returns calculation
     report.index = pd.to_datetime(report.index)
-    monthly_ret = _resample_compound_returns(report["return"], "ME")
+    return_columns = _report_return_columns(report)
+    monthly_return_frame = _monthly_return_frame(report, return_columns)
+    monthly_ret = (
+        monthly_return_frame["return"]
+        if "return" in monthly_return_frame.columns
+        else _resample_compound_returns(report["return"], "ME")
+    )
     result["monthly_return"] = monthly_ret.to_dict()
     monthly_positive_count = int((monthly_ret > 0).sum()) if not monthly_ret.empty else 0
     monthly_total_count = int(len(monthly_ret))
@@ -542,8 +620,14 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
     result["top_1_positive_month_share"] = {"risk": monthly_concentration["top_1_positive_share"]}
     result["top_3_positive_month_share"] = {"risk": monthly_concentration["top_3_positive_share"]}
     result["top_5_positive_month_share"] = {"risk": monthly_concentration["top_5_positive_share"]}
+    rebalance_return_frame = None
     if rebalance_freq > 0:
-        rebalance_ret = _compute_chunked_period_returns(report["return"], rebalance_freq)
+        rebalance_return_frame = _rebalance_return_frame(report, return_columns, rebalance_freq)
+        rebalance_ret = (
+            rebalance_return_frame["return"]
+            if "return" in rebalance_return_frame.columns
+            else _compute_chunked_period_returns(report["return"], rebalance_freq)
+        )
         result["rebalance_return"] = rebalance_ret.to_dict()
         rebalance_positive_count = int((rebalance_ret > 0).sum()) if not rebalance_ret.empty else 0
         rebalance_total_count = int(len(rebalance_ret))
@@ -564,16 +648,26 @@ def compute_portfolio_metrics(portfolio_metric) -> dict:
         result["top_3_positive_rebalance_share"] = {"risk": rebalance_concentration["top_3_positive_share"]}
         result["top_5_positive_rebalance_share"] = {"risk": rebalance_concentration["top_5_positive_share"]}
     for prefix, default_name in ALL_REFERENCE_BASELINE_SPECS:
+        reference_column = f"{prefix}_return"
         _attach_reference_metrics(
             result,
             report,
-            reference_column=f"{prefix}_return",
+            reference_column=reference_column,
             prefix=prefix,
             display_name=str(report.attrs.get(f"{prefix}_name") or default_name).strip() or default_name,
             strategy_returns=returns,
             ann_factor=ann_factor,
             monthly_ret=monthly_ret,
             rebalance_freq=rebalance_freq,
+            monthly_reference=monthly_return_frame[reference_column]
+            if reference_column in monthly_return_frame.columns
+            else None,
+            strategy_rebalance=rebalance_return_frame["return"]
+            if rebalance_return_frame is not None and "return" in rebalance_return_frame.columns
+            else None,
+            reference_rebalance=rebalance_return_frame[reference_column]
+            if rebalance_return_frame is not None and reference_column in rebalance_return_frame.columns
+            else None,
         )
     if "turnover" in report.columns:
         result["turnover_mean"] = {"risk": float(report["turnover"].astype(float).mean())}
@@ -702,10 +796,19 @@ def plot_drawdown(report: pd.DataFrame, save_path: str = None):
 
 def save_monthly_report(report: pd.DataFrame, save_path: str = None):
     """Save monthly returns to a CSV file."""
-    monthly_ret = _resample_compound_returns(report["return"], "ME")
+    return_columns = _report_return_columns(report)
+    monthly_return_frame = _monthly_return_frame(report, return_columns)
+    if "return" in monthly_return_frame.columns:
+        monthly_ret = monthly_return_frame["return"]
+    else:
+        monthly_ret = _resample_compound_returns(report["return"], "ME")
     df_monthly = monthly_ret.to_frame(name="monthly_return")
     if "bench" in report.columns:
-        benchmark_monthly = _resample_compound_returns(report["bench"], "ME")
+        benchmark_monthly = (
+            monthly_return_frame["bench"]
+            if "bench" in monthly_return_frame.columns
+            else _resample_compound_returns(report["bench"], "ME")
+        )
         df_monthly["benchmark_monthly_return"] = benchmark_monthly.reindex(df_monthly.index)
         df_monthly["monthly_excess_vs_benchmark"] = (
             df_monthly["monthly_return"] - df_monthly["benchmark_monthly_return"]
@@ -714,7 +817,11 @@ def save_monthly_report(report: pd.DataFrame, save_path: str = None):
         return_column = f"{prefix}_return"
         if return_column not in report.columns:
             continue
-        baseline_monthly = _resample_compound_returns(report[return_column], "ME")
+        baseline_monthly = (
+            monthly_return_frame[return_column]
+            if return_column in monthly_return_frame.columns
+            else _resample_compound_returns(report[return_column], "ME")
+        )
         monthly_column = f"{prefix}_monthly_return"
         df_monthly[monthly_column] = baseline_monthly.reindex(df_monthly.index)
         df_monthly[f"monthly_excess_vs_{prefix}"] = (
@@ -766,9 +873,10 @@ def _build_reference_period_metrics(period_frame: pd.DataFrame, period_return: f
 
 def build_period_summary(report: pd.DataFrame, freq: str = "ME") -> pd.DataFrame:
     """Aggregate daily backtest report into period-level summary rows."""
-    period_rows: list[dict[str, float | int | str]] = []
     period_report = report.copy()
     period_report.index = pd.to_datetime(period_report.index)
+
+    period_rows: list[dict[str, float | int | str]] = []
 
     for _, period_frame in period_report.groupby(pd.Grouper(freq=freq)):
         if period_frame.empty:
@@ -819,6 +927,7 @@ def build_rebalance_period_summary(report: pd.DataFrame, rebalance_freq: int) ->
     rebalance_freq = max(int(rebalance_freq), 1)
     period_report = report.copy()
     period_report.index = pd.to_datetime(period_report.index)
+
     period_rows: list[dict[str, float | int | str]] = []
 
     for idx, start in enumerate(range(0, len(period_report), rebalance_freq), start=1):

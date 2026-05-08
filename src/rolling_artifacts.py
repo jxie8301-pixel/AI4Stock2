@@ -60,12 +60,15 @@ def _frame_to_series(frame: pd.DataFrame, value_column: str) -> pd.Series:
     missing = required.difference(frame.columns)
     if missing:
         raise ValueError(f"Prediction artifact is missing columns: {', '.join(sorted(missing))}")
+    dates = pd.to_datetime(frame["datetime"], errors="coerce")
+    instruments = frame["instrument"].astype(str)
+    values = pd.to_numeric(frame[value_column], errors="coerce").to_numpy()
     return pd.Series(
-        pd.to_numeric(frame[value_column], errors="coerce").to_numpy(),
+        values,
         index=pd.MultiIndex.from_arrays(
             [
-                pd.to_datetime(frame["datetime"]),
-                frame["instrument"].astype(str),
+                dates,
+                instruments,
             ],
             names=["datetime", "instrument"],
         ),

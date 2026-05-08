@@ -22,7 +22,7 @@ from src.label_utils import (
     resolve_opportunity_label_cfg,
     resolve_signal_horizon,
 )
-from src.native_backtest import run_native_backtest
+from src.native_backtest import run_native_backtest, run_native_backtest_batch
 from src.opportunity_diagnostics import save_opportunity_diagnostics
 from src.reference_baselines import REFERENCE_BASELINE_SPECS
 from src.rolling_baselines import (
@@ -463,10 +463,26 @@ def evaluate_prediction_bundle(
             )
         else:
             backtest_kwargs["instrument_groups"] = instrument_groups
-    backtest_report = run_native_backtest(
-        preds=bundle.final_predictions,
+    baseline_prediction_series = [
+        avg_factor_baseline_predictions,
+        sign_aligned_factor_baseline_predictions,
+        rank_avg_factor_baseline_predictions,
+        rank_ic_weighted_factor_baseline_predictions,
+    ]
+    baseline_prediction_items = [
+        (prefix, display_name, predictions)
+        for (prefix, display_name), predictions in zip(
+            REFERENCE_BASELINE_SPECS,
+            baseline_prediction_series,
+            strict=True,
+        )
+        if predictions is not None
+    ]
+    strategy_and_same_gate_reports = run_native_backtest_batch(
+        [bundle.final_predictions, *[predictions for _, _, predictions in baseline_prediction_items]],
         **backtest_kwargs,
     )
+    backtest_report = strategy_and_same_gate_reports[0]
     trace_dates: set[pd.Timestamp] = set()
     if not artifact_options["skip_backtest_trace"]:
         trace_top_n = max(int(cfg.get("artifacts", {}).get("backtest_trace_top_n", 8) or 8), 0)
@@ -484,24 +500,14 @@ def evaluate_prediction_bundle(
                     trace_dates.update(
                         pd.to_datetime(exit_rows["intraperiod_exit_missed_return"].abs().nlargest(exit_focus_n).index).tolist()
                     )
-    baseline_prediction_series = [
-        avg_factor_baseline_predictions,
-        sign_aligned_factor_baseline_predictions,
-        rank_avg_factor_baseline_predictions,
-        rank_ic_weighted_factor_baseline_predictions,
-    ]
-    baseline_predictions = [
-        (prefix, display_name, predictions)
-        for (prefix, display_name), predictions in zip(
-            REFERENCE_BASELINE_SPECS,
-            baseline_prediction_series,
+    same_gate_baseline_reports = {
+        prefix: (display_name, report)
+        for (prefix, display_name, _), report in zip(
+            baseline_prediction_items,
+            strategy_and_same_gate_reports[1:],
             strict=True,
         )
-    ]
-    same_gate_baseline_reports = _run_baseline_backtests(
-        baseline_predictions,
-        backtest_kwargs=backtest_kwargs,
-    )
+    }
     fixed_risk_backtest_kwargs = {
         **backtest_kwargs,
         "risk_control": None,
@@ -513,13 +519,22 @@ def evaluate_prediction_bundle(
     ):
         fixed_risk_baseline_reports = _reuse_same_gate_reports_as_fixed_risk(same_gate_baseline_reports)
     else:
-        fixed_risk_baseline_reports = _run_baseline_backtests(
-            [
-                (f"fixed_risk_{prefix}", f"Fixed-Risk {display_name}", predictions)
-                for prefix, display_name, predictions in baseline_predictions
-            ],
-            backtest_kwargs=fixed_risk_backtest_kwargs,
+        fixed_risk_baseline_items = [
+            (f"fixed_risk_{prefix}", f"Fixed-Risk {display_name}", predictions)
+            for prefix, display_name, predictions in baseline_prediction_items
+        ]
+        fixed_risk_reports = run_native_backtest_batch(
+            [predictions for _, _, predictions in fixed_risk_baseline_items],
+            **fixed_risk_backtest_kwargs,
         )
+        fixed_risk_baseline_reports = {
+            prefix: (display_name, report)
+            for (prefix, display_name, _), report in zip(
+                fixed_risk_baseline_items,
+                fixed_risk_reports,
+                strict=True,
+            )
+        }
     plot_report = to_legacy_return_report(backtest_report)
     plot_report["bench"] = align_benchmark_to_report_index(
         bench_series,

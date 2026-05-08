@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_float_dtype, is_numeric_dtype
 
 
 DEFAULT_WEIGHTING = "equal"
@@ -77,7 +78,12 @@ def transform_score_matrix(
     zscore_clip: float,
 ) -> pd.DataFrame:
     mode = normalize_score_transform(score_transform)
-    matrix = score_matrix.apply(pd.to_numeric, errors="coerce").astype(float)
+    if all(is_float_dtype(dtype) for dtype in score_matrix.dtypes):
+        matrix = score_matrix
+    elif all(is_numeric_dtype(dtype) for dtype in score_matrix.dtypes):
+        matrix = score_matrix.astype(float)
+    else:
+        matrix = score_matrix.apply(pd.to_numeric, errors="coerce").astype(float)
     if matrix.empty or mode == "none":
         return matrix
     if mode == "rank_pct":
@@ -261,7 +267,10 @@ def select_topk_dropout_trades(
     keep_top_n: int | None = None,
     min_score: float | None = None,
 ) -> tuple[list[str], list[str]]:
-    ranked_scores = pd.to_numeric(transformed_scores, errors="coerce").dropna().sort_values(ascending=False)
+    ranked_scores = pd.to_numeric(transformed_scores, errors="coerce").dropna().sort_values(
+        ascending=False,
+        kind="stable",
+    )
     min_score_value = normalize_min_score(min_score)
     eligible_scores = ranked_scores if min_score_value is None else ranked_scores[ranked_scores > min_score_value]
     locked_set = set() if locked_holdings is None else set(locked_holdings)
@@ -272,7 +281,11 @@ def select_topk_dropout_trades(
         return [stock for stock in current_holdings if stock not in locked_set], []
 
     current_index = pd.Index(current_holdings, dtype=object)
-    ranked_current = ranked_scores.reindex(current_index).sort_values(ascending=False, na_position="last").index
+    ranked_current = ranked_scores.reindex(current_index).sort_values(
+        ascending=False,
+        na_position="last",
+        kind="stable",
+    ).index
     keep_top_n_value = normalize_keep_top_n(keep_top_n, topk)
     eligible_ranks = {stock: rank for rank, stock in enumerate(eligible_scores.index.tolist(), start=1)}
     forced_sell = [stock for stock in current_holdings if stock not in locked_set and stock not in eligible_ranks]
@@ -301,7 +314,11 @@ def select_topk_dropout_trades(
     candidate_count = len(forced_sell) + n_drop + max(topk - len(ranked_current), 0)
     today = eligible_scores[~eligible_scores.index.isin(ranked_current)].index[:candidate_count]
 
-    comb = eligible_scores.reindex(ranked_current.union(today)).sort_values(ascending=False, na_position="last").index
+    comb = eligible_scores.reindex(ranked_current.union(today)).sort_values(
+        ascending=False,
+        na_position="last",
+        kind="stable",
+    ).index
     sellable_comb = pd.Index(
         [stock for stock in comb if stock not in locked_set and stock not in forced_sell and stock not in buffer_protected],
         dtype=object,

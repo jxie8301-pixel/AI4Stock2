@@ -16,13 +16,13 @@ def _select_topk_dropout_trades_reference(
     n_drop: int,
     locked_holdings: set[str] | None = None,
 ) -> tuple[list[str], list[str]]:
-    ranked_scores = scores.dropna().sort_values(ascending=False)
+    ranked_scores = scores.dropna().sort_values(ascending=False, kind="stable")
     if ranked_scores.empty:
         return [], []
 
     current_ranked = (
         ranked_scores.reindex(pd.Index(current_holdings, dtype=object))
-        .sort_values(ascending=False, na_position="last")
+        .sort_values(ascending=False, na_position="last", kind="stable")
         .index.tolist()
     )
     locked_set = set() if locked_holdings is None else set(locked_holdings)
@@ -35,7 +35,7 @@ def _select_topk_dropout_trades_reference(
 
     comb = (
         ranked_scores.reindex(pd.Index(current_ranked).union(pd.Index(today)))
-        .sort_values(ascending=False, na_position="last")
+        .sort_values(ascending=False, na_position="last", kind="stable")
         .index.tolist()
     )
     sellable_comb = [stock for stock in comb if stock not in locked_set]
@@ -210,7 +210,7 @@ def _select_trades_with_overrides_reference(
     zscore_clip: float = 3.0,
 ) -> tuple[list[str], list[str]]:
     raw_scores = _transform_scores_reference(scores, score_transform=score_transform, zscore_clip=zscore_clip)
-    ranked_scores = raw_scores.dropna().sort_values(ascending=False)
+    ranked_scores = raw_scores.dropna().sort_values(ascending=False, kind="stable")
     min_score_value = _normalize_min_score_reference(min_score)
     eligible_scores = ranked_scores if min_score_value is None else ranked_scores[ranked_scores > min_score_value]
     locked_set = set() if locked_holdings is None else set(locked_holdings)
@@ -221,7 +221,11 @@ def _select_trades_with_overrides_reference(
         return [stock for stock in current_holdings if stock not in locked_set], []
 
     current_index = pd.Index(current_holdings, dtype=object)
-    ranked_current = ranked_scores.reindex(current_index).sort_values(ascending=False, na_position="last").index.tolist()
+    ranked_current = ranked_scores.reindex(current_index).sort_values(
+        ascending=False,
+        na_position="last",
+        kind="stable",
+    ).index.tolist()
     keep_top_n_value = _normalize_keep_top_n_reference(keep_top_n, topk)
     eligible_ranks = {stock: rank for rank, stock in enumerate(eligible_scores.index.tolist(), start=1)}
     forced_sell = [
@@ -244,7 +248,7 @@ def _select_trades_with_overrides_reference(
     today = [stock for stock in eligible_scores.index.tolist() if stock not in ranked_current][:candidate_count]
     comb = (
         eligible_scores.reindex(pd.Index(ranked_current).union(pd.Index(today)))
-        .sort_values(ascending=False, na_position="last")
+        .sort_values(ascending=False, na_position="last", kind="stable")
         .index.tolist()
     )
     sellable_comb = [
@@ -379,7 +383,7 @@ def run_reference_backtest(
                 sell_value += trade_value
                 sell_count += 1
 
-            for stock in target_values.sort_values(ascending=False).index:
+            for stock in target_values.sort_values(ascending=False, kind="stable").index:
                 target_value = float(target_values.get(stock, 0.0))
                 current_value = float(holdings.get(stock, 0.0))
                 deficit_value = target_value - current_value

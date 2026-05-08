@@ -427,6 +427,10 @@ Completed optimization slices:
   - `ai4stock-diagnostics write-profile` now owns selected-feature YAML and README/profile artifact writing
   - `ai4stock-diagnostics build-prefilter-profile` and `build-robust-profile` now compose the full diagnostics-summary -> correlation-prune -> profile-artifact pipeline in one Rust command
   - `run_build_prefiltered_profile.py` and `run_build_robust_factor_profile.py` are compatibility wrappers for config loading and safety checks; pandas summary/correlation fallback paths are removed
+- [x] Move LGBM artifact-rebuild batch runtime to Rust:
+  - `ai4stock-backtest artifact-batch` owns selected-matrix row filtering, preflight checks, marker handling, failure TSVs, summary TSV/JSON, grouped post-bundle execution, and parallelism
+  - `run_lgbm_backtest_artifacts.py` is now only a compatibility wrapper that builds and delegates the Rust `artifact-batch` command
+  - Python `direct` and Python `subprocess` artifact-rebuild execution modes are removed from the wrapper; post-bundle work should go through Rust unless explicitly using an older local shell fallback
 
 Feature build v2 direction:
 

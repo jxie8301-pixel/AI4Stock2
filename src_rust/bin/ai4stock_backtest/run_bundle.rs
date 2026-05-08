@@ -1314,15 +1314,9 @@ fn build_benchmark_schedule_for_prepared(
     risk: &RiskControlConfig,
 ) -> Result<Vec<f64>, String> {
     if ctx.benchmark_returns.is_empty() {
-        let returns = cross_section_label_returns(&prepared.labels, prepared.dates_ns.len());
-        return build_benchmark_ma_schedule(
-            &returns,
-            risk.fast_window,
-            risk.slow_window,
-            risk.bull_risk,
-            risk.neutral_risk,
-            risk.bear_risk,
-            risk.risk_degree,
+        return Err(
+            "risk_control benchmark_ma modes require an external point-in-time benchmark series; refusing to derive risk signals from realized backtest labels"
+                .to_owned(),
         );
     }
     let dates = ctx
@@ -1350,26 +1344,6 @@ fn build_benchmark_schedule_for_prepared(
         .iter()
         .map(|date_ns| by_date.get(date_ns).copied().unwrap_or(risk.risk_degree))
         .collect())
-}
-
-fn cross_section_label_returns(labels: &[f64], n_dates: usize) -> Vec<f64> {
-    if n_dates == 0 {
-        return Vec::new();
-    }
-    let n_cols = labels.len() / n_dates;
-    let mut out = Vec::with_capacity(n_dates);
-    for row in 0..n_dates {
-        let mut sum = 0.0;
-        let mut count = 0usize;
-        for value in &labels[row * n_cols..(row + 1) * n_cols] {
-            if value.is_finite() {
-                sum += *value;
-                count += 1;
-            }
-        }
-        out.push(if count == 0 { 0.0 } else { sum / count as f64 });
-    }
-    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3849,5 +3823,55 @@ mod tests {
         assert!(projected.values[1].is_nan());
         assert_eq!(projected.values[2], 0.3);
         assert_eq!(projected.values[3], 0.4);
+    }
+
+    #[test]
+    fn benchmark_ma_rejects_realized_label_fallback() {
+        let prepared = PreparedInputs {
+            dates_ns: vec![10, 20],
+            scores: vec![0.1, 0.2, 0.3, 0.4],
+            labels: vec![0.01, -0.02, 0.03, 0.00],
+            skipped_all_nan_label_dates: 0,
+        };
+        let risk = RiskControlConfig {
+            mode: "benchmark_ma".to_owned(),
+            risk_degree: 0.95,
+            signal_metric: "topk_mean".to_owned(),
+            signal_source: "score_strength".to_owned(),
+            validation_metric: "valid_topk_label_mean".to_owned(),
+            secondary_validation_metric: None,
+            min_signal: 0.0,
+            max_signal: 1.0,
+            min_signal_quantile: None,
+            max_signal_quantile: None,
+            min_risk: 0.1,
+            max_risk: 0.95,
+            secondary_min_signal: 0.0,
+            secondary_max_signal: 1.0,
+            secondary_min_signal_quantile: None,
+            secondary_max_signal_quantile: None,
+            secondary_min_risk: 0.1,
+            secondary_max_risk: 0.95,
+            risk_curve: "linear".to_owned(),
+            risk_curve_power: 2.0,
+            risk_curve_center: 0.5,
+            risk_curve_steepness: 8.0,
+            fast_window: 2,
+            slow_window: 3,
+            bull_risk: 0.95,
+            neutral_risk: 0.5,
+            bear_risk: 0.1,
+        };
+        let ctx = StaticRunContext {
+            benchmark_returns: Vec::new(),
+            instrument_group_ids: Vec::new(),
+            price_confirm: Vec::new(),
+            risk_control: risk.clone(),
+            training_summary_records: Vec::new(),
+        };
+
+        let error = build_benchmark_schedule_for_prepared(&prepared, &ctx, &risk).unwrap_err();
+
+        assert!(error.contains("external point-in-time benchmark"));
     }
 }

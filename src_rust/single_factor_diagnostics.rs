@@ -790,15 +790,7 @@ fn apply_diagnostic_label_space(
             Ok(())
         }
         DiagnosticLabelSpace::BenchmarkExcess => {
-            let benchmark_returns = build_benchmark_returns(rows, benchmark)?;
-            if benchmark_returns.is_empty() {
-                return Err(
-                    "benchmark_excess diagnostics produced an empty benchmark return series"
-                        .to_owned(),
-                );
-            }
-            let forward_returns =
-                build_forward_compound_return_map(&benchmark_returns, signal_horizon);
+            let forward_returns = build_benchmark_forward_returns(rows, benchmark, signal_horizon)?;
             for row in rows.iter_mut() {
                 let Some(benchmark_return) = forward_returns.get(&row.date_ns) else {
                     row.label = f64::NAN;
@@ -815,23 +807,37 @@ fn apply_diagnostic_label_space(
     }
 }
 
-fn build_benchmark_returns(
+fn build_benchmark_forward_returns(
     rows: &[DiagnosticRow],
     benchmark: &BenchmarkOptions,
-) -> Result<Vec<(i64, f64)>, String> {
+    signal_horizon: usize,
+) -> Result<BTreeMap<i64, f64>, String> {
     match benchmark.mode {
-        BenchmarkMode::CrossSectionMean => build_cross_section_benchmark_returns(rows),
-        BenchmarkMode::File => load_file_benchmark_returns(benchmark),
+        BenchmarkMode::CrossSectionMean => build_cross_section_benchmark_forward_returns(rows),
+        BenchmarkMode::File => {
+            let daily_returns = load_file_benchmark_returns(benchmark)?;
+            if daily_returns.is_empty() {
+                return Err(
+                    "benchmark_excess diagnostics produced an empty benchmark return series"
+                        .to_owned(),
+                );
+            }
+            Ok(build_forward_compound_return_map(
+                &daily_returns,
+                signal_horizon,
+            ))
+        }
     }
 }
 
-fn build_cross_section_benchmark_returns(
+fn build_cross_section_benchmark_forward_returns(
     rows: &[DiagnosticRow],
-) -> Result<Vec<(i64, f64)>, String> {
-    cross_section_mean_returns(
+) -> Result<BTreeMap<i64, f64>, String> {
+    let returns = cross_section_mean_returns(
         rows.iter().map(|row| (row.date_ns, row.label)),
         "benchmark_excess cross_section_mean benchmark had no finite labels",
-    )
+    )?;
+    Ok(returns.into_iter().collect())
 }
 
 fn load_file_benchmark_returns(benchmark: &BenchmarkOptions) -> Result<Vec<(i64, f64)>, String> {
@@ -2719,7 +2725,7 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_excess_uses_forward_compound_returns() {
+    fn benchmark_excess_cross_section_mean_uses_same_horizon_labels() {
         let mut context = test_context();
         apply_diagnostic_label_space(
             &mut context.rows,
@@ -2735,14 +2741,26 @@ mod tests {
             .iter()
             .find(|row| row.date_ns == first_date && row.symbol == "A")
             .unwrap();
-        let expected_forward = (1.0_f64 + 0.005).powi(2) - 1.0;
+        let expected_forward = 0.005;
         assert!((first_a.label - (0.04 - expected_forward - 0.001)).abs() < 1e-12);
         let late_date = parse_date_ns("2024-01-04").unwrap();
         assert!(context
             .rows
             .iter()
             .filter(|row| row.date_ns >= late_date)
-            .all(|row| !row.label.is_finite()));
+            .all(|row| row.label.is_finite()));
+    }
+
+    #[test]
+    fn benchmark_file_returns_are_forward_compounded() {
+        let returns = vec![
+            (parse_date_ns("2024-01-02").unwrap(), 0.01),
+            (parse_date_ns("2024-01-03").unwrap(), 0.02),
+            (parse_date_ns("2024-01-04").unwrap(), -0.01),
+        ];
+        let out = build_forward_compound_return_map(&returns, 2);
+        let first = parse_date_ns("2024-01-02").unwrap();
+        assert!((out[&first] - ((1.0_f64 + 0.02) * (1.0 - 0.01) - 1.0)).abs() < 1e-12);
     }
 
     #[test]

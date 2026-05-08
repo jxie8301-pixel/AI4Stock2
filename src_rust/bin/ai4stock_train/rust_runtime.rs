@@ -1271,28 +1271,12 @@ fn build_benchmark_forward_returns(
     resolved: &ResolvedRuntimeConfig,
     rows: &[FactorRow],
 ) -> Result<BTreeMap<i64, f64>, String> {
-    let benchmark_returns = build_benchmark_returns(resolved, rows)?;
-    if benchmark_returns.is_empty() {
-        return Err(
-            "benchmark_excess opportunity mode produced an empty benchmark series".to_owned(),
-        );
-    }
-    Ok(build_forward_compound_return_map(
-        &benchmark_returns,
-        resolved.signal_horizon,
-    ))
-}
-
-fn build_benchmark_returns(
-    resolved: &ResolvedRuntimeConfig,
-    rows: &[FactorRow],
-) -> Result<Vec<(i64, f64)>, String> {
     let mode = yaml_path_string(&resolved.cfg, &["backtest", "benchmark", "mode"])
         .unwrap_or_else(|| "cross_section_mean".to_owned())
         .trim()
         .to_ascii_lowercase();
     if mode == "cross_section_mean" || mode.is_empty() {
-        return build_cross_section_benchmark_returns(rows);
+        return build_cross_section_benchmark_forward_returns(rows);
     }
     if mode != "file" {
         return Err(format!(
@@ -1313,14 +1297,27 @@ fn build_benchmark_returns(
         .unwrap_or_else(|| "close".to_owned())
         .trim()
         .to_ascii_lowercase();
-    load_file_benchmark_returns(&path, &date_column, &value_column, &value_type)
+    let daily_returns =
+        load_file_benchmark_returns(&path, &date_column, &value_column, &value_type)?;
+    if daily_returns.is_empty() {
+        return Err(
+            "benchmark_excess opportunity mode produced an empty benchmark series".to_owned(),
+        );
+    }
+    Ok(build_forward_compound_return_map(
+        &daily_returns,
+        resolved.signal_horizon,
+    ))
 }
 
-fn build_cross_section_benchmark_returns(rows: &[FactorRow]) -> Result<Vec<(i64, f64)>, String> {
-    cross_section_mean_returns(
+fn build_cross_section_benchmark_forward_returns(
+    rows: &[FactorRow],
+) -> Result<BTreeMap<i64, f64>, String> {
+    let returns = cross_section_mean_returns(
         rows.iter().map(|row| (row.date_ns, row.label)),
         "cross_section_mean benchmark had no finite labels",
-    )
+    )?;
+    Ok(returns.into_iter().collect())
 }
 
 fn build_forward_compound_return_map(
@@ -3552,6 +3549,45 @@ mod tests {
         )
         .unwrap();
         assert_eq!(transformed, vec![0.5, 0.0, -0.5]);
+    }
+
+    #[test]
+    fn benchmark_excess_cross_section_mean_uses_same_horizon_labels() {
+        let rows = vec![
+            FactorRow {
+                date_ns: 1,
+                symbol: "a".into(),
+                label: 0.10,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 1,
+                symbol: "b".into(),
+                label: -0.02,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 2,
+                symbol: "a".into(),
+                label: 0.04,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 2,
+                symbol: "b".into(),
+                label: 0.00,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+        ];
+
+        let benchmark = build_cross_section_benchmark_forward_returns(&rows).unwrap();
+
+        assert!((benchmark[&1] - 0.04).abs() < 1e-12);
+        assert!((benchmark[&2] - 0.02).abs() < 1e-12);
     }
 
     #[test]

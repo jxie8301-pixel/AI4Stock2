@@ -307,8 +307,8 @@ Current status:
 
 Audit status on 2026-04-30:
 
-- The active performance-critical LightGBM path is now `run_native_rolling.py` -> resolved `config_snapshot.yaml` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays` -> `ai4stock-backtest run-bundle`.
-  `run_native_rolling.py` is a compatibility wrapper and should not regain factor-store loading, rolling-window construction, or backtest evaluation logic.
+- The active performance-critical LightGBM path is now `ai4stock-train rolling-lgbm` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays` -> `ai4stock-backtest run-bundle`.
+  `run_native_rolling.py` is a compatibility wrapper and should not regain config/profile resolution, factor-store loading, rolling-window construction, or backtest evaluation logic.
 - The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `ai4stock-diagnostics single-factor-profile` / `ai4stock-diagnostics single-factor-batch` -> `ai4stock-diagnostics single-factor`.
   The Python entrypoints `run_single_factor_diagnostics.py` and `run_single_factor_diagnostics_batch.py` are compatibility wrappers only; config/profile resolution, selected-feature JSON, metadata, and batch summaries are owned by Rust.
 - The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
@@ -398,6 +398,8 @@ Completed optimization slices:
   - benchmark checkpoints from the migration remain: `legacy158` `0.185866s -> 0.079414s`, `lgbm_purified` `0.013656s -> 0.010247s`, `temporal` `0.040649s -> 0.032321s`, `technical` `0.127573s -> 0.011126s`, `TS_` `0.112160s -> 0.035429s`
 - [x] Move LightGBM bundle runtime ownership to Rust while keeping Python only for training:
   - `ai4stock-train make-bundle-lgbm` is a standalone Rust binary entrypoint that now resolves config/profile state, reads Parquet factor-store buckets, applies universe membership, materializes selected feature aliases, builds rolling windows, writes prepared window Parquet, and assembles final prediction-bundle artifacts
+  - `ai4stock-train rolling-lgbm` now owns the former `run_native_rolling.py` runtime orchestration: default output directory construction, config/profile/date/strategy overrides, optional prediction-bundle reuse, and post-training `ai4stock-backtest run-bundle` delegation
+  - `run_native_rolling.py` is now a thin compatibility wrapper around `ai4stock-train rolling-lgbm`; it no longer imports YAML/config/profile resolution code or builds train/backtest commands itself
   - Python bridge scope is narrowed to `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays`, which receives prepared train/valid/test arrays and calls `src.models.pure_lightgbm.NativeLGBM`
   - the bridge no longer receives the full resolved training config; Rust passes only explicit LightGBM hyperparameters plus per-window metadata required for artifact summaries
   - the bridge no longer writes per-window prediction parquet or computes validation top-k summaries; Rust now owns final prediction artifact writes and training-summary assembly after Python returns prediction vectors plus model metrics

@@ -3,6 +3,8 @@ use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+#[path = "ai4stock_train/rolling_lgbm.rs"]
+mod rolling_lgbm;
 #[path = "ai4stock_train/rust_runtime.rs"]
 mod rust_runtime;
 
@@ -12,6 +14,7 @@ ai4stock-train: LightGBM training-artifact builder for AI4Stock2
 
 Usage:
   ai4stock-train make-bundle-lgbm --output-dir <PATH> [options]
+  ai4stock-train rolling-lgbm [options]
 
 Options:
   --config <PATH>             Config file path. Default: configs/config.yaml.
@@ -43,6 +46,16 @@ Options:
   --load-models               Load existing rolling model pickles when present.
   --include-reference-baselines
                               Also write factor reference-baseline predictions. Default: skipped.
+  --load-predictions-dir <PATH>
+                              rolling-lgbm only: reuse an existing prediction bundle and run backtest.
+  --run-tag <TEXT>            rolling-lgbm only: default output-directory tag.
+  --store-dir <PATH>          rolling-lgbm only: default output root. Default: results/experiments.
+  --backtest-artifact-level <full|reports|metrics>
+                              rolling-lgbm only: reduce plot artifacts for reports/metrics.
+  --skip-reference-baselines  rolling-lgbm only: skip factor baseline reconstruction in backtest.
+  --skip-backtest-plots       rolling-lgbm only: skip Rust SVG plot artifacts.
+  --baseline-jobs <N>         rolling-lgbm only: parallel baseline workers for backtest.
+  --dry-run                   rolling-lgbm only: print delegated stages without running.
   --json                      Print machine-readable JSON summary.
   -h, --help                  Show this help.
 "
@@ -102,6 +115,7 @@ fn run(args: &[String]) -> Result<(), String> {
     match command.as_str() {
         "-h" | "--help" => Err(usage().to_owned()),
         "make-bundle-lgbm" => run_make_bundle_lgbm(&args[1..]),
+        "rolling-lgbm" => rolling_lgbm::run_rolling_lgbm(&args[1..]),
         other => Err(format!("unknown command: {other}\n\n{}", usage())),
     }
 }

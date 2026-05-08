@@ -814,6 +814,18 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
     Ok(summary)
 }
 
+pub(crate) fn write_resolved_config_snapshot(
+    options: &LgbmBundleOptions,
+    path: &Path,
+) -> Result<(), String> {
+    let resolved = resolve_runtime_config(options)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    write_config_snapshot(path, &resolved.cfg)
+}
+
 fn resolve_runtime_config(options: &LgbmBundleOptions) -> Result<ResolvedRuntimeConfig, String> {
     let mut cfg = load_resolved_config(options)?;
     if let Some(data_source) = &options.data_source {

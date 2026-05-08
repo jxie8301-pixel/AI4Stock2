@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from run_native_rolling import build_backtest_command, build_parser, build_train_command
+from run_native_rolling import build_delegated_command
 from src.rolling_artifacts import (
     load_prediction_bundle,
     resolve_prediction_artifact_dir,
@@ -29,9 +30,8 @@ from src.rolling_types import (
 
 
 class RunNativeRollingTest(unittest.TestCase):
-    def test_rust_wrapper_builds_training_command_without_python_runtime(self):
-        parser = build_parser()
-        args = parser.parse_args(
+    def test_rust_wrapper_delegates_rolling_runtime_to_rust(self):
+        command = build_delegated_command(
             [
                 "--config",
                 "configs/config.yaml",
@@ -49,47 +49,30 @@ class RunNativeRollingTest(unittest.TestCase):
             ]
         )
 
-        command = build_train_command(args, output_dir=Path("results/demo"))
-
         self.assertIn("ai4stock-train", " ".join(command))
-        self.assertIn("make-bundle-lgbm", command)
+        self.assertIn("rolling-lgbm", command)
         self.assertNotIn("run_native_rolling.py", command)
         self.assertIn("--experiment-profile", command)
         self.assertIn("core_v4_lgbm_default_10x20x10", command)
         self.assertIn("--save-models", command)
         self.assertIn("lgbm.num_boost_round=2", command)
 
-    def test_rust_wrapper_prefers_resolved_config_snapshot_for_training(self):
-        parser = build_parser()
-        args = parser.parse_args(
-            [
-                "--config",
-                "configs/config.yaml",
-                "--experiment-profile",
-                "core_v4_lgbm_default_10x20x10",
-                "--feature-profile",
-                "core_v4_techlite",
-                "--set",
-                "lgbm.num_boost_round=2",
-            ]
-        )
+    def test_rust_wrapper_honors_train_binary_override(self):
+        original = os.environ.get("AI4STOCK_TRAIN_BIN")
+        os.environ["AI4STOCK_TRAIN_BIN"] = "/tmp/ai4stock-train --flag"
+        try:
+            command = build_delegated_command(["--dry-run"])
+        finally:
+            if original is None:
+                os.environ.pop("AI4STOCK_TRAIN_BIN", None)
+            else:
+                os.environ["AI4STOCK_TRAIN_BIN"] = original
 
-        command = build_train_command(
-            args,
-            output_dir=Path("results/demo"),
-            config_snapshot=Path("results/demo/config_snapshot.yaml"),
-        )
+        self.assertEqual(command[:3], ["/tmp/ai4stock-train", "--flag", "rolling-lgbm"])
+        self.assertIn("--dry-run", command)
 
-        self.assertIn("--config", command)
-        self.assertIn("results/demo/config_snapshot.yaml", command)
-        self.assertIn("--config-is-snapshot", command)
-        self.assertNotIn("--experiment-profile", command)
-        self.assertNotIn("core_v4_lgbm_default_10x20x10", command)
-        self.assertNotIn("lgbm.num_boost_round=2", command)
-
-    def test_rust_wrapper_builds_backtest_command_from_bundle(self):
-        parser = build_parser()
-        args = parser.parse_args(
+    def test_rust_wrapper_forwards_load_predictions_backtest_args(self):
+        command = build_delegated_command(
             [
                 "--config",
                 "snapshot.yaml",
@@ -104,17 +87,10 @@ class RunNativeRollingTest(unittest.TestCase):
             ]
         )
 
-        command = build_backtest_command(
-            args,
-            bundle_dir=Path("run/prediction_artifacts"),
-            config_path=Path("run/config_snapshot.yaml"),
-            output_dir=Path("run"),
-        )
-
-        self.assertIn("ai4stock-backtest", " ".join(command))
-        self.assertIn("run-bundle", command)
+        self.assertIn("rolling-lgbm", command)
+        self.assertIn("--load-predictions-dir", command)
         self.assertIn("--skip-reference-baselines", command)
-        self.assertIn("--skip-backtest-plots", command)
+        self.assertIn("--backtest-artifact-level", command)
         self.assertIn("--baseline-jobs", command)
         self.assertIn("2", command)
 

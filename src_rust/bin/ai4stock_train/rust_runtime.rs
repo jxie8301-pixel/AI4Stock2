@@ -6,6 +6,7 @@ use ai4stock2_native::common::parquet::{
     date_value_ns, numeric_value, open_projected_parquet_reader,
     parse_datetime_ns as parse_date_ns, required_column,
 };
+use ai4stock2_native::common::python::prepare_python_path;
 use ai4stock2_native::common::yaml::{deep_merge_yaml, read_yaml_file};
 use ai4stock2_native::gen_feature::discover_bucket_parquet_paths;
 use arrow_array::{
@@ -19,7 +20,6 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::collections::{BTreeMap, BTreeSet};
-use std::env;
 use std::fs::{self, File};
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -1587,23 +1587,11 @@ fn call_python_train_window(
     paths: &WindowDataPaths,
     prepared_window: &PreparedPythonLgbmWindow,
 ) -> Result<PythonWindowTrainResult, String> {
-    let repo_root = env::current_dir().map_err(|error| format!("failed to read cwd: {error}"))?;
-    let conda_prefix = env::var("CONDA_PREFIX").ok();
-    let site_packages_dir = conda_prefix
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join(".pixi/envs/default"))
-        .join("lib/python3.12/site-packages");
     let feature_names = selected_feature_names.to_vec();
     let lgbm_config_json = serde_json::to_string(&resolved.lgbm_config)
         .map_err(|err| format!("failed to encode lgbm config: {err}"))?;
     Python::attach(|python| -> PyResult<PythonWindowTrainResult> {
-        let sys_module = python.import("sys")?;
-        sys_module
-            .getattr("path")?
-            .call_method1("insert", (0, repo_root.as_os_str()))?;
-        sys_module
-            .getattr("path")?
-            .call_method1("insert", (0, site_packages_dir.as_os_str()))?;
+        prepare_python_path(python)?;
         let bridge_module = python.import("src.rust_lgbm_bridge")?;
         let kwargs = PyDict::new(python);
         kwargs.set_item(

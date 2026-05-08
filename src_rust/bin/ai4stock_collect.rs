@@ -1,3 +1,4 @@
+use ai4stock2_native::common::python::prepare_python_path;
 use arrow_array::{
     Array, ArrayRef, Date32Array, Date64Array, Float32Array, Float64Array, Int32Array, Int64Array,
     LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
@@ -3608,24 +3609,6 @@ fn call_python_json(function_name: &str, kwargs: &[(&str, String)]) -> Result<Js
             format!("Python {function_name} returned invalid JSON: {err}; raw={raw}")
         })
     })
-}
-
-fn prepare_python_path(python: Python<'_>) -> PyResult<()> {
-    let repo_root = env::current_dir()
-        .map_err(|err| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(err.to_string()))?;
-    let conda_prefix = env::var("CONDA_PREFIX").ok();
-    let site_packages_dir = conda_prefix
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo_root.join(".pixi/envs/default"))
-        .join("lib/python3.12/site-packages");
-    let sys_module = python.import("sys")?;
-    sys_module
-        .getattr("path")?
-        .call_method1("insert", (0, repo_root.as_os_str()))?;
-    sys_module
-        .getattr("path")?
-        .call_method1("insert", (0, site_packages_dir.as_os_str()))?;
-    Ok(())
 }
 
 fn is_tushare_rate_limit(detail: &str) -> bool {

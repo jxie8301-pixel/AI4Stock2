@@ -1,0 +1,2 @@
+[env]
+PYO3_PYTHON = { value = ".pixi/envs/default/bin/python", relative = true }

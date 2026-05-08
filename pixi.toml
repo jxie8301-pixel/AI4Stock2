@@ -8,6 +8,7 @@ version = "0.1.0"
 [tasks]
 rust-test = "cargo test"
 rust-gen-feature-help = "cargo run --bin ai4stock-gen-feature -- --help"
+rust-train-help = "cargo run --bin ai4stock-train -- --help"
 test-feature-generation = "pytest tests/test_feature_engine_parity.py tests/test_gen_feature_store.py"
 
 [dependencies]

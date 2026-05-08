@@ -502,6 +502,13 @@ fn inspect_summary(bundle: &PredictionBundle) -> BundleInspectSummary {
 fn metadata_core_fields(metadata: &Value) -> BTreeMap<String, Value> {
     [
         "signal_horizon",
+        "label_column",
+        "signal_label_column",
+        "signal_label_horizon",
+        "backtest_label_column",
+        "portfolio_return_label_column",
+        "backtest_label_horizon",
+        "backtest_label_semantics",
         "retrain_step",
         "train_days",
         "valid_days",

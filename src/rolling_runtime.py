@@ -18,6 +18,7 @@ from src.feature_selection import (
     resolve_selected_feature_columns,
 )
 from src.label_utils import (
+    get_label_column_name,
     resolve_label_embargo_days,
     resolve_opportunity_label_cfg,
     resolve_train_label_transform_cfg,
@@ -209,7 +210,14 @@ def build_prediction_metadata(
         "model_name": model_name,
         "data_source": resolve_data_source_name(cfg),
         "universe": str(cfg.get("universe", "")),
+        "label_column": get_label_column_name(signal_horizon),
+        "signal_label_column": get_label_column_name(signal_horizon),
         "signal_horizon": int(signal_horizon),
+        "signal_label_horizon": int(signal_horizon),
+        "backtest_label_column": get_label_column_name(1),
+        "portfolio_return_label_column": get_label_column_name(1),
+        "backtest_label_horizon": 1,
+        "backtest_label_semantics": "daily_realized_return",
         "retrain_step": int(retrain_step),
         "train_days": int(train_days),
         "valid_days": int(valid_days),

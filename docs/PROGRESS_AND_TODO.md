@@ -307,7 +307,8 @@ Current status:
 
 Audit status on 2026-04-30:
 
-- The active performance-critical path is still `run_native_rolling.py` -> `src/rolling_runtime.py` -> `src/rolling_train.py` -> `src/models/pure_lightgbm.py` / `src/models/pure_pytorch_lstm.py` -> `src/rolling_evaluate.py`.
+- The active performance-critical LightGBM path is now `run_native_rolling.py` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet` -> `ai4stock-backtest run-bundle`.
+  `run_native_rolling.py` is a compatibility wrapper and should not regain factor-store loading, rolling-window construction, or backtest evaluation logic.
 - The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
 - Non-training runtime can still be dominated by factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
 - LSTM sequence context is now prepared once per rolling run, but each rolling window still rebuilds `Dataset` / `DataLoader` wrappers and computes validation IC through pandas.
@@ -392,6 +393,14 @@ Completed optimization slices:
   - generated feature names apply the same exact-duplicate canonicalization as Python, so the default Tushare full factor space is `517` features instead of the raw `537`
   - release smoke on `data/tushare/source/buckets/part-0000.parquet`: `146950` rows, `517` features, `8.44s`, peak RSS about `1.49GB`
   - benchmark checkpoints from the migration remain: `legacy158` `0.185866s -> 0.079414s`, `lgbm_purified` `0.013656s -> 0.010247s`, `temporal` `0.040649s -> 0.032321s`, `technical` `0.127573s -> 0.011126s`, `TS_` `0.112160s -> 0.035429s`
+- [x] Move LightGBM bundle runtime ownership to Rust while keeping Python only for training:
+  - `ai4stock-train make-bundle-lgbm` is a standalone Rust binary entrypoint that now resolves config/profile state, reads Parquet factor-store buckets, applies universe membership, materializes selected feature aliases, builds rolling windows, writes prepared window Parquet, and assembles final prediction-bundle artifacts
+  - Python bridge scope is narrowed to `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet`, which receives prepared train/valid/test frames, applies training-label/sample-weight semantics, and calls `src.models.pure_lightgbm.NativeLGBM`
+  - direct `cargo` uses `.cargo/config.toml` to point PyO3 at `.pixi/envs/default/bin/python`; `pixi run` is not required for Cargo itself, only for Python-only commands
+  - the old hand-written rank-IC trainer and whole-pipeline Python bridge path are intentionally removed; non-ML factor baselines remain only as optional reference artifacts
+  - bundle metadata records the training signal label, daily realized backtest label, universe, cross-sectional-rank policy, and rank-excluded columns; Rust `run-bundle` rejects multi-day backtest labels to prevent overlapping-horizon returns from being compounded as daily portfolio returns
+  - validation smoke: explicit 3-feature CSi300 one-day bundle produced `284` aligned prediction/label rows with `core_axes_match=true`; full `core_v4_techlite` profile smoke produced `46` features and `core_axes_match=true`
+  - remaining production check: if future profiles use `industry_excess` or `benchmark_excess` training-label modes, prepared windows need the corresponding point-in-time group / benchmark context instead of relying on implicit Python runtime data
 
 Feature build v2 direction:
 
@@ -583,7 +592,9 @@ Priority fixes:
 
 ### 5. Mixed Feature Representation
 
-- [ ] Add a mixed feature-transform path instead of ranking every feature column by default
+- [x] Add a mixed feature-transform path instead of ranking every feature column by default
+  - Python and Rust training paths now respect `cross_sectional_rank_exclude_columns`
+  - Rust records the rank policy and excluded columns in bundle metadata
 - [ ] Keep cross-sectional-rank versions for stock-selection features that benefit from relative comparison
 - [ ] Preserve raw or lightly normalized absolute versions for regime-sensitive inputs such as:
   - benchmark trend / drawdown / volatility
@@ -602,7 +613,8 @@ Priority fixes:
   - same logical columns and metadata contract as the current store
 - [ ] Separate incremental-update storage from training-read storage instead of forcing one layout to solve both jobs
 - [ ] Verify whether date-window pruning actually works on the training store; the current bucket files should not remain a single row group if we expect date filters to save I/O
-- [ ] Re-check universe filtering cost on the current factor store and remove redundant Python-side masking when Arrow-level symbol filtering is already sufficient
+- [~] Re-check universe filtering cost on the current factor store and remove redundant Python-side masking when Arrow-level symbol filtering is already sufficient
+  Current state: Rust training runtime applies point-in-time universe membership while reading projected Parquet batches; a date-major store benchmark is still needed before changing storage layout
 - [ ] Add one reproducible local benchmark that compares:
   - current `bucket_shards`
   - proposed date-major training layout
@@ -772,7 +784,7 @@ Priority fixes:
 - [ ] Record applied transforms in experiment manifests
 - [ ] Add optional cross-sectional z-score transform and make it composable with rank / clipping
 - [ ] Add an optional training-time feature decorrelation path based on correlation pruning; avoid PCA as the default path
-- [ ] Add a mixed transform policy so selected columns can bypass cross-sectional rank
+- [x] Add a mixed transform policy so selected columns can bypass cross-sectional rank
 - [ ] Support transform policies by feature group instead of only one global toggle
 - [ ] Add label transforms targeted at buyability / positive-rate modeling instead of only ranking-friendly transforms
 

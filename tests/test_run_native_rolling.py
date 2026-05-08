@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from run_native_rolling import build_backtest_command, build_parser, build_train_command
 from src.rolling_artifacts import (
     load_prediction_bundle,
     resolve_prediction_artifact_dir,
@@ -28,6 +29,67 @@ from src.rolling_types import (
 
 
 class RunNativeRollingTest(unittest.TestCase):
+    def test_rust_wrapper_builds_training_command_without_python_runtime(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--config",
+                "configs/config.yaml",
+                "--experiment-profile",
+                "core_v4_lgbm_default_10x20x10",
+                "--model-profile",
+                "lgbm_fast",
+                "--feature-profile",
+                "core_v4_techlite",
+                "--run-tag",
+                "demo",
+                "--save-models",
+                "--set",
+                "lgbm.num_boost_round=2",
+            ]
+        )
+
+        command = build_train_command(args, output_dir=Path("results/demo"))
+
+        self.assertIn("ai4stock-train", " ".join(command))
+        self.assertIn("make-bundle-lgbm", command)
+        self.assertNotIn("run_native_rolling.py", command)
+        self.assertIn("--experiment-profile", command)
+        self.assertIn("core_v4_lgbm_default_10x20x10", command)
+        self.assertIn("--save-models", command)
+        self.assertIn("lgbm.num_boost_round=2", command)
+
+    def test_rust_wrapper_builds_backtest_command_from_bundle(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--config",
+                "snapshot.yaml",
+                "--config-is-snapshot",
+                "--load-predictions-dir",
+                "run/prediction_artifacts",
+                "--skip-reference-baselines",
+                "--backtest-artifact-level",
+                "reports",
+                "--baseline-jobs",
+                "2",
+            ]
+        )
+
+        command = build_backtest_command(
+            args,
+            bundle_dir=Path("run/prediction_artifacts"),
+            config_path=Path("run/config_snapshot.yaml"),
+            output_dir=Path("run"),
+        )
+
+        self.assertIn("ai4stock-backtest", " ".join(command))
+        self.assertIn("run-bundle", command)
+        self.assertIn("--skip-reference-baselines", command)
+        self.assertIn("--skip-backtest-plots", command)
+        self.assertIn("--baseline-jobs", command)
+        self.assertIn("2", command)
+
     def test_prediction_bundle_round_trip(self):
         index = pd.MultiIndex.from_tuples(
             [

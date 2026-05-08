@@ -226,6 +226,7 @@ struct RunBundleSummary {
     dates: usize,
     instruments: usize,
     skipped_all_nan_label_dates: usize,
+    label_metadata: BundleLabelMetadataSummary,
     params: RunBundleSummaryParams,
     portfolio_metrics: PortfolioMetrics,
     baseline_metrics: Vec<BaselineSummary>,
@@ -242,6 +243,26 @@ struct RunBundleSummaryParams {
     weighting: String,
     score_transform: String,
     baseline_jobs: usize,
+}
+
+#[derive(Debug, Clone)]
+struct BundleLabelMetadata {
+    generator: Option<String>,
+    label_column: Option<String>,
+    backtest_label_column: Option<String>,
+    signal_horizon: Option<usize>,
+    backtest_label_horizon: Option<usize>,
+    backtest_label_semantics: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BundleLabelMetadataSummary {
+    generator: Option<String>,
+    label_column: Option<String>,
+    backtest_label_column: Option<String>,
+    signal_horizon: Option<usize>,
+    backtest_label_horizon: Option<usize>,
+    backtest_label_semantics: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -348,6 +369,7 @@ pub(crate) fn run_with_loaded_bundle_and_cache(
 ) -> Result<ExitCode, String> {
     reject_unsupported_config(&config)?;
     let params = parse_backtest_params(&config)?;
+    let label_metadata = validate_backtest_label_metadata(bundle)?;
     let matrices = build_prepared_matrices(bundle, &config, &execution, secondary_cache)?;
     if !matrices.predictions.axes_match(&matrices.labels) {
         return Err("prepared predictions and labels axes do not match".to_owned());
@@ -457,6 +479,7 @@ pub(crate) fn run_with_loaded_bundle_and_cache(
         dates: prepared.dates_ns.len(),
         instruments: matrices.predictions.instruments.len(),
         skipped_all_nan_label_dates: prepared.skipped_all_nan_label_dates,
+        label_metadata: label_metadata.summary(),
         params: RunBundleSummaryParams {
             topk: params.topk,
             n_drop: params.n_drop,
@@ -2882,6 +2905,128 @@ fn parse_backtest_params(config: &Value) -> Result<NativeBacktestParams, String>
     })
 }
 
+impl BundleLabelMetadata {
+    fn from_json(metadata: &serde_json::Value) -> Self {
+        let label_column = json_string(metadata, "label_column")
+            .or_else(|| json_string(metadata, "signal_label_column"));
+        let backtest_label_column = json_string(metadata, "backtest_label_column")
+            .or_else(|| json_string(metadata, "portfolio_return_label_column"));
+        let backtest_label_horizon = json_usize(metadata, "backtest_label_horizon").or_else(|| {
+            backtest_label_column
+                .as_deref()
+                .and_then(infer_label_horizon)
+        });
+        Self {
+            generator: json_string(metadata, "generator"),
+            label_column,
+            backtest_label_column,
+            signal_horizon: json_usize(metadata, "signal_horizon"),
+            backtest_label_horizon,
+            backtest_label_semantics: json_string(metadata, "backtest_label_semantics"),
+        }
+    }
+
+    fn summary(&self) -> BundleLabelMetadataSummary {
+        BundleLabelMetadataSummary {
+            generator: self.generator.clone(),
+            label_column: self.label_column.clone(),
+            backtest_label_column: self.backtest_label_column.clone(),
+            signal_horizon: self.signal_horizon,
+            backtest_label_horizon: self.backtest_label_horizon,
+            backtest_label_semantics: self.backtest_label_semantics.clone(),
+        }
+    }
+}
+
+fn validate_backtest_label_metadata(
+    bundle: &PredictionBundle,
+) -> Result<BundleLabelMetadata, String> {
+    validate_backtest_label_metadata_value(&bundle.metadata)
+}
+
+fn validate_backtest_label_metadata_value(
+    raw_metadata: &serde_json::Value,
+) -> Result<BundleLabelMetadata, String> {
+    let metadata = BundleLabelMetadata::from_json(raw_metadata);
+    if let Some(backtest_horizon) = metadata.backtest_label_horizon {
+        if backtest_horizon != 1 {
+            return Err(format!(
+                "run-bundle expects daily realized backtest labels, but bundle backtest_label_horizon={backtest_horizon}. Use label_1d/backtest_label_horizon=1 for portfolio backtests."
+            ));
+        }
+    }
+    if metadata.signal_horizon.unwrap_or(1) > 1
+        && metadata
+            .label_column
+            .as_deref()
+            .zip(metadata.backtest_label_column.as_deref())
+            .is_some_and(|(label_column, backtest_label_column)| {
+                normalize_label_column(label_column)
+                    == normalize_label_column(backtest_label_column)
+            })
+    {
+        return Err(format!(
+            "unsafe prediction bundle metadata: signal_horizon={} but label_column and backtest_label_column both resolve to {}. run-bundle requires a daily realized backtest label such as label_1d.",
+            metadata.signal_horizon.unwrap_or(1),
+            metadata
+                .backtest_label_column
+                .as_deref()
+                .unwrap_or("<missing>")
+        ));
+    }
+    let rust_generated = metadata
+        .generator
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("rust"));
+    let explicit_daily_semantics = metadata
+        .backtest_label_semantics
+        .as_deref()
+        .is_some_and(|value| value == "daily_realized_return");
+    if rust_generated
+        && metadata.signal_horizon.unwrap_or(1) > 1
+        && metadata.backtest_label_horizon.is_none()
+        && !explicit_daily_semantics
+    {
+        return Err(
+            "Rust prediction bundle metadata does not prove that backtest_labels.parquet contains daily realized returns. Regenerate the bundle with a current ai4stock-train and --backtest-label-column label_1d."
+                .to_owned(),
+        );
+    }
+    Ok(metadata)
+}
+
+fn json_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn json_usize(metadata: &serde_json::Value, key: &str) -> Option<usize> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+}
+
+fn infer_label_horizon(column: &str) -> Option<usize> {
+    if column == "label" {
+        return Some(1);
+    }
+    column
+        .strip_prefix("label_")
+        .and_then(|value| value.strip_suffix('d'))
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+}
+
+fn normalize_label_column(column: &str) -> String {
+    match infer_label_horizon(column) {
+        Some(horizon) => format!("label_{horizon}d"),
+        None => column.trim().to_ascii_lowercase(),
+    }
+}
+
 fn validate_risk_degree_rs(value: f64, field: &str) -> Result<f64, String> {
     if !(0.0..=1.0).contains(&value) {
         return Err(format!("{field} must be in [0, 1]"));
@@ -3861,6 +4006,50 @@ mod tests {
         assert!((metrics.total_return - 0.0659).abs() < 1e-12);
         assert!(metrics.max_drawdown < 0.0);
         assert_eq!(metrics.win_rate, 2.0 / 3.0);
+    }
+
+    #[test]
+    fn rejects_multiday_backtest_label_metadata() {
+        let metadata = serde_json::json!({
+            "generator": "rust",
+            "signal_horizon": 20,
+            "label_column": "label_20d",
+            "backtest_label_column": "label_20d",
+            "backtest_label_horizon": 20
+        });
+
+        let error = validate_backtest_label_metadata_value(&metadata).unwrap_err();
+
+        assert!(error.contains("daily realized backtest labels"));
+    }
+
+    #[test]
+    fn accepts_daily_backtest_label_metadata() {
+        let metadata = serde_json::json!({
+            "generator": "rust",
+            "signal_horizon": 20,
+            "label_column": "label_20d",
+            "backtest_label_column": "label_1d",
+            "backtest_label_horizon": 1,
+            "backtest_label_semantics": "daily_realized_return"
+        });
+
+        let parsed = validate_backtest_label_metadata_value(&metadata).unwrap();
+
+        assert_eq!(parsed.backtest_label_column.as_deref(), Some("label_1d"));
+        assert_eq!(parsed.backtest_label_horizon, Some(1));
+    }
+
+    #[test]
+    fn rejects_legacy_rust_bundle_without_daily_label_provenance() {
+        let metadata = serde_json::json!({
+            "generator": "rust",
+            "signal_horizon": 20
+        });
+
+        let error = validate_backtest_label_metadata_value(&metadata).unwrap_err();
+
+        assert!(error.contains("does not prove"));
     }
 
     #[test]

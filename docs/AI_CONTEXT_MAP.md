@@ -100,6 +100,7 @@ AI4Stock2/
 │   ├── data_source.py
 │   ├── experiment_profiles.py
 │   ├── gen_feature.py
+│   ├── rust_lgbm_bridge.py
 │   ├── feature_profiles.py
 │   ├── feature_selection.py
 │   ├── model_profiles.py
@@ -118,7 +119,8 @@ AI4Stock2/
 │   ├── feature_kernels.rs
 │   └── bin/
 │       ├── ai4stock_backtest.rs
-│       └── ai4stock_gen_feature.rs
+│       ├── ai4stock_gen_feature.rs
+│       └── ai4stock_train.rs
 ├── run_experiment_batch.py
 └── run_native_rolling.py
 ```

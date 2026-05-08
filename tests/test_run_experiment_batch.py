@@ -1,15 +1,15 @@
-import run_experiment_batch
+from __future__ import annotations
+
+from run_experiment_batch import build_delegated_command
 
 
-def test_build_rust_batch_command_forwards_sweeps_cases_and_dedupe():
-    args = run_experiment_batch._build_parser().parse_args(
+def test_experiment_batch_wrapper_delegates_to_rust(monkeypatch) -> None:
+    monkeypatch.delenv("AI4STOCK_EXPERIMENT_BIN", raising=False)
+
+    command = build_delegated_command(
         [
             "--experiment-profile",
             "base",
-            "--rust-runner",
-            "target/release/ai4stock-experiment",
-            "--python-runner",
-            "pixi run python",
             "--set",
             "strategy.n_drop=2",
             "--sweep",
@@ -25,10 +25,8 @@ def test_build_rust_batch_command_forwards_sweeps_cases_and_dedupe():
         ]
     )
 
-    command = run_experiment_batch._build_rust_batch_command(args)
-
-    assert command[:2] == ["target/release/ai4stock-experiment", "batch"]
-    assert command[command.index("--python-runner") + 1] == "pixi run python"
+    assert command[:5] == ["cargo", "run", "--bin", "ai4stock-experiment", "--"]
+    assert command[5] == "batch"
     assert ["--set", "strategy.n_drop=2"] == command[command.index("--set") : command.index("--set") + 2]
     assert ["--sweep", "rolling.retrain_step=[5,10]"] == command[
         command.index("--sweep") : command.index("--sweep") + 2
@@ -40,4 +38,13 @@ def test_build_rust_batch_command_forwards_sweeps_cases_and_dedupe():
     ]
     assert "--dedupe-predictions" in command
     assert "--skip-reference-baselines" in command
+    assert "--dry-run" in command
+
+
+def test_experiment_batch_wrapper_honors_binary_override(monkeypatch) -> None:
+    monkeypatch.setenv("AI4STOCK_EXPERIMENT_BIN", "target/release/ai4stock-experiment --flag")
+
+    command = build_delegated_command(["--experiment-profile", "base", "--dry-run"])
+
+    assert command[:3] == ["target/release/ai4stock-experiment", "--flag", "batch"]
     assert "--dry-run" in command

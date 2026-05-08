@@ -440,7 +440,7 @@ Completed optimization slices:
   - `run_build_prefiltered_profile.py` and `run_build_robust_factor_profile.py` are compatibility wrappers only; pandas summary/correlation fallback paths are removed
 - [x] Move LGBM artifact-rebuild batch runtime to Rust:
   - `ai4stock-backtest artifact-batch` owns selected-matrix row filtering, preflight checks, marker handling, failure TSVs, summary TSV/JSON, grouped post-bundle execution, and parallelism
-  - `run_lgbm_backtest_artifacts.py` is now only a compatibility wrapper that builds and delegates the Rust `artifact-batch` command
+  - `run_lgbm_backtest_artifacts.py` is now only a thin compatibility wrapper that delegates directly to Rust `artifact-batch`
   - Python `direct` and Python `subprocess` artifact-rebuild execution modes are removed from the wrapper; post-bundle work should go through Rust unless explicitly using an older local shell fallback
 - [x] Start moving experiment-sweep orchestration to Rust:
   - `ai4stock-experiment batch` now owns non-deduped sweep/case expansion, run-tag construction, child command generation, dry-run output, fail-fast handling, and sequential child execution

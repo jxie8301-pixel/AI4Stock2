@@ -30,7 +30,6 @@ Options:
   --store-dir <PATH>          Override local experiment store root.
   --dedupe-predictions        Train once for identical prediction-producing configs, then replay.
   --skip-reference-baselines  Forward to child rolling runs.
-  --python-runner <CMD>       Child Python runner. Default: pixi run python.
   --repo-root <PATH>          Repo root. Default: current directory.
   --dry-run                   Print expanded commands without executing.
   --fail-fast                 Stop on the first failed child run.
@@ -53,7 +52,6 @@ struct Options {
     store_dir: Option<String>,
     dedupe_predictions: bool,
     skip_reference_baselines: bool,
-    python_runner: Vec<String>,
     repo_root: PathBuf,
     dry_run: bool,
     fail_fast: bool,
@@ -222,7 +220,6 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         store_dir: None,
         dedupe_predictions: false,
         skip_reference_baselines: false,
-        python_runner: default_python_runner(),
         repo_root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
         dry_run: false,
         fail_fast: false,
@@ -233,25 +230,49 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         match args[index].as_str() {
             "-h" | "--help" => return Err(usage().to_owned()),
             "--config" => options.config = PathBuf::from(next_arg(args, &mut index, "--config")?),
+            value if value.starts_with("--config=") => {
+                options.config = PathBuf::from(split_value(value, "--config")?)
+            }
             "--pipeline" => options.pipeline = next_arg(args, &mut index, "--pipeline")?,
+            value if value.starts_with("--pipeline=") => {
+                options.pipeline = split_value(value, "--pipeline")?
+            }
             "--experiment-profile" => {
                 options.experiment_profile = next_arg(args, &mut index, "--experiment-profile")?
+            }
+            value if value.starts_with("--experiment-profile=") => {
+                options.experiment_profile = split_value(value, "--experiment-profile")?
             }
             "--model-profile" => {
                 options.model_profile = Some(next_arg(args, &mut index, "--model-profile")?)
             }
+            value if value.starts_with("--model-profile=") => {
+                options.model_profile = Some(split_value(value, "--model-profile")?)
+            }
             "--feature-profile" => {
                 options.feature_profile = Some(next_arg(args, &mut index, "--feature-profile")?)
+            }
+            value if value.starts_with("--feature-profile=") => {
+                options.feature_profile = Some(split_value(value, "--feature-profile")?)
             }
             "--data-source" => {
                 options.data_source = Some(next_arg(args, &mut index, "--data-source")?)
             }
+            value if value.starts_with("--data-source=") => {
+                options.data_source = Some(split_value(value, "--data-source")?)
+            }
             "--set" => options
                 .set_overrides
                 .push(next_arg(args, &mut index, "--set")?),
+            value if value.starts_with("--set=") => {
+                options.set_overrides.push(split_value(value, "--set")?)
+            }
             "--sweep" => options
                 .sweep_overrides
                 .push(next_arg(args, &mut index, "--sweep")?),
+            value if value.starts_with("--sweep=") => {
+                options.sweep_overrides.push(split_value(value, "--sweep")?)
+            }
             "--case" => {
                 index += 1;
                 let mut group = Vec::new();
@@ -265,21 +286,28 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
                 options.case_overrides.push(group);
                 continue;
             }
+            value if value.starts_with("--case=") => {
+                options
+                    .case_overrides
+                    .push(vec![split_value(value, "--case")?]);
+            }
             "--run-tag-prefix" => {
                 options.run_tag_prefix = Some(next_arg(args, &mut index, "--run-tag-prefix")?)
             }
+            value if value.starts_with("--run-tag-prefix=") => {
+                options.run_tag_prefix = Some(split_value(value, "--run-tag-prefix")?)
+            }
             "--store-dir" => options.store_dir = Some(next_arg(args, &mut index, "--store-dir")?),
+            value if value.starts_with("--store-dir=") => {
+                options.store_dir = Some(split_value(value, "--store-dir")?)
+            }
             "--dedupe-predictions" => options.dedupe_predictions = true,
             "--skip-reference-baselines" => options.skip_reference_baselines = true,
-            "--python-runner" | "--python" => {
-                options.python_runner =
-                    split_runner(&next_arg(args, &mut index, "--python-runner")?);
-                if options.python_runner.is_empty() {
-                    return Err("--python-runner cannot be empty".to_owned());
-                }
-            }
             "--repo-root" => {
                 options.repo_root = PathBuf::from(next_arg(args, &mut index, "--repo-root")?)
+            }
+            value if value.starts_with("--repo-root=") => {
+                options.repo_root = PathBuf::from(split_value(value, "--repo-root")?)
             }
             "--dry-run" => options.dry_run = true,
             "--fail-fast" => options.fail_fast = true,
@@ -300,15 +328,34 @@ fn next_arg(args: &[String], index: &mut usize, option: &str) -> Result<String, 
         .ok_or_else(|| format!("missing value for {option}"))
 }
 
-fn default_python_runner() -> Vec<String> {
-    env::var("PYTHON_RUNNER")
-        .ok()
-        .map(|value| split_runner(&value))
-        .filter(|parts| !parts.is_empty())
-        .unwrap_or_else(|| vec!["pixi".to_owned(), "run".to_owned(), "python".to_owned()])
+fn split_value(value: &str, option: &str) -> Result<String, String> {
+    let raw = value
+        .split_once('=')
+        .map(|(_, right)| right)
+        .unwrap_or_default();
+    if raw.is_empty() {
+        return Err(format!("missing value for {option}"));
+    }
+    Ok(raw.to_owned())
 }
 
-fn split_runner(raw: &str) -> Vec<String> {
+fn rust_binary_command(binary_name: &str, env_var: &str) -> Vec<String> {
+    env::var(env_var)
+        .ok()
+        .map(|value| split_command(&value))
+        .filter(|parts| !parts.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                "cargo".to_owned(),
+                "run".to_owned(),
+                "--bin".to_owned(),
+                binary_name.to_owned(),
+                "--".to_owned(),
+            ]
+        })
+}
+
+fn split_command(raw: &str) -> Vec<String> {
     raw.split_whitespace()
         .filter(|part| !part.is_empty())
         .map(str::to_owned)
@@ -491,10 +538,8 @@ fn build_run_command(
     overrides: &BTreeMap<String, YamlValue>,
     run_tag: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    let mut command = options.python_runner.clone();
-    command.push(path_to_string(
-        &options.repo_root.join("run_native_rolling.py"),
-    ));
+    let mut command = rust_binary_command("ai4stock-train", "AI4STOCK_TRAIN_BIN");
+    command.push("rolling-lgbm".to_owned());
     command.extend([
         "--config".to_owned(),
         path_to_string(&options.config),
@@ -1208,6 +1253,42 @@ mod tests {
     }
 
     #[test]
+    fn parses_equals_style_batch_options() {
+        let options = parse_options(&[
+            "--experiment-profile=base".to_owned(),
+            "--config=configs/config.yaml".to_owned(),
+            "--pipeline=rolling".to_owned(),
+            "--model-profile=lgbm_fast".to_owned(),
+            "--feature-profile=core_v4".to_owned(),
+            "--data-source=tushare".to_owned(),
+            "--set=strategy.n_drop=2".to_owned(),
+            "--sweep=rolling.retrain_step=[5,10]".to_owned(),
+            "--case=strategy.topk=5".to_owned(),
+            "--run-tag-prefix=sweep".to_owned(),
+            "--store-dir=results/demo".to_owned(),
+            "--repo-root=/repo".to_owned(),
+            "--dedupe-predictions".to_owned(),
+            "--skip-reference-baselines".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .unwrap();
+
+        assert_eq!(options.experiment_profile, "base");
+        assert_eq!(options.model_profile.as_deref(), Some("lgbm_fast"));
+        assert_eq!(options.feature_profile.as_deref(), Some("core_v4"));
+        assert_eq!(options.data_source.as_deref(), Some("tushare"));
+        assert_eq!(options.set_overrides, vec!["strategy.n_drop=2"]);
+        assert_eq!(options.sweep_overrides, vec!["rolling.retrain_step=[5,10]"]);
+        assert_eq!(options.case_overrides, vec![vec!["strategy.topk=5"]]);
+        assert_eq!(options.run_tag_prefix.as_deref(), Some("sweep"));
+        assert_eq!(options.store_dir.as_deref(), Some("results/demo"));
+        assert_eq!(options.repo_root, PathBuf::from("/repo"));
+        assert!(options.dedupe_predictions);
+        assert!(options.skip_reference_baselines);
+        assert!(options.dry_run);
+    }
+
+    #[test]
     fn expands_sweep_grid_in_key_order() {
         let mut sweep_map = BTreeMap::new();
         sweep_map.insert(
@@ -1243,8 +1324,6 @@ mod tests {
         let options = parse_options(&[
             "--experiment-profile".to_owned(),
             "base".to_owned(),
-            "--python-runner".to_owned(),
-            "pixi run python".to_owned(),
             "--repo-root".to_owned(),
             "/repo".to_owned(),
             "--run-tag-prefix".to_owned(),
@@ -1256,8 +1335,17 @@ mod tests {
         overrides.insert("strategy.topk".to_owned(), YamlValue::Number(20.into()));
         let run_tag = build_run_tag(options.run_tag_prefix.as_deref(), &overrides);
         let command = build_run_command(&options, &overrides, run_tag.as_deref()).unwrap();
-        assert_eq!(command[0..3], ["pixi", "run", "python"]);
-        assert!(command.contains(&"/repo/run_native_rolling.py".to_owned()));
+        assert_eq!(
+            command[0..6],
+            [
+                "cargo",
+                "run",
+                "--bin",
+                "ai4stock-train",
+                "--",
+                "rolling-lgbm"
+            ]
+        );
         assert!(command.contains(&"--skip-reference-baselines".to_owned()));
         assert!(command.contains(&"strategy.topk=20".to_owned()));
         assert!(command.contains(&"sweep__strategy-topk-20".to_owned()));

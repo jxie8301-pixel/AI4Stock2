@@ -561,7 +561,7 @@ fn run_jobs(options: BatchOptions, jobs: Vec<ArtifactJob>) -> Result<ExitCode, S
                 continue;
             }
             println!("[dry-run] {}", job.row.matrix_id);
-            println!("[argv] run_native_rolling.py {}", display_args(&job.argv));
+            println!("[bundle_args] {}", display_args(&job.argv));
             println!("[rust_cmd] {}", display_command(&job.rust_command));
         }
         return Ok(ExitCode::SUCCESS);
@@ -1041,12 +1041,7 @@ fn write_job_header(writer: &mut impl Write, job: &ArtifactJob) -> Result<(), St
     .map_err(|err| err.to_string())?;
     writeln!(writer, "[execution_mode] rust").map_err(|err| err.to_string())?;
     writeln!(writer, "[start] {}", now_stamp()).map_err(|err| err.to_string())?;
-    writeln!(
-        writer,
-        "[argv] run_native_rolling.py {}",
-        display_args(&job.argv)
-    )
-    .map_err(|err| err.to_string())?;
+    writeln!(writer, "[bundle_args] {}", display_args(&job.argv)).map_err(|err| err.to_string())?;
     writeln!(writer, "[rust_cmd] {}", display_command(&job.rust_command))
         .map_err(|err| err.to_string())?;
     Ok(())

@@ -1837,14 +1837,6 @@ fn parse_full_space_preset_options(args: &[String]) -> Result<FullSpacePresetOpt
                     .set_overrides
                     .push(next_value(args, index, "--set")?);
             }
-            "--python-runner" | "--python" => {
-                index += 1;
-                let _ = next_value(args, index, "--python-runner")?;
-            }
-            "--repo-root" => {
-                index += 1;
-                let _ = next_value(args, index, "--repo-root")?;
-            }
             "--dry-run" => options.dry_run = true,
             other => return Err(format!("unknown full-space preset option: {other}")),
         }
@@ -1949,14 +1941,6 @@ fn parse_quality_event_flow_preset_options(
                 options
                     .set_overrides
                     .push(next_value(args, index, "--set")?);
-            }
-            "--python-runner" | "--python" => {
-                index += 1;
-                let _ = next_value(args, index, "--python-runner")?;
-            }
-            "--repo-root" => {
-                index += 1;
-                let _ = next_value(args, index, "--repo-root")?;
             }
             "--dry-run" => options.dry_run = true,
             other => return Err(format!("unknown quality/event preset option: {other}")),
@@ -2216,10 +2200,6 @@ mod tests {
         let options = parse_full_space_preset_options(&[
             "--experiment-profile".to_owned(),
             "exp".to_owned(),
-            "--python-runner".to_owned(),
-            "pixi run python".to_owned(),
-            "--repo-root".to_owned(),
-            "/repo".to_owned(),
             "--base-output-dir".to_owned(),
             "out".to_owned(),
             "--run-tag".to_owned(),
@@ -2244,10 +2224,6 @@ mod tests {
         let options = parse_quality_event_flow_preset_options(&[
             "--experiment-profile".to_owned(),
             "exp".to_owned(),
-            "--python-runner".to_owned(),
-            "pixi run python".to_owned(),
-            "--repo-root".to_owned(),
-            "/repo".to_owned(),
             "--include-benchmark-excess".to_owned(),
             "--dry-run".to_owned(),
         ])

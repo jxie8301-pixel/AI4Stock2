@@ -32,7 +32,7 @@ ai4stock-backtest: Rust entrypoint for post-bundle AI4Stock2 backtests
 
 Usage:
   ai4stock-backtest run-bundle --bundle <PATH> --config <config_snapshot.yaml> [--output-dir <PATH>]
-  ai4stock-backtest bundle [OPTIONS] -- <run_native_rolling.py args>
+  ai4stock-backtest bundle [OPTIONS] -- <rolling-lgbm-compatible args>
   ai4stock-backtest artifact-batch --selected-tsv <PATH> [OPTIONS]
   ai4stock-backtest inspect-bundle --bundle <PATH> [--json]
 

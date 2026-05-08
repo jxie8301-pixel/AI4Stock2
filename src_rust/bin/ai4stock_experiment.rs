@@ -1,5 +1,8 @@
 use ai4stock2_native::common::cli::{next_arg, path_to_string, shell_quote, split_value};
-use ai4stock2_native::common::yaml::{deep_merge_yaml, read_yaml_file};
+use ai4stock2_native::common::yaml::{
+    deep_merge_yaml, ensure_mapping, parse_key_value_arg, read_yaml_file, set_yaml_dotted,
+    yaml_path, yaml_path_string,
+};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::collections::BTreeMap;
 use std::env;
@@ -387,11 +390,6 @@ fn parse_sweep_arg(raw: &str) -> Result<(String, Vec<YamlValue>), String> {
         return Err(format!("Sweep values for {key} must be non-empty"));
     }
     Ok((key, values))
-}
-
-fn parse_key_value_arg(raw: &str, label: &str) -> Result<(String, YamlValue), String> {
-    let (key, value) = parse_raw_key_value(raw, label)?;
-    Ok((key, parse_yaml_scalar(value)))
 }
 
 fn parse_raw_key_value<'a>(raw: &'a str, label: &str) -> Result<(String, &'a str), String> {
@@ -1032,54 +1030,6 @@ fn resolve_profile_from_mapping(
         config: merged,
         path: source_path,
     })
-}
-
-fn ensure_mapping(value: &mut YamlValue) {
-    if !value.is_mapping() {
-        *value = YamlValue::Mapping(YamlMapping::new());
-    }
-}
-
-fn set_yaml_dotted(cfg: &mut YamlValue, dotted_key: &str, value: YamlValue) -> Result<(), String> {
-    let parts = dotted_key
-        .split('.')
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return Err(format!("invalid dotted override key: {dotted_key}"));
-    }
-    let mut cursor = cfg;
-    for part in &parts[..parts.len() - 1] {
-        if !cursor.is_mapping() {
-            *cursor = YamlValue::Mapping(YamlMapping::new());
-        }
-        let mapping = cursor.as_mapping_mut().expect("mapping just initialized");
-        cursor = mapping
-            .entry(YamlValue::String((*part).to_owned()))
-            .or_insert_with(|| YamlValue::Mapping(YamlMapping::new()));
-    }
-    if !cursor.is_mapping() {
-        *cursor = YamlValue::Mapping(YamlMapping::new());
-    }
-    cursor
-        .as_mapping_mut()
-        .expect("mapping just initialized")
-        .insert(YamlValue::String(parts[parts.len() - 1].to_owned()), value);
-    Ok(())
-}
-
-fn yaml_path<'a>(value: &'a YamlValue, path: &[&str]) -> Option<&'a YamlValue> {
-    let mut cursor = value;
-    for key in path {
-        cursor = yaml_mapping_get_value(cursor, key)?;
-    }
-    Some(cursor)
-}
-
-fn yaml_path_string(value: &YamlValue, path: &[&str]) -> Option<String> {
-    yaml_path(value, path)
-        .and_then(YamlValue::as_str)
-        .map(str::to_owned)
 }
 
 fn yaml_path_json(

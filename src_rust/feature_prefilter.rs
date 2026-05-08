@@ -1,9 +1,8 @@
 use crate::common::parquet::{
-    date_value_ns, numeric_value, open_projected_parquet_reader,
-    parse_datetime_ns as parse_date_ns, required_column,
+    date_value_ns, discover_bucket_parquet_paths, numeric_value, open_projected_parquet_reader,
+    parse_datetime_ns as parse_date_ns, required_column, string_value_or_empty as string_value,
 };
-use crate::gen_feature::discover_bucket_parquet_paths;
-use arrow_array::{Array, LargeStringArray, RecordBatch, StringArray};
+use arrow_array::RecordBatch;
 use csv::{ReaderBuilder, WriterBuilder};
 use serde::Serialize;
 use std::cmp::Ordering;
@@ -1538,23 +1537,6 @@ fn resolve_universe_path(universe_name: &str, universe_dir: &Path) -> Result<Pat
     Err(format!(
         "universe file not found for '{universe_name}' under {}",
         universe_dir.display()
-    ))
-}
-
-fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<String, String> {
-    if array.is_null(row_index) {
-        return Ok(String::new());
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(values.value(row_index).to_owned());
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(values.value(row_index).to_owned());
-    }
-    Err(format!(
-        "{} has unsupported string type {:?}",
-        path.display(),
-        array.data_type()
     ))
 }
 

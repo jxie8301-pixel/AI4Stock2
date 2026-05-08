@@ -3,17 +3,19 @@ use ai4stock2_native::common::benchmark::{
     cross_section_mean_returns, load_file_benchmark_returns,
 };
 use ai4stock2_native::common::parquet::{
-    date_value_ns, numeric_value, open_projected_parquet_reader,
-    parse_datetime_ns as parse_date_ns, required_column,
+    date_value_ns, discover_bucket_parquet_paths, format_date_ns, numeric_value,
+    open_projected_parquet_reader, parse_datetime_ns as parse_date_ns, required_column,
+    required_string_value as string_value,
 };
+use ai4stock2_native::common::profiles::default_factor_store_dir;
 use ai4stock2_native::common::python::prepare_python_path;
-use ai4stock2_native::common::yaml::{deep_merge_yaml, read_yaml_file};
-use ai4stock2_native::gen_feature::discover_bucket_parquet_paths;
-use arrow_array::{
-    Array, Float64Array, LargeStringArray, RecordBatch, StringArray, TimestampNanosecondArray,
+use ai4stock2_native::common::yaml::{
+    deep_merge_yaml, parse_key_value_arg, read_yaml_file, set_yaml_dotted, yaml_path,
+    yaml_path_bool, yaml_path_f64, yaml_path_string, yaml_path_usize, yaml_string_sequence,
+    yaml_usize,
 };
+use arrow_array::{Array, Float64Array, RecordBatch, StringArray, TimestampNanosecondArray};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use chrono::{DateTime, Utc};
 use parquet::arrow::ArrowWriter;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
@@ -897,7 +899,7 @@ fn resolve_runtime_config(options: &LgbmBundleOptions) -> Result<ResolvedRuntime
         )?;
     }
     for override_arg in &options.set_overrides {
-        let (key, value) = parse_set_override(override_arg)?;
+        let (key, value) = parse_key_value_arg(override_arg, "Override")?;
         set_yaml_dotted(&mut cfg, &key, value)?;
     }
     let resolved_model_name = yaml_path_string(&cfg, &["model", "name"])
@@ -2811,34 +2813,6 @@ fn collect_indices_for_date_range(
         .collect()
 }
 
-fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<String, String> {
-    if array.is_null(row_index) {
-        return Err(format!(
-            "{} has null string value at row {row_index}",
-            path.display()
-        ));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(values.value(row_index).to_owned());
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(values.value(row_index).to_owned());
-    }
-    Err(format!(
-        "{} has unsupported string type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
-fn format_date_ns(value: i64) -> String {
-    let secs = value.div_euclid(1_000_000_000);
-    let nanos = value.rem_euclid(1_000_000_000) as u32;
-    DateTime::<Utc>::from_timestamp(secs, nanos)
-        .map(|datetime| datetime.date_naive().to_string())
-        .unwrap_or_default()
-}
-
 fn read_factor_store_meta(factor_store: &Path) -> Result<JsonValue, String> {
     let path = factor_store.join("meta.json");
     let file =
@@ -3332,80 +3306,6 @@ fn resolve_sample_weight_config(lgbm_config: &JsonValue) -> SampleWeightConfig {
     }
 }
 
-fn set_yaml_dotted(cfg: &mut YamlValue, dotted_key: &str, value: YamlValue) -> Result<(), String> {
-    let parts = dotted_key
-        .split('.')
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return Err(format!("invalid dotted override key: {dotted_key}"));
-    }
-    let mut cursor = cfg;
-    for part in &parts[..parts.len() - 1] {
-        if !cursor.is_mapping() {
-            *cursor = YamlValue::Mapping(YamlMapping::new());
-        }
-        let mapping = cursor.as_mapping_mut().expect("mapping just initialized");
-        cursor = mapping
-            .entry(YamlValue::String((*part).to_owned()))
-            .or_insert_with(|| YamlValue::Mapping(YamlMapping::new()));
-    }
-    if !cursor.is_mapping() {
-        *cursor = YamlValue::Mapping(YamlMapping::new());
-    }
-    cursor
-        .as_mapping_mut()
-        .expect("mapping just initialized")
-        .insert(YamlValue::String(parts[parts.len() - 1].to_owned()), value);
-    Ok(())
-}
-
-fn parse_set_override(raw: &str) -> Result<(String, YamlValue), String> {
-    let (key, value) = raw
-        .split_once('=')
-        .ok_or_else(|| format!("override must be in key=value form, got: {raw}"))?;
-    let key = key.trim().to_owned();
-    if key.is_empty() {
-        return Err(format!("override key must be non-empty, got: {raw}"));
-    }
-    let value = serde_yaml::from_str::<YamlValue>(value.trim())
-        .unwrap_or_else(|_| YamlValue::String(value.trim().to_owned()));
-    Ok((key, value))
-}
-
-fn yaml_path<'a>(value: &'a YamlValue, path: &[&str]) -> Option<&'a YamlValue> {
-    let mut cursor = value;
-    for key in path {
-        let mapping = cursor.as_mapping()?;
-        cursor = mapping.get(YamlValue::String((*key).to_owned()))?;
-    }
-    Some(cursor)
-}
-
-fn yaml_path_string(value: &YamlValue, path: &[&str]) -> Option<String> {
-    yaml_path(value, path)
-        .and_then(YamlValue::as_str)
-        .map(str::to_owned)
-}
-
-fn yaml_path_usize(value: &YamlValue, path: &[&str]) -> Option<usize> {
-    yaml_path(value, path)
-        .and_then(YamlValue::as_i64)
-        .and_then(|value| usize::try_from(value).ok())
-}
-
-fn yaml_path_f64(value: &YamlValue, path: &[&str]) -> Option<f64> {
-    yaml_path(value, path).and_then(|value| {
-        value
-            .as_f64()
-            .or_else(|| value.as_i64().map(|inner| inner as f64))
-    })
-}
-
-fn yaml_path_bool(value: &YamlValue, path: &[&str]) -> Option<bool> {
-    yaml_path(value, path).and_then(YamlValue::as_bool)
-}
-
 fn json_key_string(value: &JsonValue, key: &str) -> Option<String> {
     value
         .get(key)
@@ -3466,20 +3366,6 @@ fn remove_yaml_mapping_key(value: &mut YamlValue, key: &str) {
     }
 }
 
-fn yaml_string_sequence(value: &YamlValue) -> Result<Vec<String>, String> {
-    let sequence = value
-        .as_sequence()
-        .ok_or_else(|| "expected YAML string sequence".to_owned())?;
-    sequence
-        .iter()
-        .map(|item| {
-            item.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| "expected YAML string sequence".to_owned())
-        })
-        .collect()
-}
-
 fn yaml_string_usize_mapping(value: &YamlValue) -> Result<BTreeMap<String, usize>, String> {
     let mapping = value
         .as_mapping()
@@ -3501,20 +3387,8 @@ fn yaml_string_usize_mapping(value: &YamlValue) -> Result<BTreeMap<String, usize
     Ok(out)
 }
 
-fn yaml_usize(value: usize) -> YamlValue {
-    YamlValue::Number(serde_yaml::Number::from(value as u64))
-}
-
 fn label_column_name(horizon: usize) -> String {
     format!("label_{horizon}d")
-}
-
-fn default_factor_store_dir(data_source: &str, factor_store_name: &str) -> PathBuf {
-    if data_source == "akshare" {
-        PathBuf::from("data/factor_store").join(factor_store_name)
-    } else {
-        PathBuf::from("data/factor_store").join(format!("{data_source}_{factor_store_name}"))
-    }
 }
 
 fn read_feature_list_json(path: &Path) -> Result<Vec<String>, String> {

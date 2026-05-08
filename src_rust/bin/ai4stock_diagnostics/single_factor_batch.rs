@@ -1,6 +1,13 @@
 use ai4stock2_native::common::artifact::write_json_pretty;
 use ai4stock2_native::common::cli::{display_command, next_arg, path_to_string, split_value};
-use ai4stock2_native::common::yaml::{deep_merge_yaml, read_yaml_file, write_yaml_file};
+use ai4stock2_native::common::profiles::{
+    default_factor_store_dir, normalize_data_source, resolve_relative_to_repo,
+};
+use ai4stock2_native::common::yaml::{
+    deep_merge_yaml, ensure_mapping, parse_key_value_arg, read_yaml_file, set_yaml_dotted,
+    write_yaml_file, yaml_f64_value, yaml_path, yaml_path_string, yaml_path_usize,
+    yaml_sequence_strings, yaml_string_scalar, yaml_usize,
+};
 use ai4stock2_native::feature_prefilter::{
     run_build_prefilter_profile, run_build_robust_profile, PrefilterProfileBuildOptions,
     PrefilterThresholds, ProfileBuildSummary, RobustProfileBuildOptions,
@@ -2879,77 +2886,10 @@ fn write_json_file(path: &Path, value: &JsonValue) -> Result<(), String> {
     write_json_pretty(path, value, false)
 }
 
-fn ensure_mapping(value: &mut YamlValue) {
-    if !value.is_mapping() {
-        *value = YamlValue::Mapping(YamlMapping::new());
-    }
-}
-
-fn set_yaml_dotted(cfg: &mut YamlValue, dotted_key: &str, value: YamlValue) -> Result<(), String> {
-    ensure_mapping(cfg);
-    let parts = dotted_key
-        .split('.')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    if parts.is_empty() {
-        return Err("override key must be non-empty".to_owned());
-    }
-    let mut current = cfg;
-    for part in &parts[..parts.len() - 1] {
-        ensure_mapping(current);
-        let map = current.as_mapping_mut().unwrap();
-        current = map
-            .entry(YamlValue::String((*part).to_owned()))
-            .or_insert_with(|| YamlValue::Mapping(YamlMapping::new()));
-    }
-    ensure_mapping(current);
-    current
-        .as_mapping_mut()
-        .unwrap()
-        .insert(YamlValue::String(parts[parts.len() - 1].to_owned()), value);
-    Ok(())
-}
-
 fn remove_yaml_mapping_key(value: &mut YamlValue, key: &str) {
     if let Some(map) = value.as_mapping_mut() {
         map.remove(YamlValue::String(key.to_owned()));
     }
-}
-
-fn yaml_path<'a>(value: &'a YamlValue, path: &[&str]) -> Option<&'a YamlValue> {
-    let mut current = value;
-    for key in path {
-        current = current
-            .as_mapping()?
-            .get(YamlValue::String((*key).to_owned()))?;
-    }
-    Some(current)
-}
-
-fn yaml_path_string(value: &YamlValue, path: &[&str]) -> Option<String> {
-    yaml_path(value, path).and_then(|value| value.as_str().map(str::to_owned))
-}
-
-fn yaml_path_usize(value: &YamlValue, path: &[&str]) -> Option<usize> {
-    yaml_path(value, path).and_then(|value| match value {
-        YamlValue::Number(number) => number.as_u64().map(|value| value as usize),
-        YamlValue::String(text) => text.parse::<usize>().ok(),
-        _ => None,
-    })
-}
-
-fn yaml_sequence_strings(value: Option<&YamlValue>) -> Result<Option<Vec<String>>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let sequence = value
-        .as_sequence()
-        .ok_or_else(|| "expected a list of strings".to_owned())?;
-    sequence
-        .iter()
-        .map(yaml_string_scalar)
-        .collect::<Result<Vec<_>, _>>()
-        .map(Some)
 }
 
 fn yaml_repeat_columns(value: Option<&YamlValue>) -> Result<HashMap<String, usize>, String> {
@@ -2976,42 +2916,8 @@ fn yaml_repeat_columns(value: Option<&YamlValue>) -> Result<HashMap<String, usiz
     Ok(out)
 }
 
-fn yaml_string_scalar(value: &YamlValue) -> Result<String, String> {
-    match value {
-        YamlValue::String(text) => Ok(text.clone()),
-        YamlValue::Number(number) => Ok(number.to_string()),
-        YamlValue::Bool(value) => Ok(value.to_string()),
-        _ => Err("expected scalar value".to_owned()),
-    }
-}
-
 fn yaml_string_value(value: Option<&YamlValue>) -> Option<String> {
     value.and_then(|value| yaml_string_scalar(value).ok())
-}
-
-fn yaml_f64_value(value: &YamlValue) -> Option<f64> {
-    match value {
-        YamlValue::Number(number) => number.as_f64(),
-        YamlValue::String(text) => text.parse::<f64>().ok(),
-        _ => None,
-    }
-}
-
-fn yaml_usize(value: usize) -> YamlValue {
-    YamlValue::Number(serde_yaml::Number::from(value as u64))
-}
-
-fn parse_key_value_arg(raw: &str, label: &str) -> Result<(String, YamlValue), String> {
-    let Some((key, value)) = raw.trim().split_once('=') else {
-        return Err(format!("{label} must be in key=value form, got: {raw}"));
-    };
-    let key = key.trim().to_owned();
-    if key.is_empty() {
-        return Err(format!("{label} key must be non-empty, got: {raw}"));
-    }
-    let parsed = serde_yaml::from_str::<YamlValue>(value.trim())
-        .unwrap_or_else(|_| YamlValue::String(value.trim().to_owned()));
-    Ok((key, parsed))
 }
 
 fn parse_usize(value: String, option: &str) -> Result<usize, String> {
@@ -3029,41 +2935,6 @@ fn parse_f64(value: String, option: &str) -> Result<f64, String> {
 fn default_model_profile() -> Option<String> {
     let profile_data = read_yaml_file("configs/model_profiles.yaml").ok()?;
     yaml_path_string(&profile_data, &["default_profile"])
-}
-
-fn resolve_relative_to_repo(profile_config_path: &Path, raw_path: &str) -> PathBuf {
-    let path = PathBuf::from(raw_path);
-    if path.is_absolute() {
-        return path;
-    }
-    profile_config_path
-        .parent()
-        .and_then(Path::parent)
-        .unwrap_or_else(|| Path::new("."))
-        .join(path)
-}
-
-fn normalize_data_source(value: &str) -> Result<String, String> {
-    let source = match value.trim().to_ascii_lowercase().as_str() {
-        "" => "akshare".to_owned(),
-        "eastmoney" | "em" => "akshare".to_owned(),
-        "akshare" => "akshare".to_owned(),
-        "tushare" => "tushare".to_owned(),
-        other => {
-            return Err(format!(
-                "Unsupported data source: {other}. Available: akshare, tushare"
-            ))
-        }
-    };
-    Ok(source)
-}
-
-fn default_factor_store_dir(data_source: &str, factor_store_name: &str) -> PathBuf {
-    if data_source == "akshare" {
-        PathBuf::from("data/factor_store").join(factor_store_name)
-    } else {
-        PathBuf::from("data/factor_store").join(format!("{data_source}_{factor_store_name}"))
-    }
 }
 
 fn exact_duplicate_feature_source_map() -> HashMap<String, String> {

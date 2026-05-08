@@ -1,10 +1,10 @@
 use crate::common::benchmark::cross_section_mean_returns;
 use crate::common::parquet::{
-    date_value_ns, numeric_value, open_projected_parquet_reader,
-    parse_datetime_ns as parse_date_ns, required_column,
+    date_value_ns, discover_bucket_parquet_paths, format_date_ns, numeric_value,
+    open_projected_parquet_reader, parse_datetime_ns as parse_date_ns, required_column,
+    string_value_or_empty as string_value,
 };
-use crate::gen_feature::discover_bucket_parquet_paths;
-use arrow_array::{Array, LargeStringArray, RecordBatch, StringArray};
+use arrow_array::RecordBatch;
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
@@ -2231,23 +2231,6 @@ fn read_parquet_columns(path: &Path) -> Result<HashSet<String>, String> {
         .collect())
 }
 
-fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<String, String> {
-    if array.is_null(row_index) {
-        return Ok(String::new());
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return Ok(values.value(row_index).to_owned());
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return Ok(values.value(row_index).to_owned());
-    }
-    Err(format!(
-        "{} has unsupported string type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
 fn safe_ratio(numerator: usize, denominator: usize) -> f64 {
     if denominator == 0 {
         0.0
@@ -2426,14 +2409,6 @@ fn parse_optional_date_ns(raw: &str) -> Result<Option<i64>, String> {
         return Ok(None);
     }
     parse_date_ns(value).map(Some)
-}
-
-fn format_date_ns(value: i64) -> String {
-    let secs = value.div_euclid(1_000_000_000);
-    let nanos = value.rem_euclid(1_000_000_000) as u32;
-    DateTime::<Utc>::from_timestamp(secs, nanos)
-        .map(|datetime| datetime.date_naive().to_string())
-        .unwrap_or_default()
 }
 
 fn year_from_ns(value: i64) -> i32 {

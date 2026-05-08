@@ -1,7 +1,7 @@
-use ai4stock2_native::gen_feature::{
-    generate_factor_store, inspect_parquet_layout, scan_source_bucket, validate_required_columns,
-    GenerateOptions,
+use ai4stock2_native::common::parquet::{
+    inspect_parquet_layout, scan_source_bucket, validate_required_columns,
 };
+use ai4stock2_native::gen_feature::{generate_factor_store, GenerateOptions};
 use std::env;
 use std::fs;
 use std::path::PathBuf;

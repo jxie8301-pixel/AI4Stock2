@@ -9,10 +9,14 @@ What is true now:
 - `qlib` runtime code has been removed from the active project
 - `pyqlib` has been removed from project dependencies
 - The main runnable workflows are:
-  - `run_native_rolling.py`
-  - `src/gen_feature.py`
+  - `ai4stock-collect`
+  - `ai4stock-gen-feature`
+  - `ai4stock-train rolling-lgbm`
+  - `ai4stock-backtest run-bundle`
+  - `ai4stock-diagnostics`
+  - `ai4stock-experiment batch`
 - Native feature caches are built from Parquet source data
-- `gen_feature.py` now defaults to a unified all-factor cache
+- `ai4stock-gen-feature` now defaults to a unified all-factor cache
 - Feature profiles are now treated as subset presets over the unified cache
 - The unified cache now includes a systematic temporal factor family with shared windows
 - Alpha360 has been removed from the default full-factor space
@@ -48,15 +52,15 @@ What is true now:
 
 ## Current Recommended Workflow
 
-1. Update or refresh Tushare raw / processed parquet with `src/collector_tushare.py`
-2. Generate the Tushare-backed unified factor store with `src/gen_feature.py`
-3. Run rolling `lgbm` baselines with `run_native_rolling.py`
-4. Run `ai4stock-diagnostics single-factor-profile` or the compatibility wrapper `run_single_factor_diagnostics.py` before broad model / strategy sweeps
+1. Update or refresh Tushare raw / processed parquet with `ai4stock-collect tushare`
+2. Generate the Tushare-backed unified factor store with `ai4stock-gen-feature`
+3. Run rolling `lgbm` baselines with `ai4stock-train rolling-lgbm`
+4. Run `ai4stock-diagnostics single-factor-profile` before broad model / strategy sweeps
 5. Compare experiments through `results/experiments/experiment_index.csv`
 
 Active migration note:
 
-- `src/collector_tushare.py` is now the active research data path for the native pipeline.
+- `ai4stock-collect tushare` is now the active research data path for the native pipeline, with Python kept only as provider/API adapter where needed.
 - `akshare` should remain the compatibility source while `tushare` is the active research data path.
 
 ## Current Technical Priorities
@@ -210,7 +214,7 @@ Priority fixes:
 - [x] Remove `main.py` as a research entrypoint:
   - the removed `main.py` path split train / valid / test by raw date ranges without applying `rolling.label_embargo_days`
   - with open-to-open labels, validation rows near the test boundary can use future opens inside the test period for early stopping / model selection
-  - delete the entrypoint, remove recommended commands, and keep `run_native_rolling.py` as the only training/backtest entrypoint
+  - delete the entrypoint, remove recommended commands, and keep `ai4stock-train rolling-lgbm` as the only training/backtest entrypoint
 - [x] Treat `--period test` and `--period all` diagnostics as research-only:
   - single-factor diagnostics now default to `train`
   - feature prefilter / robust-profile builders refuse `--write-config-profile` outside the training date range unless `--allow-unsafe-profile-write` is passed
@@ -266,7 +270,7 @@ Safe controls to preserve:
   - parquet dataset scan helpers
   - profile inheritance / inline-path resolution helpers where practical
 - [x] Remove the obsolete single-window `main.py` surface:
-  - active training/backtest should flow through `run_native_rolling.py`
+  - active training/backtest should flow through `ai4stock-train rolling-lgbm`
   - avoid maintaining a second train/valid/test splitter with weaker embargo semantics
 - [ ] Fix semantic-factor missingness semantics:
   - avoid treating missing components as neutral zero by default
@@ -279,7 +283,7 @@ Safe controls to preserve:
 - [ ] Split collector common parquet / lifecycle / symbol-cache utilities out of data-source-specific collectors
 - [ ] Clean compatibility and dead-code surfaces after the shared helpers are in place:
   - [x] hidden legacy CLI flags
-  - wrapper-only re-exports
+  - [x] root-level `run_*.py` compatibility wrappers and wrapper-only tests
   - unused imports
   - duplicated artifact readers and feature-family classifiers
 - [ ] Add a lightweight lint gate later, after source cleanup is complete; do not introduce broad formatting churn during the cleanup pass
@@ -295,11 +299,11 @@ Current status:
 - [x] Collector common parquet write/read and numeric-dtype utilities are extracted behind compatibility wrappers
 - [x] Optional parquet readers now return `None` only for missing/empty files; corrupt parquet and missing requested columns surface as errors
 - [x] Source shard, Tushare sidecar, and Tushare industry-context inputs now fail fast on invalid schemas instead of filling silent NA fallbacks
-- [x] The hidden rolling `--gpu` alias is removed; LSTM device selection uses `--torch-gpu`, while LightGBM GPU/CUDA stays under `lgbm.device_type`
+- [x] The hidden rolling `--gpu` alias is removed; LightGBM GPU/CUDA stays under `lgbm.device_type`
 - [x] Candidate diagnostics share artifact readers, metric extraction, bucket-shape, and feature-family helpers
-- [x] Config validation supported-mode constants are centralized while keeping `validate_training_config` as the public entrypoint
+- [x] Python config/profile validation helpers have been removed; Rust `ai4stock-train rolling-lgbm --dry-run` is the supported config audit path
 - [x] Backtest wrapper/report boundaries used shared native-to-legacy return helpers during migration; the Python backtest wrapper/report path has now been removed
-- [x] `run_native_rolling.py` no longer re-exports underscored artifact/baseline helpers only for tests
+- [x] Root-level `run_*.py` compatibility wrappers have been removed; direct Rust binaries are the supported entrypoints
 - [x] Low-risk unused imports are removed without adding a lint dependency
 - [ ] Lint gate remains deferred until code movement stabilizes
 
@@ -308,12 +312,11 @@ Current status:
 Audit status on 2026-04-30:
 
 - The active performance-critical LightGBM path is now `ai4stock-train rolling-lgbm` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays` -> `ai4stock-backtest run-bundle`.
-  `run_native_rolling.py` is a compatibility wrapper and should not regain config/profile resolution, factor-store loading, rolling-window construction, or backtest evaluation logic.
+  The former root-level compatibility wrapper has been removed and should not regain config/profile resolution, factor-store loading, rolling-window construction, or backtest evaluation logic.
 - The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `ai4stock-diagnostics single-factor-profile` / `ai4stock-diagnostics single-factor-batch` -> `ai4stock-diagnostics single-factor`.
-  The Python entrypoints `run_single_factor_diagnostics.py` and `run_single_factor_diagnostics_batch.py` are compatibility wrappers only; config/profile resolution, selected-feature JSON, metadata, and batch summaries are owned by Rust.
-- The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
+  The former Python compatibility entrypoints have been removed; config/profile resolution, selected-feature JSON, metadata, and batch summaries are owned by Rust.
+- The largest remaining training-time costs are repeated Python bridge materialization in LightGBM windows and unavoidable Python callback work for custom validation metrics.
 - Non-training runtime can still be dominated by Rust factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
-- LSTM sequence context is now prepared once per rolling run, but each rolling window still rebuilds `Dataset` / `DataLoader` wrappers and computes validation IC through pandas.
 
 Completed optimization slices:
 
@@ -360,14 +363,12 @@ Completed optimization slices:
   - `best_valid_daily_rank_ic` stayed identical at `0.4838547584724201`
   - temporary runner and raw benchmark artifacts were removed before commit; retained numbers above are the durable summary
 - [x] Add factor-generation phase timing before attempting a Rust rewrite:
-  - `src.gen_feature` now writes `factor_generation_timing.json` by default, with read / compute / label / write / metadata phases separated
+  - `ai4stock-gen-feature` writes generation metadata through the Rust path, with factor-store output assumptions recorded in `meta.json`
   - worker phase seconds are summed across workers, so the timing file records both wall time and aggregate worker phase time
-- [x] Add a factor-engine parity harness before migrating Rust feature generation:
-  - `src.feature_engine_parity` treats the pandas engine as the reference and can compare a candidate parquet/CSV snapshot on date / symbol / selected columns
-- [x] Keep Python and Rust feature generation as separate executable paths:
-  - `src.gen_feature` now defaults to a compatibility wrapper that resolves config/profile and delegates to `ai4stock-gen-feature`
-  - Python pandas/reference generation remains available with `AI4STOCK_PY_GEN_FEATURE_RUNTIME=1`
-  - Rust feature generation is exposed through the standalone `ai4stock-gen-feature` binary
+- [x] Remove the obsolete Python feature-generation reference path:
+  - `ai4stock-gen-feature` is the supported production/runtime entrypoint
+  - `src.gen_feature`, `src.feature_value_core`, `src.feature_engine_parity`, and Python gen-feature tests have been removed
+  - feature-generation tests now live on the Rust side
   - removed the PyO3/maturin feature-kernel bridge, wrapper modules, and native-wrapper tests so missing Rust code cannot silently fall back inside the Python path
   - retained the earlier kernel benchmark notes as migration evidence: rank `0.002269s -> 0.000434s`, idxmax `0.009380s -> 0.000726s`, Aroon extreme age `0.009189s -> 0.000758s`, CCI MAD `0.055208s -> 0.000206s`
 - [x] Harden Tushare bucket-source full rebuild memory behavior:
@@ -398,8 +399,8 @@ Completed optimization slices:
   - benchmark checkpoints from the migration remain: `legacy158` `0.185866s -> 0.079414s`, `lgbm_purified` `0.013656s -> 0.010247s`, `temporal` `0.040649s -> 0.032321s`, `technical` `0.127573s -> 0.011126s`, `TS_` `0.112160s -> 0.035429s`
 - [x] Move LightGBM bundle runtime ownership to Rust while keeping Python only for training:
   - `ai4stock-train make-bundle-lgbm` is a standalone Rust binary entrypoint that now resolves config/profile state, reads Parquet factor-store buckets, applies universe membership, materializes selected feature aliases, builds rolling windows, writes prepared window Parquet, and assembles final prediction-bundle artifacts
-  - `ai4stock-train rolling-lgbm` now owns the former `run_native_rolling.py` runtime orchestration: default output directory construction, config/profile/date/strategy overrides, optional prediction-bundle reuse, and post-training `ai4stock-backtest run-bundle` delegation
-  - `run_native_rolling.py` is now a thin compatibility wrapper around `ai4stock-train rolling-lgbm`; it no longer imports YAML/config/profile resolution code or builds train/backtest commands itself
+  - `ai4stock-train rolling-lgbm` owns rolling runtime orchestration: default output directory construction, config/profile/date/strategy overrides, optional prediction-bundle reuse, and post-training `ai4stock-backtest run-bundle` delegation
+  - the former root-level rolling compatibility wrapper has been removed
   - Python bridge scope is narrowed to `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays`, which receives prepared train/valid/test arrays and calls `src.models.pure_lightgbm.NativeLGBM`
   - the bridge no longer receives the full resolved training config; Rust passes only explicit LightGBM hyperparameters plus per-window metadata required for artifact summaries
   - the bridge no longer writes per-window prediction parquet or computes validation top-k summaries; Rust now owns final prediction artifact writes and training-summary assembly after Python returns prediction vectors plus model metrics
@@ -421,7 +422,7 @@ Completed optimization slices:
 - [x] Move diagnostics preset orchestration to Rust:
   - `ai4stock-diagnostics full-space-single-factor` owns the raw plus optional industry-neutral full-space preset command expansion
   - `ai4stock-diagnostics quality-event-flow-single-factor` owns the quality/event/flow preset cases for raw, industry-excess, and optional benchmark-excess diagnostics
-  - `run_full_space_single_factor_diagnostics.py` and `run_quality_event_flow_single_factor_batch.py` are now thin compatibility wrappers
+  - the former Python preset wrappers have been removed
 - [x] Move single-factor diagnostics profile and batch orchestration to Rust:
   - `ai4stock-diagnostics single-factor-profile` owns single-profile config/profile/date/segment/feature resolution
   - `ai4stock-diagnostics single-factor-batch` owns multi-case orchestration and batch TSV/manifest outputs
@@ -429,7 +430,7 @@ Completed optimization slices:
 - [x] Migrate universe-file building to the Rust collection binary:
   - `ai4stock-collect universes` now owns CLI parsing, universe-name validation, point-in-time interval validation, symbol/date normalization, and tab-separated output writes
   - Python remains only as the AkShare provider adapter behind `src.rust_collector_bridge.fetch_akshare_index_constituents`
-  - `src.build_universes` is kept as a compatibility wrapper and delegates to Rust by default; `AI4STOCK_PY_BUILD_UNIVERSES_RUNTIME=1` preserves the old pandas reference path
+  - The old `src.build_universes` compatibility wrapper and pandas reference path have been removed
 - [x] Move feature-profile prefilter summary rules to Rust:
   - `ai4stock-diagnostics prefilter-summary` now owns diagnostics-summary filtering, score sorting, and exact-duplicate pruning
   - `ai4stock-diagnostics robust-prefilter-summary` now owns raw/industry-neutral robust summary synthesis plus the same prefilter and exact-duplicate pruning
@@ -437,14 +438,14 @@ Completed optimization slices:
   - `ai4stock-diagnostics write-profile` now owns selected-feature YAML and README/profile artifact writing
   - `ai4stock-diagnostics build-prefilter-profile` and `build-robust-profile` now compose the full diagnostics-summary -> correlation-prune -> profile-artifact pipeline in one Rust command
   - `ai4stock-diagnostics build-prefilter-profile-runtime` and `build-robust-profile-runtime` now own config/profile/date resolution plus diagnostics-provenance safety checks
-  - `run_build_prefiltered_profile.py` and `run_build_robust_factor_profile.py` are compatibility wrappers only; pandas summary/correlation fallback paths are removed
+  - the former Python profile-builder wrappers have been removed; pandas summary/correlation fallback paths are removed
 - [x] Move LGBM artifact-rebuild batch runtime to Rust:
   - `ai4stock-backtest artifact-batch` owns selected-matrix row filtering, preflight checks, marker handling, failure TSVs, summary TSV/JSON, grouped post-bundle execution, and parallelism
-  - `run_lgbm_backtest_artifacts.py` is now only a thin compatibility wrapper that delegates directly to Rust `artifact-batch`
+  - the former Python artifact-batch wrapper has been removed
   - Python `direct`, Python `subprocess`, and `--disable-rust-backtest` artifact-rebuild execution modes are removed; post-bundle work now goes through Rust only
 - [x] Remove obsolete Python backtest runtime:
   - `src/native_backtest.py`, `src/backtest_engine.py`, `src/backtest.py`, `src/backtest_controls.py`, `src/backtest_scoring.py`, `src/backtest_trace.py`, `src/backtest_report.py`, and `src/rolling_evaluate.py` have been deleted
-  - `ai4stock-backtest bundle` no longer falls back to `run_native_rolling.py` for Python post-bundle evaluation; unsupported bundle options now fail fast
+  - `ai4stock-backtest bundle` no longer falls back to Python post-bundle evaluation; unsupported bundle options now fail fast
 - [x] Remove obsolete Python rolling/evaluation runtime:
   - `src/evaluate.py`, `src/rolling_train.py`, `src/rolling_runtime.py`, `src/rolling_artifacts.py`, `src/rolling_baselines.py`, `src/rolling_types.py`, and `src/prediction_fusion.py` have been deleted
   - Rust `ai4stock-train rolling-lgbm` owns rolling training orchestration and prediction-bundle generation; Rust `ai4stock-backtest run-bundle` owns score fusion, benchmark/baseline handling, and report artifacts
@@ -453,13 +454,13 @@ Completed optimization slices:
   - the initial compatibility wrapper delegated normal sweeps while prediction dedupe was still pending
 - [x] Finish moving experiment-sweep prediction dedupe to Rust:
   - `ai4stock-experiment batch --dedupe-predictions` now resolves the per-run prediction-producing config, fingerprints the same config surface as the old Python runner, saves predictions for the first matching run, and replays later compatible runs through `--load-predictions-dir`
-  - `run_experiment_batch.py` is now a thin compatibility wrapper for `ai4stock-experiment batch`
+  - the former Python experiment-batch wrapper has been removed
 - [x] Move candidate-pool diagnostics to Rust:
-  - `ai4stock-diagnostics candidate-pool` now owns candidate-root scanning, preset/explicit run resolution, portfolio/yearly/concentration/bucket/validation summaries, candidate profile JSON/CSV exports, README generation, and candidate-root sync
-  - `run_candidate_pool_diagnostics.py` is now a thin compatibility wrapper; candidate-pool sync/profile behavior is covered by Rust unit tests
+  - `ai4stock-diagnostics candidate-pool` now owns candidate-root scanning, explicit run resolution, portfolio/yearly/concentration/bucket/validation summaries, candidate profile JSON/CSV exports, README generation, and candidate-root sync
+  - the former Python candidate-pool wrapper has been removed; candidate-pool sync/profile behavior is covered by Rust unit tests
 - [x] Move strategy-pair diagnostics to Rust:
   - `ai4stock-diagnostics strategy-pair` now owns two-run metric/training/bucket/monthly/daily/feature/trace-overlap comparison outputs
-  - `run_strategy_pair_diagnostics.py` is now a thin compatibility wrapper; obsolete Python candidate diagnostics/profile helper modules have been removed
+  - the former Python strategy-pair wrapper has been removed; obsolete Python candidate diagnostics/profile helper modules have been removed
 
 Feature build v2 direction:
 
@@ -474,7 +475,7 @@ Feature build v2 direction:
   - read source bucket Parquet with Arrow / `parquet`
   - compute rolling kernels with bounded per-symbol state
   - write Parquet row groups directly
-  - compare output through `src.feature_engine_parity` before promotion
+  - validate output through Rust unit/integration tests before promotion
 
 Expression-driven factor mining direction:
 
@@ -496,10 +497,10 @@ Expression-driven factor mining direction:
 
 Rust migration sequence before broad factor mining:
 
-- Phase 1: stabilize Rust as a standalone performance substrate while preserving Python outputs:
-  - keep Python and Rust generation as separate executable paths
+- Phase 1: stabilize Rust as a standalone performance substrate:
+  - keep Rust generation as the only production executable path
   - keep Parquet as the canonical exchange/storage format
-  - require parity against the Python reference before replacing any production factor-store artifact
+  - require Rust-side shape, naming, coverage, and label tests before replacing any production factor-store artifact
 - Phase 2: add a Rust expression evaluator behind the Rust CLI:
   - parse a small DSL from profile/config
   - execute per-symbol streaming expressions with bounded state
@@ -562,13 +563,6 @@ Priority fixes:
   - [x] make `materialize_selected_feature_frame` return the loaded frame unchanged when `selected_columns == source_columns`
   - avoid copying all selected features just to build alias columns; add only the alias columns that are actually needed
   - [x] downcast the precomputed rank frame to `float32` after percentile ranking unless a downstream comparison proves `float64` is required
-- [ ] Finish LSTM loader and validation-metric optimization:
-  - [x] sort / factorize symbols once per rolling run
-  - [x] build the full feature tensor once per rolling run
-  - [x] apply NaN / inf fill and clipping once instead of in every `Dataset.__getitem__`
-  - make `DataLoader` worker count configurable and enable `persistent_workers` when workers are used
-  - use `pin_memory` only when the selected device is CUDA
-  - [x] replace pandas `groupby(...).apply(...)` validation IC with an array implementation
 - [ ] Reduce pandas copy and sort pressure in the LightGBM window path:
   - avoid repeated `reset_index(drop=True)` copies where array masks are sufficient
   - pass NumPy arrays to LightGBM after one validated feature-column ordering step
@@ -688,10 +682,10 @@ Priority fixes:
   Current state: `fina_indicator`, `dividend`, `forecast`, `express` are already wired; next batch should be `income`, `balancesheet`, `cashflow`, then `fina_audit`, `fina_mainbz`
 - [ ] Design the second Tushare factor layer around financial/event tables instead of only daily market tables
 - [x] Finish a full `--stages all` Tushare backfill to a stable converged state and verify repeated reruns are purely incremental for the currently landed stage set
-- [x] Build the Tushare factor store after raw convergence: `pixi run python -m src.gen_feature --data-source tushare --workers 16 --incremental`
+- [x] Build the Tushare factor store after raw convergence: `cargo run --bin ai4stock-gen-feature -- generate --parquet-dir data/tushare/source --output-dir data/factor_store/tushare_full_factor_space --data-source tushare --workers 16`
 - [x] Run the first Tushare-native rolling baseline before adding more tables
 - [x] Remove `main.py` and keep new training/backtest modes on the rolling runtime path
-- [ ] Refactor `gen_feature.py` into smaller modules: factor definitions, label builder, and factor-store builder
+- [ ] Make factor definitions single-source for Rust generation and remove Python feature registry duplication
 - [ ] Extract collector-common parquet/lifecycle/update helpers so `collector_akshare.py` and `collector_tushare.py` stop diverging
 - [ ] Upgrade training-time transforms from ad-hoc functions to a real fit/transform pipeline before adding more transform combinations
 
@@ -856,7 +850,7 @@ Priority fixes:
 - [ ] Add a feature coverage report during cache generation
 - [ ] Add per-feature NaN / inf diagnostics to `meta.json`
 - [ ] Add a cache validation command for shape, names, coverage, and label sanity
-- [ ] Only move feature kernels to Rust after timing evidence shows `factor_compute` dominates wall time and the candidate output passes `src.feature_engine_parity`
+- [x] Feature kernels have moved to Rust; keep future factor changes covered by Rust shape, naming, coverage, and label tests
 - [ ] Review whether valuation fields are complete enough across the full sample
 - [ ] Reduce full-factor cache footprint without changing the current training read path
 - [ ] Fix collector dtype downcast so Eastmoney share-count fields do not overflow when written to parquet
@@ -893,9 +887,8 @@ Priority fixes:
 
 ### 12. Native Model Roadmap
 
-- [ ] Decide whether native LSTM should remain supported as a secondary path
-- [ ] If sequence models remain in scope, build a real native Transformer implementation
-- [ ] Add a unified save/load contract shared by all native models
+- [x] Remove obsolete non-LightGBM Python model paths from the active model surface
+- [ ] Add a unified save/load contract for future non-LGBM native models
 - [ ] Add CatBoost as the first non-LGBM tabular baseline
 - [ ] Add a simple linear baseline such as Ridge / ElasticNet for signal sanity checks
 - [~] Evaluate whether rank objectives should be added before broadening to more tree models

@@ -11,11 +11,11 @@ AI4Stock2 is now a native A-share research pipeline built around:
 
 The stable research path today is:
 
-1. Update raw/processed Parquet data with `src/collector_akshare.py`
-2. Generate one unified full-factor store with `src/gen_feature.py`
-3. Train a native LightGBM model from a named experiment profile
-4. Evaluate signal quality and run the Rust post-bundle backtest
-5. Archive metrics, plots, models, and config snapshots into the local experiment store
+1. Update raw/processed Parquet data with `ai4stock-collect`
+2. Generate one unified full-factor store with `ai4stock-gen-feature`
+3. Train a native LightGBM model with `ai4stock-train rolling-lgbm`
+4. Evaluate signal quality and run `ai4stock-backtest run-bundle`
+5. Archive metrics, plots, models, and config snapshots through native artifact outputs
 
 At the same time, the data layer is actively being migrated:
 
@@ -27,29 +27,29 @@ At the same time, the data layer is actively being migrated:
 ### Data Layer
 
 - Stable source of truth today: `data/processed/combined/*.parquet`
-- Stable updater today: Rust `ai4stock-collect akshare`, with `src/collector_akshare.py` kept as a compatibility wrapper.
-- Universe membership builder: Rust `ai4stock-collect universes`, with `src/build_universes.py` kept as a compatibility wrapper and the AkShare provider adapter kept behind the PyO3 bridge.
+- Stable updater today: Rust `ai4stock-collect akshare`, with `src/collector_akshare.py` kept only as the AkShare provider adapter behind the PyO3 bridge.
+- Universe membership builder: Rust `ai4stock-collect universes`, with AkShare constituent fetching kept behind the PyO3 provider bridge.
 - Isolated Tushare path: `data/tushare/raw/*` -> `data/tushare/processed/combined/*.parquet`
 - Migration target: promote one canonical Tushare-normalized `combined` schema into the formal research workflow
-- Native feature-cache builder: Rust `ai4stock-gen-feature`, with `src/gen_feature.py` kept as config/profile-resolving compatibility wrapper and pandas reference path
-- Native rolling LightGBM entry: Rust `ai4stock-train rolling-lgbm` owns output-dir resolution, config/profile/date overrides, prediction-bundle creation, and post-bundle backtest delegation; `run_native_rolling.py` is a compatibility wrapper only
+- Native feature-cache builder: Rust `ai4stock-gen-feature`; the old Python feature generator has been removed.
+- Native rolling LightGBM entry: Rust `ai4stock-train rolling-lgbm` owns output-dir resolution, config/profile/date overrides, prediction-bundle creation, and post-bundle backtest delegation.
 - Native post-bundle backtest: Rust `ai4stock-backtest run-bundle` owns backtest execution, benchmark/reference-baseline reports, plots, trace artifacts, and backtest label safety validation. The old Python backtest engine path has been removed.
-- Diagnostics/profile prefilter: Rust `ai4stock-diagnostics single-factor`, `single-factor-profile`, `single-factor-batch`, `full-space-single-factor`, `quality-event-flow-single-factor`, `prefilter-summary`, `robust-prefilter-summary`, `corr-prune`, `write-profile`, `build-prefilter-profile`, `build-robust-profile`, `build-prefilter-profile-runtime`, `build-robust-profile-runtime`, `candidate-pool`, and `strategy-pair`; Python diagnostics/profile builders are compatibility wrappers only
-- LGBM artifact-rebuild batches: Rust `ai4stock-backtest artifact-batch`, with `run_lgbm_backtest_artifacts.py` kept only as a compatibility wrapper that delegates to Rust
-- Experiment sweep batches: Rust `ai4stock-experiment batch` owns sweep/case expansion, command generation, dry-run output, sequential child execution, and prediction-bundle dedupe/replay; `run_experiment_batch.py` is a compatibility wrapper
+- Diagnostics/profile prefilter: Rust `ai4stock-diagnostics single-factor`, `single-factor-profile`, `single-factor-batch`, `full-space-single-factor`, `quality-event-flow-single-factor`, `prefilter-summary`, `robust-prefilter-summary`, `corr-prune`, `write-profile`, `build-prefilter-profile`, `build-robust-profile`, `build-prefilter-profile-runtime`, `build-robust-profile-runtime`, `candidate-pool`, and `strategy-pair`.
+- LGBM artifact-rebuild batches: Rust `ai4stock-backtest artifact-batch`.
+- Experiment sweep batches: Rust `ai4stock-experiment batch` owns sweep/case expansion, command generation, dry-run output, sequential child execution, and prediction-bundle dedupe/replay.
 
 Current collector roles:
 
-- `src/collector_akshare.py`: compatibility wrapper plus provider adapter for the current default Eastmoney-compatible dataset
-- `src/collector_tushare.py`: compatibility wrapper plus Tushare provider adapter; Rust owns scheduling, processed rebuild, packed source, sidecar lagging, and industry context materialization
+- `src/collector_akshare.py`: AkShare/Eastmoney provider adapter; Rust owns CLI parsing, scheduling, and artifact orchestration
+- `src/collector_tushare.py`: Tushare provider adapter; Rust owns CLI parsing, scheduling, processed rebuild, packed source, sidecar lagging, and industry context materialization
 - `src/probe_tushare.py`: endpoint probe for schema/latency inspection before formal integration
 
 ### Feature Layer
 
 - Feature profile index: `configs/feature_profiles.yaml`
 - Feature profile definitions: `configs/features/*.yaml`
-- Profile resolver: `src/feature_profiles.py`
-- Training-time feature subset selection: `src/feature_selection.py`
+- Profile resolver and training-time feature subset selection: Rust `ai4stock-train rolling-lgbm`
+- Diagnostics profile resolution: Rust `ai4stock-diagnostics`
 
 The intended workflow is:
 
@@ -62,7 +62,6 @@ The intended workflow is:
 - Model profile index: `configs/model_profiles.yaml`
 - Model profile definitions: `configs/models/*.yaml`
 - Native LightGBM: `src/models/pure_lightgbm.py`
-- Native LSTM: `src/models/pure_pytorch_lstm.py`
 
 Current default model is `lgbm`.
 
@@ -70,8 +69,8 @@ Current default model is `lgbm`.
 
 - Experiment profile index: `configs/experiment_profiles.yaml`
 - Experiment profile definitions: `configs/experiments/*.yaml`
-- Rolling entry: Rust `ai4stock-train rolling-lgbm`; compatibility wrapper `run_native_rolling.py`
-- Experiment/model archive: `src/experiment_store.py`
+- Rolling entry: Rust `ai4stock-train rolling-lgbm`
+- Experiment/model archive: Rust artifact writers in `ai4stock-train`, `ai4stock-backtest`, and `ai4stock-experiment`
 
 ### Evaluation Layer
 
@@ -101,20 +100,11 @@ AI4Stock2/
 ├── src/
 │   ├── collector_akshare.py
 │   ├── collector_tushare.py
-│   ├── config_loader.py
-│   ├── data_source.py
-│   ├── experiment_profiles.py
-│   ├── gen_feature.py
 │   ├── rust_lgbm_bridge.py
-│   ├── feature_profiles.py
-│   ├── feature_selection.py
-│   ├── model_profiles.py
-│   ├── override_utils.py
-│   ├── runtime_cli.py
+│   ├── rust_collector_bridge.py
 │   ├── probe_tushare.py
 │   └── models/
-│       ├── pure_lightgbm.py
-│       └── pure_pytorch_lstm.py
+│       └── pure_lightgbm.py
 ├── src_rust/
 │   ├── lib.rs
 │   ├── gen_feature.rs
@@ -123,8 +113,7 @@ AI4Stock2/
 │       ├── ai4stock_backtest.rs
 │       ├── ai4stock_gen_feature.rs
 │       └── ai4stock_train.rs
-├── run_experiment_batch.py
-└── run_native_rolling.py
+└── tests/
 ```
 
 ## Current Defaults
@@ -145,7 +134,7 @@ AI4Stock2/
 - If you change experiment profile, you do not rebuild the cache.
 - If you change feature profile, you do not rebuild the cache.
 - If you only change model profile, you do not rebuild the cache.
-- `gen_feature.py` should remain detached from feature/model/experiment profiles.
+- `ai4stock-gen-feature` should remain detached from feature/model/experiment profiles.
 - When validating Tushare, keep its normalized parquet under its own directory until the canonical schema switch is finished.
 - Use this document for structure.
 - Use `docs/CONFIG_PROFILE_ARCHITECTURE.md` for the canonical layering rules.

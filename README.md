@@ -1,6 +1,6 @@
 # AI4Stock2
 
-Native A-share research pipeline built around Parquet data, local feature caches, native LightGBM/LSTM training, and a native backtest engine.
+Native A-share research pipeline built around Parquet data, local feature caches, native LightGBM training, and a native backtest engine.
 
 ## Quickstart
 
@@ -10,13 +10,18 @@ The current stable path is still AkShare / Eastmoney-compatible data; Tushare us
 Generate the factor store for the active config:
 
 ```bash
-pixi run python -m src.gen_feature --workers 8
+cargo run --bin ai4stock-gen-feature -- generate \
+  --parquet-dir data/processed/combined \
+  --output-dir data/factor_store/full_factor_space \
+  --workers 8
 ```
 
 Run a rolling LightGBM experiment by explicitly naming the experiment profile:
 
 ```bash
-pixi run python run_native_rolling.py --config configs/config.yaml --experiment-profile core_v4_lgbm_default_10x20x10
+cargo run --bin ai4stock-train -- rolling-lgbm \
+  --config configs/config.yaml \
+  --experiment-profile core_v4_lgbm_default_10x20x10
 ```
 
 The old single-window training entrypoint has been removed; use rolling runs for research and reporting.

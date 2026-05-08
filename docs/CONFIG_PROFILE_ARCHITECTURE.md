@@ -8,7 +8,7 @@ feature subsets, model hyperparameters, and experiment semantics are separated.
 
 The design goal is simple:
 
-- `gen_feature.py` generates one unified full-factor store
+- `ai4stock-gen-feature` generates one unified full-factor store
 - training consumes subsets from that store
 - model hyperparameters are never hardcoded in Python when they should be profiles
 - experiment semantics are named and reproducible
@@ -54,6 +54,7 @@ Feature profile definitions:
 
 - `configs/features/*.yaml`
 - derived feature profiles may also live inline in `configs/feature_profiles.yaml` via `extends` / `drop_columns` / `add_columns`
+- profile resolution is implemented in Rust; the YAML files remain the source of truth
 
 ### 3. Model Profile
 
@@ -86,6 +87,7 @@ Model profile index:
 Model profile definitions:
 
 - `configs/models/*.yaml`
+- model profile resolution is implemented in Rust; the YAML files remain the source of truth
 
 ### 4. Experiment Profile
 
@@ -153,14 +155,16 @@ The canonical merge order is:
 5. CLI overrides
 
 Feature profiles are not merged as generic config blocks.
-They are resolved separately and used only for factor-store selection.
+They are resolved separately in Rust and used only for factor-store selection.
 
 ## Command-Line Interface
 
 The preferred entry points should be:
 
 ```bash
-pixi run python -m src.gen_feature
+cargo run --bin ai4stock-gen-feature -- generate \
+  --parquet-dir data/processed/combined \
+  --output-dir data/factor_store/full_factor_space
 cargo run --bin ai4stock-train -- rolling-lgbm --experiment-profile core_v4_lgbm_default_10x20x10
 ```
 
@@ -188,7 +192,7 @@ cargo run --bin ai4stock-train -- rolling-lgbm \
 For batch sweeps, prefer one base experiment plus a sweep runner:
 
 ```bash
-pixi run python run_experiment_batch.py \
+cargo run --bin ai4stock-experiment -- batch \
   --pipeline rolling \
   --experiment-profile core_v4_lgbm_default_10x20x10 \
   --sweep 'rolling.retrain_step=[5,10,15]'

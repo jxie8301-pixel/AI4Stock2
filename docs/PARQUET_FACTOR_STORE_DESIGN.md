@@ -107,13 +107,9 @@ Parquet helps because:
 
 ## Read Path Design
 
-Training should no longer open `X.npy`, `y.npy`, `date.npy`, `symbol.npy` directly.
+Training should not open `X.npy`, `y.npy`, `date.npy`, `symbol.npy` directly.
 
-Instead, introduce a dataset loader module, for example:
-
-- `src/factor_store.py`
-
-Core loader responsibilities:
+The native Rust runtime owns factor-store reads. Core loader responsibilities:
 
 1. Resolve factor store root from config
 2. Read only:
@@ -123,20 +119,9 @@ Core loader responsibilities:
    - `label`
 3. Apply date filter as early as possible
 4. Apply universe filter after loading `date` and `symbol`
-5. Return a compact pandas frame or column arrays
+5. Return compact column arrays for training and diagnostics
 
-Recommended API:
-
-```python
-load_factor_frame(
-    store_dir: str | Path,
-    columns: list[str],
-    date_start: str | pd.Timestamp,
-    date_end: str | pd.Timestamp,
-    universe_name: str,
-    universe_dir: str | Path,
-) -> pd.DataFrame
-```
+The old Python factor-store reader has been removed. Add new read behavior to the Rust binaries instead of reintroducing `src/factor_store.py`.
 
 Required columns in the returned frame:
 
@@ -160,57 +145,37 @@ This preserves the current rolling logic while drastically reducing on-disk byte
 
 ## Generation Pipeline Strategy
 
-`src/gen_feature.py` should be refactored into two steps:
+The native generator should keep these internal phases explicit:
 
 1. `build_symbol_shards`
 2. `compact_panel_dataset`
 
-Recommended CLI evolution:
+Recommended CLI:
 
 ```bash
-pixi run python -m src.gen_feature --workers 24
+cargo run --bin ai4stock-gen-feature -- generate \
+  --parquet-dir data/processed/combined \
+  --output-dir data/factor_store/full_factor_space \
+  --workers 24
 ```
 
-still does both steps by default.
-
-Optional advanced modes:
-
-```bash
-pixi run python -m src.gen_feature --mode shards --incremental
-pixi run python -m src.gen_feature --mode compact
-```
+The old Python `--mode shards/compact` design is obsolete; add incremental generation directly to the Rust binary if it becomes necessary again.
 
 ## File-Level Change Plan
 
-### New Modules
+### Active Modules
 
-- `src/factor_store.py`
-  - Parquet read helpers
-  - date-range pruning
-  - selected-column loading
-  - optional universe filtering helper
+- Rust `ai4stock-gen-feature`
+  - write factor buckets as Parquet
+  - keep metadata / manifest generation explicit
+  - avoid monolithic `X.npy/y.npy/date.npy/symbol.npy`
 
-### Existing Modules To Change
-
-- `src/gen_feature.py`
-  - write symbol shards as Parquet
-  - compact shards into date-major Parquet panel
-  - stop writing monolithic `X.npy/y.npy/date.npy/symbol.npy`
-
-- `src/feature_profiles.py`
-  - `cache_dir` concept should evolve toward `factor_store_dir`
-  - keep backward-compatible field alias during migration
-
-- `run_native_rolling.py`
-  - replace memmap loading with one preloaded date-range frame
+- Rust `ai4stock-train rolling-lgbm`
+  - read Parquet factor stores with selected-column loading
   - keep current rolling-window logic on the in-memory frame
 
-- `src/feature_selection.py`
-  - keep profile/subset logic
-  - no major semantic change required
-
-- `src/experiment_store.py`
-  - record factor store path / format in manifest
+- Rust `ai4stock-backtest` and `ai4stock-experiment`
+  - record factor store path / format in manifest and summary artifacts
 
 ### Tests To Add
 
@@ -218,23 +183,12 @@ pixi run python -m src.gen_feature --mode compact
 - factor store date-range read test
 - rolling pipeline smoke test on Parquet-backed factor store
 
-## Migration Phases
+## Migration Status
 
-### Phase 1
-
-- Add Parquet factor store writer in parallel with current memmap output
-- Add `src/factor_store.py`
-- Add read-path tests
-
-### Phase 2
-
-- Switch `run_native_rolling.py` to read the Parquet factor store
-- Keep memmap generation behind a fallback flag only if needed
-
-### Phase 3
-
-- Remove memmap generation and old `data/cache/all_factors_panel`
-- Rename config fields from `cache_dir` to `factor_store_dir`
+- Parquet factor-store writer and reader live on the Rust path.
+- `ai4stock-train rolling-lgbm` reads the Parquet factor store directly.
+- The old Python `src/factor_store.py` and `src/experiment_store.py` helpers have been removed.
+- Config fields use `factor_store_dir` instead of the old cache naming.
 
 ## Old Data That Can Be Deleted After Migration
 

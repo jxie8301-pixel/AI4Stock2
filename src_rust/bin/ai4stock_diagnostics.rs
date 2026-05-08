@@ -14,18 +14,27 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[path = "ai4stock_diagnostics/single_factor_batch.rs"]
+mod single_factor_batch;
+
 fn usage() -> &'static str {
     "\
 ai4stock-diagnostics: Rust diagnostics entrypoint for AI4Stock2
 
 Usage:
   ai4stock-diagnostics single-factor --factor-store <PATH> --output-dir <PATH> --label-column <COL> (--feature <NAME> | --features-json <PATH>)... [options]
+  ai4stock-diagnostics single-factor-profile --experiment-profile <NAME> [options]
+  ai4stock-diagnostics single-factor-batch --experiment-profile <NAME> --case KEY=VALUE... [options]
   ai4stock-diagnostics prefilter-summary --diagnostics-summary <CSV> --output-dir <PATH> [options]
   ai4stock-diagnostics robust-prefilter-summary --raw-summary <CSV> --neutral-summary <CSV> --output-dir <PATH> [options]
   ai4stock-diagnostics corr-prune --factor-store <PATH> --candidates <CSV> --output-dir <PATH> [options]
   ai4stock-diagnostics write-profile --selected-csv <CSV> --profile-name <NAME> --output-dir <PATH> [options]
   ai4stock-diagnostics build-prefilter-profile --diagnostics-summary <CSV> --factor-store <PATH> --profile-name <NAME> --output-dir <PATH> [options]
   ai4stock-diagnostics build-robust-profile --raw-summary <CSV> --neutral-summary <CSV> --factor-store <PATH> --profile-name <NAME> --output-dir <PATH> [options]
+  ai4stock-diagnostics build-prefilter-profile-runtime --diagnostics-summary <CSV> --experiment-profile <NAME> --profile-name <NAME> [options]
+  ai4stock-diagnostics build-robust-profile-runtime --raw-summary <CSV> --neutral-summary <CSV> --experiment-profile <NAME> --profile-name <NAME> [options]
+  ai4stock-diagnostics full-space-single-factor --experiment-profile <NAME> [options]
+  ai4stock-diagnostics quality-event-flow-single-factor --experiment-profile <NAME> [options]
 
 Options:
   --factor-store <PATH>       Factor-store root. Supports <root>/buckets/part-*.parquet.
@@ -59,6 +68,27 @@ Options:
   --config-snapshot <PATH>    Optional resolved config snapshot to copy into output.
   --json                      Print machine-readable JSON summary.
   -h, --help                  Show this help.
+
+Single-factor batch options:
+  --config <PATH>             Runtime config path. Default: configs/config.yaml.
+  --config-is-snapshot        Treat --config as already-resolved YAML.
+  --experiment-profile <NAME> Experiment profile used to compose runtime config.
+  --feature-profile <NAME>    Optional global feature profile override.
+  --model-profile <NAME>      Optional model profile override used during config composition.
+  --data-source <NAME>        Override data.source.
+  --set <KEY=VALUE>           Dotted runtime config override. Can be repeated.
+  --period <NAME>             train, valid, test, or all. Default: train.
+  --date-start <DATE>         Explicit diagnostics start date.
+  --date-end <DATE>           Explicit diagnostics end date.
+  --all-features              Diagnose all cached factor-store features per case.
+  --segment-scheme <NAME>     none, config_split, or yearly. Default: none.
+  --segments <SPEC>           Custom 'name:start:end;...' segments.
+  --base-output-dir <PATH>    Root directory for per-case outputs.
+  --summary-path <PATH>       Batch TSV summary path.
+  --manifest-path <PATH>      Batch TSV manifest path.
+  --case KEY=VALUE ...        Case keys include name, feature_profile, baseline_feature_profile,
+                              diagnostic_label_space, diagnostic_threshold, output_dir, run_tag.
+  --dry-run                   Print per-case Rust single-factor commands without executing.
 
 Prefilter options:
   --diagnostics-summary <CSV> Single-factor summary CSV.
@@ -163,6 +193,49 @@ struct RobustProfileBuildCliOptions {
     json: bool,
 }
 
+#[derive(Debug, Clone)]
+struct FullSpacePresetOptions {
+    config: String,
+    experiment_profile: String,
+    model_profile: Option<String>,
+    data_source: Option<String>,
+    period: String,
+    date_start: Option<String>,
+    date_end: Option<String>,
+    quantile_bins: usize,
+    top_n: usize,
+    segment_scheme: String,
+    segments: Option<String>,
+    base_output_dir: Option<PathBuf>,
+    run_tag: Option<String>,
+    diagnostic_label_space: String,
+    diagnostic_threshold: f64,
+    skip_industry_neutral: bool,
+    set_overrides: Vec<String>,
+    dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+struct QualityEventFlowPresetOptions {
+    config: String,
+    experiment_profile: String,
+    feature_profile: String,
+    model_profile: Option<String>,
+    data_source: Option<String>,
+    period: String,
+    date_start: Option<String>,
+    date_end: Option<String>,
+    quantile_bins: usize,
+    top_n: usize,
+    segment_scheme: String,
+    segments: Option<String>,
+    base_output_dir: Option<PathBuf>,
+    run_tag: Option<String>,
+    include_benchmark_excess: bool,
+    set_overrides: Vec<String>,
+    dry_run: bool,
+}
+
 fn main() -> ExitCode {
     let args = env::args().skip(1).collect::<Vec<_>>();
     match run(&args) {
@@ -185,12 +258,26 @@ fn run(args: &[String]) -> Result<(), String> {
     match command.as_str() {
         "-h" | "--help" => Err(usage().to_owned()),
         "single-factor" => run_single_factor(&args[1..]),
+        "single-factor-profile" => {
+            single_factor_batch::run_single_factor_profile_command(&args[1..])
+        }
+        "single-factor-batch" => single_factor_batch::run_single_factor_batch_command(&args[1..]),
         "prefilter-summary" => run_prefilter_summary_command(&args[1..]),
         "robust-prefilter-summary" => run_robust_prefilter_summary_command(&args[1..]),
         "corr-prune" => run_corr_prune_command(&args[1..]),
         "write-profile" => run_write_profile_command(&args[1..]),
         "build-prefilter-profile" => run_build_prefilter_profile_command(&args[1..]),
         "build-robust-profile" => run_build_robust_profile_command(&args[1..]),
+        "build-prefilter-profile-runtime" => {
+            single_factor_batch::run_prefilter_profile_runtime_command(&args[1..])
+        }
+        "build-robust-profile-runtime" => {
+            single_factor_batch::run_robust_profile_runtime_command(&args[1..])
+        }
+        "full-space-single-factor" => run_full_space_single_factor_command(&args[1..]),
+        "quality-event-flow-single-factor" => {
+            run_quality_event_flow_single_factor_command(&args[1..])
+        }
         other => Err(format!("unknown command: {other}\n\n{}", usage())),
     }
 }
@@ -374,6 +461,42 @@ fn run_single_factor(args: &[String]) -> Result<(), String> {
         println!("segment_count={}", summary.segment_count);
         println!("elapsed_seconds={}", summary.elapsed_seconds);
     }
+    Ok(())
+}
+
+fn run_full_space_single_factor_command(args: &[String]) -> Result<(), String> {
+    let options = parse_full_space_preset_options(args)?;
+    let mut passes = vec![("raw".to_owned(), false)];
+    if !options.skip_industry_neutral {
+        passes.push(("industry_neutral".to_owned(), true));
+    }
+    for (pass_name, industry_neutral) in passes {
+        let command = build_full_space_preset_command(&options, &pass_name, industry_neutral);
+        println!("[*] Executing diagnostics batch:");
+        println!(
+            "    {}",
+            display_command(&prepend_batch_subcommand(&command))
+        );
+        if options.dry_run {
+            continue;
+        }
+        single_factor_batch::run_single_factor_batch_command(&command)?;
+    }
+    Ok(())
+}
+
+fn run_quality_event_flow_single_factor_command(args: &[String]) -> Result<(), String> {
+    let options = parse_quality_event_flow_preset_options(args)?;
+    let command = build_quality_event_flow_preset_command(&options);
+    println!("[*] Executing diagnostics batch:");
+    println!(
+        "    {}",
+        display_command(&prepend_batch_subcommand(&command))
+    );
+    if options.dry_run {
+        return Ok(());
+    }
+    single_factor_batch::run_single_factor_batch_command(&command)?;
     Ok(())
 }
 
@@ -1613,6 +1736,417 @@ fn sorted_unique_nonempty(values: Vec<String>) -> Vec<String> {
     out
 }
 
+fn parse_full_space_preset_options(args: &[String]) -> Result<FullSpacePresetOptions, String> {
+    let mut options = FullSpacePresetOptions {
+        config: "configs/config.yaml".to_owned(),
+        experiment_profile: String::new(),
+        model_profile: None,
+        data_source: None,
+        period: "train".to_owned(),
+        date_start: None,
+        date_end: None,
+        quantile_bins: 5,
+        top_n: 100,
+        segment_scheme: "yearly".to_owned(),
+        segments: None,
+        base_output_dir: None,
+        run_tag: None,
+        diagnostic_label_space: "raw_return".to_owned(),
+        diagnostic_threshold: 0.0,
+        skip_industry_neutral: false,
+        set_overrides: Vec::new(),
+        dry_run: false,
+    };
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--config" => {
+                index += 1;
+                options.config = next_value(args, index, "--config")?;
+            }
+            "--experiment-profile" => {
+                index += 1;
+                options.experiment_profile = next_value(args, index, "--experiment-profile")?;
+            }
+            "--model-profile" => {
+                index += 1;
+                options.model_profile = Some(next_value(args, index, "--model-profile")?);
+            }
+            "--data-source" => {
+                index += 1;
+                options.data_source = Some(next_value(args, index, "--data-source")?);
+            }
+            "--period" => {
+                index += 1;
+                options.period = next_value(args, index, "--period")?;
+            }
+            "--date-start" => {
+                index += 1;
+                options.date_start = Some(next_value(args, index, "--date-start")?);
+            }
+            "--date-end" => {
+                index += 1;
+                options.date_end = Some(next_value(args, index, "--date-end")?);
+            }
+            "--quantile-bins" => {
+                index += 1;
+                options.quantile_bins = parse_usize(
+                    next_value(args, index, "--quantile-bins")?,
+                    "--quantile-bins",
+                )?
+                .max(2);
+            }
+            "--top-n" => {
+                index += 1;
+                options.top_n = parse_usize(next_value(args, index, "--top-n")?, "--top-n")?.max(1);
+            }
+            "--segment-scheme" => {
+                index += 1;
+                options.segment_scheme = next_value(args, index, "--segment-scheme")?;
+            }
+            "--segments" => {
+                index += 1;
+                options.segments = Some(next_value(args, index, "--segments")?);
+            }
+            "--base-output-dir" => {
+                index += 1;
+                options.base_output_dir =
+                    Some(PathBuf::from(next_value(args, index, "--base-output-dir")?));
+            }
+            "--run-tag" => {
+                index += 1;
+                options.run_tag = Some(next_value(args, index, "--run-tag")?);
+            }
+            "--diagnostic-label-space" => {
+                index += 1;
+                options.diagnostic_label_space =
+                    next_value(args, index, "--diagnostic-label-space")?;
+            }
+            "--diagnostic-threshold" => {
+                index += 1;
+                options.diagnostic_threshold = parse_f64(
+                    next_value(args, index, "--diagnostic-threshold")?,
+                    "--diagnostic-threshold",
+                )?;
+            }
+            "--skip-industry-neutral" => options.skip_industry_neutral = true,
+            "--set" => {
+                index += 1;
+                options
+                    .set_overrides
+                    .push(next_value(args, index, "--set")?);
+            }
+            "--python-runner" | "--python" => {
+                index += 1;
+                let _ = next_value(args, index, "--python-runner")?;
+            }
+            "--repo-root" => {
+                index += 1;
+                let _ = next_value(args, index, "--repo-root")?;
+            }
+            "--dry-run" => options.dry_run = true,
+            other => return Err(format!("unknown full-space preset option: {other}")),
+        }
+        index += 1;
+    }
+    if options.experiment_profile.trim().is_empty() {
+        return Err("--experiment-profile is required".to_owned());
+    }
+    Ok(options)
+}
+
+fn parse_quality_event_flow_preset_options(
+    args: &[String],
+) -> Result<QualityEventFlowPresetOptions, String> {
+    let mut options = QualityEventFlowPresetOptions {
+        config: "configs/config.yaml".to_owned(),
+        experiment_profile: String::new(),
+        feature_profile: "core_v4_techlite_tushare_plus_quality_event_flow_v1".to_owned(),
+        model_profile: None,
+        data_source: None,
+        period: "train".to_owned(),
+        date_start: None,
+        date_end: None,
+        quantile_bins: 5,
+        top_n: 50,
+        segment_scheme: "config_split".to_owned(),
+        segments: None,
+        base_output_dir: None,
+        run_tag: None,
+        include_benchmark_excess: false,
+        set_overrides: Vec::new(),
+        dry_run: false,
+    };
+    let mut index = 0usize;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Err(usage().to_owned()),
+            "--config" => {
+                index += 1;
+                options.config = next_value(args, index, "--config")?;
+            }
+            "--experiment-profile" => {
+                index += 1;
+                options.experiment_profile = next_value(args, index, "--experiment-profile")?;
+            }
+            "--feature-profile" => {
+                index += 1;
+                options.feature_profile = next_value(args, index, "--feature-profile")?;
+            }
+            "--model-profile" => {
+                index += 1;
+                options.model_profile = Some(next_value(args, index, "--model-profile")?);
+            }
+            "--data-source" => {
+                index += 1;
+                options.data_source = Some(next_value(args, index, "--data-source")?);
+            }
+            "--period" => {
+                index += 1;
+                options.period = next_value(args, index, "--period")?;
+            }
+            "--date-start" => {
+                index += 1;
+                options.date_start = Some(next_value(args, index, "--date-start")?);
+            }
+            "--date-end" => {
+                index += 1;
+                options.date_end = Some(next_value(args, index, "--date-end")?);
+            }
+            "--quantile-bins" => {
+                index += 1;
+                options.quantile_bins = parse_usize(
+                    next_value(args, index, "--quantile-bins")?,
+                    "--quantile-bins",
+                )?
+                .max(2);
+            }
+            "--top-n" => {
+                index += 1;
+                options.top_n = parse_usize(next_value(args, index, "--top-n")?, "--top-n")?.max(1);
+            }
+            "--segment-scheme" => {
+                index += 1;
+                options.segment_scheme = next_value(args, index, "--segment-scheme")?;
+            }
+            "--segments" => {
+                index += 1;
+                options.segments = Some(next_value(args, index, "--segments")?);
+            }
+            "--base-output-dir" => {
+                index += 1;
+                options.base_output_dir =
+                    Some(PathBuf::from(next_value(args, index, "--base-output-dir")?));
+            }
+            "--run-tag" => {
+                index += 1;
+                options.run_tag = Some(next_value(args, index, "--run-tag")?);
+            }
+            "--include-benchmark-excess" => options.include_benchmark_excess = true,
+            "--set" => {
+                index += 1;
+                options
+                    .set_overrides
+                    .push(next_value(args, index, "--set")?);
+            }
+            "--python-runner" | "--python" => {
+                index += 1;
+                let _ = next_value(args, index, "--python-runner")?;
+            }
+            "--repo-root" => {
+                index += 1;
+                let _ = next_value(args, index, "--repo-root")?;
+            }
+            "--dry-run" => options.dry_run = true,
+            other => return Err(format!("unknown quality/event preset option: {other}")),
+        }
+        index += 1;
+    }
+    if options.experiment_profile.trim().is_empty() {
+        return Err("--experiment-profile is required".to_owned());
+    }
+    Ok(options)
+}
+
+fn build_single_factor_batch_base_command(
+    config: &str,
+    experiment_profile: &str,
+    period: &str,
+    quantile_bins: usize,
+    top_n: usize,
+    segment_scheme: &str,
+) -> Vec<String> {
+    vec![
+        "--config".to_owned(),
+        config.to_owned(),
+        "--experiment-profile".to_owned(),
+        experiment_profile.to_owned(),
+        "--period".to_owned(),
+        period.to_owned(),
+        "--quantile-bins".to_owned(),
+        quantile_bins.max(2).to_string(),
+        "--top-n".to_owned(),
+        top_n.max(1).to_string(),
+        "--segment-scheme".to_owned(),
+        segment_scheme.to_owned(),
+    ]
+}
+
+fn build_full_space_preset_command(
+    options: &FullSpacePresetOptions,
+    pass_name: &str,
+    industry_neutral: bool,
+) -> Vec<String> {
+    let mut command = build_single_factor_batch_base_command(
+        &options.config,
+        &options.experiment_profile,
+        &options.period,
+        options.quantile_bins,
+        options.top_n,
+        &options.segment_scheme,
+    );
+    command.push("--all-features".to_owned());
+    append_string_option(
+        &mut command,
+        "--model-profile",
+        options.model_profile.as_deref(),
+    );
+    append_string_option(
+        &mut command,
+        "--data-source",
+        options.data_source.as_deref(),
+    );
+    append_string_option(&mut command, "--date-start", options.date_start.as_deref());
+    append_string_option(&mut command, "--date-end", options.date_end.as_deref());
+    append_string_option(&mut command, "--segments", options.segments.as_deref());
+    for raw_override in &options.set_overrides {
+        command.extend(["--set".to_owned(), raw_override.clone()]);
+    }
+    if industry_neutral {
+        command.push("--industry-neutral".to_owned());
+    }
+    if let Some(base_output_dir) = &options.base_output_dir {
+        command.extend([
+            "--base-output-dir".to_owned(),
+            path_to_string(&base_output_dir.join(pass_name)),
+        ]);
+    }
+    if let Some(run_tag) = &options.run_tag {
+        if !run_tag.trim().is_empty() {
+            command.extend(["--run-tag".to_owned(), format!("{run_tag}-{pass_name}")]);
+        }
+    }
+    let case_name = format!("full-space-{}-{pass_name}", options.diagnostic_label_space);
+    command.extend([
+        "--case".to_owned(),
+        format!("name={case_name}"),
+        "feature_profile=all_features".to_owned(),
+        format!("diagnostic_label_space={}", options.diagnostic_label_space),
+        format!("diagnostic_threshold={}", options.diagnostic_threshold),
+    ]);
+    if options.dry_run {
+        command.push("--dry-run".to_owned());
+    }
+    command
+}
+
+fn build_quality_event_flow_preset_command(options: &QualityEventFlowPresetOptions) -> Vec<String> {
+    let mut command = build_single_factor_batch_base_command(
+        &options.config,
+        &options.experiment_profile,
+        &options.period,
+        options.quantile_bins,
+        options.top_n,
+        &options.segment_scheme,
+    );
+    command.extend([
+        "--feature-profile".to_owned(),
+        options.feature_profile.clone(),
+    ]);
+    append_string_option(
+        &mut command,
+        "--model-profile",
+        options.model_profile.as_deref(),
+    );
+    append_string_option(
+        &mut command,
+        "--data-source",
+        options.data_source.as_deref(),
+    );
+    append_string_option(&mut command, "--date-start", options.date_start.as_deref());
+    append_string_option(&mut command, "--date-end", options.date_end.as_deref());
+    append_string_option(&mut command, "--segments", options.segments.as_deref());
+    if let Some(base_output_dir) = &options.base_output_dir {
+        command.extend([
+            "--base-output-dir".to_owned(),
+            path_to_string(base_output_dir),
+        ]);
+    }
+    append_string_option(&mut command, "--run-tag", options.run_tag.as_deref());
+    for raw_override in &options.set_overrides {
+        command.extend(["--set".to_owned(), raw_override.clone()]);
+    }
+    let mut cases = vec![("raw_return", 0.0f64), ("industry_excess", 0.0f64)];
+    if options.include_benchmark_excess {
+        cases.push(("benchmark_excess", 0.0));
+    }
+    for (label_space, threshold) in cases {
+        let case_name = format!("{}__{label_space}", options.feature_profile);
+        command.extend([
+            "--case".to_owned(),
+            format!("name={case_name}"),
+            format!("feature_profile={}", options.feature_profile),
+            format!("diagnostic_label_space={label_space}"),
+            format!("diagnostic_threshold={threshold}"),
+        ]);
+    }
+    if options.dry_run {
+        command.push("--dry-run".to_owned());
+    }
+    command
+}
+
+fn append_string_option(command: &mut Vec<String>, flag: &str, value: Option<&str>) {
+    if let Some(value) = value {
+        if !value.trim().is_empty() {
+            command.extend([flag.to_owned(), value.to_owned()]);
+        }
+    }
+}
+
+fn prepend_batch_subcommand(args: &[String]) -> Vec<String> {
+    let mut command = vec![
+        "ai4stock-diagnostics".to_owned(),
+        "single-factor-batch".to_owned(),
+    ];
+    command.extend(args.iter().cloned());
+    command
+}
+
+fn display_command(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|part| shell_quote(part))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
+    {
+        value.to_owned()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn path_to_string(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 fn next_value(args: &[String], index: usize, option: &str) -> Result<String, String> {
     args.get(index)
         .cloned()
@@ -1675,6 +2209,57 @@ mod tests {
         assert_eq!(parsed.segments.len(), 1);
         assert!(parsed.industry_neutral);
         assert!(parsed.json);
+    }
+
+    #[test]
+    fn builds_full_space_preset_commands() {
+        let options = parse_full_space_preset_options(&[
+            "--experiment-profile".to_owned(),
+            "exp".to_owned(),
+            "--python-runner".to_owned(),
+            "pixi run python".to_owned(),
+            "--repo-root".to_owned(),
+            "/repo".to_owned(),
+            "--base-output-dir".to_owned(),
+            "out".to_owned(),
+            "--run-tag".to_owned(),
+            "tag".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .unwrap();
+        let command = build_full_space_preset_command(&options, "raw", false);
+        assert_eq!(command[0], "--config");
+        assert!(!command
+            .iter()
+            .any(|item| item.contains("run_single_factor_diagnostics_batch.py")));
+        assert!(command.contains(&"--all-features".to_owned()));
+        assert!(command.contains(&"out/raw".to_owned()));
+        assert!(command.contains(&"tag-raw".to_owned()));
+        assert!(command.contains(&"feature_profile=all_features".to_owned()));
+        assert!(command.contains(&"--dry-run".to_owned()));
+    }
+
+    #[test]
+    fn builds_quality_event_preset_command_with_benchmark_case() {
+        let options = parse_quality_event_flow_preset_options(&[
+            "--experiment-profile".to_owned(),
+            "exp".to_owned(),
+            "--python-runner".to_owned(),
+            "pixi run python".to_owned(),
+            "--repo-root".to_owned(),
+            "/repo".to_owned(),
+            "--include-benchmark-excess".to_owned(),
+            "--dry-run".to_owned(),
+        ])
+        .unwrap();
+        let command = build_quality_event_flow_preset_command(&options);
+        assert_eq!(command[0], "--config");
+        assert!(!command
+            .iter()
+            .any(|item| item.contains("run_single_factor_diagnostics_batch.py")));
+        assert!(command.contains(&"--feature-profile".to_owned()));
+        assert!(command.contains(&"diagnostic_label_space=benchmark_excess".to_owned()));
+        assert!(command.contains(&"--dry-run".to_owned()));
     }
 
     #[test]

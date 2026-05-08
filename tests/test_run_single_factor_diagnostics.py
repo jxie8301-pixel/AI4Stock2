@@ -1,32 +1,31 @@
 from __future__ import annotations
 
-from run_single_factor_diagnostics_batch import build_delegated_command
+from run_single_factor_diagnostics import build_delegated_command
 
 
-def test_batch_wrapper_delegates_to_rust_subcommand(monkeypatch) -> None:
+def test_single_factor_wrapper_delegates_to_rust_profile_subcommand(monkeypatch) -> None:
     monkeypatch.delenv("AI4STOCK_DIAGNOSTICS_BIN", raising=False)
 
     command = build_delegated_command(
         [
             "--experiment-profile",
             "core",
-            "--case",
-            "name=unit",
-            "feature_profile=core_v4_techlite",
+            "--feature-profile",
+            "core_v4_techlite",
             "--dry-run",
         ]
     )
 
     assert command[:5] == ["cargo", "run", "--bin", "ai4stock-diagnostics", "--"]
-    assert command[5] == "single-factor-batch"
+    assert command[5] == "single-factor-profile"
     assert "--experiment-profile" in command
-    assert "--case" in command
+    assert "--feature-profile" in command
     assert "--dry-run" in command
 
 
-def test_batch_wrapper_honors_explicit_rust_binary(monkeypatch) -> None:
+def test_single_factor_wrapper_honors_explicit_rust_binary(monkeypatch) -> None:
     monkeypatch.setenv("AI4STOCK_DIAGNOSTICS_BIN", "/tmp/ai4stock-diagnostics --flag")
 
     command = build_delegated_command(["--dry-run"])
 
-    assert command == ["/tmp/ai4stock-diagnostics", "--flag", "single-factor-batch", "--dry-run"]
+    assert command == ["/tmp/ai4stock-diagnostics", "--flag", "single-factor-profile", "--dry-run"]

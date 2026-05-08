@@ -32,7 +32,7 @@ At the same time, the data layer is actively being migrated:
 - Isolated Tushare path: `data/tushare/raw/*` -> `data/tushare/processed/combined/*.parquet`
 - Migration target: promote one canonical Tushare-normalized `combined` schema into the formal research workflow
 - Native feature-cache builder: Rust `ai4stock-gen-feature`, with `src/gen_feature.py` kept as config/profile-resolving compatibility wrapper and pandas reference path
-- Diagnostics/profile prefilter: Rust `ai4stock-diagnostics single-factor`, `prefilter-summary`, `robust-prefilter-summary`, `corr-prune`, `write-profile`, `build-prefilter-profile`, and `build-robust-profile`; Python diagnostics/profile builders remain compatibility wrappers for config loading, feature resolution, safety checks, and batch summaries
+- Diagnostics/profile prefilter: Rust `ai4stock-diagnostics single-factor`, `single-factor-profile`, `single-factor-batch`, `full-space-single-factor`, `quality-event-flow-single-factor`, `prefilter-summary`, `robust-prefilter-summary`, `corr-prune`, `write-profile`, `build-prefilter-profile`, `build-robust-profile`, `build-prefilter-profile-runtime`, and `build-robust-profile-runtime`; Python diagnostics/profile builders are compatibility wrappers only
 - LGBM artifact-rebuild batches: Rust `ai4stock-backtest artifact-batch`, with `run_lgbm_backtest_artifacts.py` kept only as a compatibility wrapper that delegates to Rust
 - Experiment sweep batches: Rust `ai4stock-experiment batch` owns sweep/case expansion, command generation, dry-run output, sequential child execution, and prediction-bundle dedupe/replay; `run_experiment_batch.py` is a compatibility wrapper
 

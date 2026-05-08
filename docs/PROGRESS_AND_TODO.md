@@ -51,7 +51,7 @@ What is true now:
 1. Update or refresh Tushare raw / processed parquet with `src/collector_tushare.py`
 2. Generate the Tushare-backed unified factor store with `src/gen_feature.py`
 3. Run rolling `lgbm` baselines with `run_native_rolling.py`
-4. Run `run_single_factor_diagnostics.py` before broad model / strategy sweeps
+4. Run `ai4stock-diagnostics single-factor-profile` or the compatibility wrapper `run_single_factor_diagnostics.py` before broad model / strategy sweeps
 5. Compare experiments through `results/experiments/experiment_index.csv`
 
 Active migration note:
@@ -309,8 +309,8 @@ Audit status on 2026-04-30:
 
 - The active performance-critical LightGBM path is now `run_native_rolling.py` -> resolved `config_snapshot.yaml` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_arrays` -> `ai4stock-backtest run-bundle`.
   `run_native_rolling.py` is a compatibility wrapper and should not regain factor-store loading, rolling-window construction, or backtest evaluation logic.
-- The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `run_single_factor_diagnostics.py` / `run_single_factor_diagnostics_batch.py` -> `ai4stock-diagnostics single-factor`.
-  The Python entrypoints are now compatibility wrappers for config/profile resolution, selected-feature JSON, metadata, and batch summaries; the pandas diagnostics fallback path has been removed.
+- The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `ai4stock-diagnostics single-factor-profile` / `ai4stock-diagnostics single-factor-batch` -> `ai4stock-diagnostics single-factor`.
+  The Python entrypoints `run_single_factor_diagnostics.py` and `run_single_factor_diagnostics_batch.py` are compatibility wrappers only; config/profile resolution, selected-feature JSON, metadata, and batch summaries are owned by Rust.
 - The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
 - Non-training runtime can still be dominated by factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
 - LSTM sequence context is now prepared once per rolling run, but each rolling window still rebuilds `Dataset` / `DataLoader` wrappers and computes validation IC through pandas.
@@ -416,6 +416,14 @@ Completed optimization slices:
   - `benchmark_excess` supports the existing `cross_section_mean` benchmark and file benchmarks with `.csv`, `.txt`, `.parquet`, or `.pq` input
   - Python single/batch diagnostic entrypoints now always delegate diagnostics computation to Rust while still writing selected-feature JSON, metadata, resolved config snapshots, and batch-level summary TSVs
   - benchmark-excess smoke on `KMID,KLEN`, `2024-01-02` to `2024-01-31`, CSI300 file benchmark, horizon `10`: `109689` rows in `46.48s` under the debug binary
+- [x] Move diagnostics preset orchestration to Rust:
+  - `ai4stock-diagnostics full-space-single-factor` owns the raw plus optional industry-neutral full-space preset command expansion
+  - `ai4stock-diagnostics quality-event-flow-single-factor` owns the quality/event/flow preset cases for raw, industry-excess, and optional benchmark-excess diagnostics
+  - `run_full_space_single_factor_diagnostics.py` and `run_quality_event_flow_single_factor_batch.py` are now thin compatibility wrappers
+- [x] Move single-factor diagnostics profile and batch orchestration to Rust:
+  - `ai4stock-diagnostics single-factor-profile` owns single-profile config/profile/date/segment/feature resolution
+  - `ai4stock-diagnostics single-factor-batch` owns multi-case orchestration and batch TSV/manifest outputs
+  - The old pandas implementation modules `src/single_factor_runtime.py` and `src/single_factor_diagnostics.py` have been removed
 - [x] Migrate universe-file building to the Rust collection binary:
   - `ai4stock-collect universes` now owns CLI parsing, universe-name validation, point-in-time interval validation, symbol/date normalization, and tab-separated output writes
   - Python remains only as the AkShare provider adapter behind `src.rust_collector_bridge.fetch_akshare_index_constituents`
@@ -426,7 +434,8 @@ Completed optimization slices:
   - `ai4stock-diagnostics corr-prune` now owns factor-store correlation pruning directly from Parquet buckets
   - `ai4stock-diagnostics write-profile` now owns selected-feature YAML and README/profile artifact writing
   - `ai4stock-diagnostics build-prefilter-profile` and `build-robust-profile` now compose the full diagnostics-summary -> correlation-prune -> profile-artifact pipeline in one Rust command
-  - `run_build_prefiltered_profile.py` and `run_build_robust_factor_profile.py` are compatibility wrappers for config loading and safety checks; pandas summary/correlation fallback paths are removed
+  - `ai4stock-diagnostics build-prefilter-profile-runtime` and `build-robust-profile-runtime` now own config/profile/date resolution plus diagnostics-provenance safety checks
+  - `run_build_prefiltered_profile.py` and `run_build_robust_factor_profile.py` are compatibility wrappers only; pandas summary/correlation fallback paths are removed
 - [x] Move LGBM artifact-rebuild batch runtime to Rust:
   - `ai4stock-backtest artifact-batch` owns selected-matrix row filtering, preflight checks, marker handling, failure TSVs, summary TSV/JSON, grouped post-bundle execution, and parallelism
   - `run_lgbm_backtest_artifacts.py` is now only a compatibility wrapper that builds and delegates the Rust `artifact-batch` command

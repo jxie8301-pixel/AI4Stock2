@@ -1,3 +1,4 @@
+use ai4stock2_native::common::cli::{display_command, path_to_string, split_value};
 use ai4stock2_native::feature_prefilter::{
     run_build_prefilter_profile, run_build_robust_profile, run_corr_prune, run_prefilter_summary,
     run_robust_prefilter_summary, write_profile_artifacts, CorrPruneOptions, PrefilterOptions,
@@ -39,7 +40,7 @@ Usage:
   ai4stock-diagnostics build-robust-profile-runtime --raw-summary <CSV> --neutral-summary <CSV> --experiment-profile <NAME> --profile-name <NAME> [options]
   ai4stock-diagnostics full-space-single-factor --experiment-profile <NAME> [options]
   ai4stock-diagnostics quality-event-flow-single-factor --experiment-profile <NAME> [options]
-  ai4stock-diagnostics candidate-pool (--run NAME=DIR | --candidate-root DIR | --preset latest_slim_b_topk15) [options]
+  ai4stock-diagnostics candidate-pool (--run NAME=DIR | --candidate-root DIR) [options]
   ai4stock-diagnostics strategy-pair --candidate-run DIR --baseline-run DIR [options]
 
 Options:
@@ -2116,44 +2117,10 @@ fn prepend_batch_subcommand(args: &[String]) -> Vec<String> {
     command
 }
 
-fn display_command(command: &[String]) -> String {
-    command
-        .iter()
-        .map(|part| shell_quote(part))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
 fn next_value(args: &[String], index: usize, option: &str) -> Result<String, String> {
     args.get(index)
         .cloned()
         .ok_or_else(|| format!("missing value for {option}"))
-}
-
-fn split_value(value: &str, option: &str) -> Result<String, String> {
-    let raw = value
-        .split_once('=')
-        .map(|(_, right)| right)
-        .unwrap_or_default();
-    if raw.is_empty() {
-        return Err(format!("missing value for {option}"));
-    }
-    Ok(raw.to_owned())
 }
 
 fn parse_usize(value: String, option: &str) -> Result<usize, String> {

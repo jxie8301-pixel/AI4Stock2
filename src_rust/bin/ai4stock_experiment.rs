@@ -1,3 +1,5 @@
+use ai4stock2_native::common::cli::{next_arg, path_to_string, shell_quote, split_value};
+use ai4stock2_native::common::yaml::{deep_merge_yaml, read_yaml_file};
 use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::collections::BTreeMap;
 use std::env;
@@ -319,24 +321,6 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
         return Err("--experiment-profile is required".to_owned());
     }
     Ok(options)
-}
-
-fn next_arg(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {option}"))
-}
-
-fn split_value(value: &str, option: &str) -> Result<String, String> {
-    let raw = value
-        .split_once('=')
-        .map(|(_, right)| right)
-        .unwrap_or_default();
-    if raw.is_empty() {
-        return Err(format!("missing value for {option}"));
-    }
-    Ok(raw.to_owned())
 }
 
 fn rust_binary_command(binary_name: &str, env_var: &str) -> Vec<String> {
@@ -668,6 +652,15 @@ fn resolve_run_config(
     for (key, value) in overrides {
         set_yaml_dotted(&mut cfg, key, value.clone())?;
     }
+    let model_name = yaml_path_string(&cfg, &["model", "name"])
+        .unwrap_or_else(|| "lgbm".to_owned())
+        .trim()
+        .to_ascii_lowercase();
+    if model_name != "lgbm" {
+        return Err(format!(
+            "ai4stock-experiment batch only supports model.name == 'lgbm'; resolved model.name={model_name:?}"
+        ));
+    }
     Ok(cfg)
 }
 
@@ -723,11 +716,6 @@ fn prediction_fingerprint(cfg: &YamlValue) -> Result<String, String> {
         .to_ascii_lowercase();
     if model_name == "lgbm" {
         relevant.insert("effective_lgbm".to_owned(), effective_lgbm_config(cfg)?);
-    } else if model_name == "formula_score" {
-        relevant.insert(
-            "formula_score".to_owned(),
-            yaml_path_json(cfg, &["formula_score"], json_object()),
-        );
     }
     serde_json::to_string(&relevant)
         .map_err(|err| format!("failed to encode prediction fingerprint: {err}"))
@@ -863,7 +851,7 @@ fn build_override_tag(overrides: &BTreeMap<String, YamlValue>) -> String {
 }
 
 fn slugify_override_key(key: &str) -> String {
-    key.trim().replace('.', "-").replace('_', "-")
+    key.trim().replace(['.', '_'], "-")
 }
 
 fn slugify_override_value(value: &str) -> String {
@@ -941,17 +929,6 @@ fn render_command(command: &[String]) -> String {
         .map(|part| shell_quote(part))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn resolve_named_profile(
@@ -1057,31 +1034,6 @@ fn resolve_profile_from_mapping(
     })
 }
 
-fn read_yaml_file(path: impl AsRef<Path>) -> Result<YamlValue, String> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    serde_yaml::from_str(&raw).map_err(|err| format!("failed to parse {}: {err}", path.display()))
-}
-
-fn deep_merge_yaml(base: &mut YamlValue, overlay: YamlValue) {
-    match (base, overlay) {
-        (YamlValue::Mapping(base_map), YamlValue::Mapping(overlay_map)) => {
-            for (key, overlay_value) in overlay_map {
-                match base_map.get_mut(&key) {
-                    Some(base_value) => deep_merge_yaml(base_value, overlay_value),
-                    None => {
-                        base_map.insert(key, overlay_value);
-                    }
-                }
-            }
-        }
-        (base_slot, overlay_value) => {
-            *base_slot = overlay_value;
-        }
-    }
-}
-
 fn ensure_mapping(value: &mut YamlValue) {
     if !value.is_mapping() {
         *value = YamlValue::Mapping(YamlMapping::new());
@@ -1169,10 +1121,6 @@ fn remove_yaml_mapping_key(value: &mut YamlValue, key: &str) {
     if let Some(mapping) = value.as_mapping_mut() {
         mapping.remove(YamlValue::String(key.to_owned()));
     }
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 fn resolve_repo_path(repo_root: &Path, path: &Path) -> PathBuf {

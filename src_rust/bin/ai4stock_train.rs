@@ -1,3 +1,4 @@
+use ai4stock2_native::common::cli::split_value;
 use serde_json::Value;
 use std::env;
 use std::path::PathBuf;
@@ -449,13 +450,6 @@ fn next_value(args: &[String], arg_index: usize, flag: &str) -> Result<String, S
     args.get(arg_index)
         .cloned()
         .ok_or_else(|| format!("missing value for {flag}"))
-}
-
-fn split_value(value: &str, flag: &str) -> Result<String, String> {
-    value
-        .strip_prefix(&format!("{flag}="))
-        .map(str::to_owned)
-        .ok_or_else(|| format!("invalid {flag}=... option: {value}"))
 }
 
 fn parse_usize(value: String, field: &str) -> Result<usize, String> {

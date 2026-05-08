@@ -1,5 +1,6 @@
 use crate::bundle_entry::{self, BundlePlan};
 use crate::prediction_bundle::{read_prediction_bundle, PredictionBundle};
+use ai4stock2_native::common::cli::{display_command, next_arg, path_to_string, shell_quote};
 use csv::{ReaderBuilder, WriterBuilder};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -272,13 +273,6 @@ Main options:
   --dry-run
   --fail-fast
 "
-}
-
-fn next_arg(args: &[String], idx: &mut usize, option: &str) -> Result<String, String> {
-    *idx += 1;
-    args.get(*idx)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {option}"))
 }
 
 fn parse_usize(raw: &str) -> usize {
@@ -1187,25 +1181,6 @@ fn display_args(args: &[String]) -> String {
         .map(|arg| shell_quote(arg))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn display_command(command: &[String]) -> String {
-    display_args(command)
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

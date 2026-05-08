@@ -1,15 +1,12 @@
+use crate::common::benchmark::cross_section_mean_returns;
+use crate::common::parquet::{
+    date_value_ns, numeric_value, open_projected_parquet_reader,
+    parse_datetime_ns as parse_date_ns, required_column,
+};
 use crate::gen_feature::discover_bucket_parquet_paths;
-use arrow_array::{
-    Array, Date32Array, Date64Array, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
-    UInt64Array,
-};
+use arrow_array::{Array, LargeStringArray, RecordBatch, StringArray};
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
-use parquet::arrow::{
-    arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
-    ProjectionMask,
-};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
@@ -19,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 const DEFAULT_LABEL_ABS_CAP: f64 = 0.35;
+type DateInterval = (Option<i64>, Option<i64>);
+type IntervalsBySymbol = BTreeMap<String, Vec<DateInterval>>;
 
 #[derive(Debug, Clone)]
 pub struct SingleFactorOptions {
@@ -323,7 +322,7 @@ struct FactorStoreMeta {
 
 #[derive(Debug, Clone)]
 struct UniverseFilter {
-    intervals_by_symbol: BTreeMap<String, Vec<(Option<i64>, Option<i64>)>>,
+    intervals_by_symbol: IntervalsBySymbol,
 }
 
 impl UniverseFilter {
@@ -397,16 +396,16 @@ pub fn run_single_factor_diagnostics(
     let mut total_rows = 0usize;
 
     for feature_chunk in options.feature_names.chunks(chunk_size) {
-        let mut context = load_factor_chunk(
-            &bucket_paths,
-            feature_chunk,
-            &label_column,
+        let mut context = load_factor_chunk(&FactorChunkLoadOptions {
+            bucket_paths: &bucket_paths,
+            feature_names: feature_chunk,
+            label_column: &label_column,
             start_ns,
             end_ns,
-            universe_filter.as_ref(),
-            industry_map.as_ref(),
+            universe_filter: universe_filter.as_ref(),
+            industry_map: industry_map.as_ref(),
             batch_size,
-        )?;
+        })?;
         if context.rows.is_empty() {
             continue;
         }
@@ -627,39 +626,41 @@ fn resolve_label_column(meta: &FactorStoreMeta, requested: &str) -> Result<Strin
     ))
 }
 
-fn load_factor_chunk(
-    bucket_paths: &[PathBuf],
-    feature_names: &[String],
-    label_column: &str,
+struct FactorChunkLoadOptions<'a> {
+    bucket_paths: &'a [PathBuf],
+    feature_names: &'a [String],
+    label_column: &'a str,
     start_ns: Option<i64>,
     end_ns: Option<i64>,
-    universe_filter: Option<&UniverseFilter>,
-    industry_map: Option<&HashMap<String, String>>,
+    universe_filter: Option<&'a UniverseFilter>,
+    industry_map: Option<&'a HashMap<String, String>>,
     batch_size: usize,
-) -> Result<DiagnosticContext, String> {
+}
+
+fn load_factor_chunk(options: &FactorChunkLoadOptions<'_>) -> Result<DiagnosticContext, String> {
     let mut columns = vec![
         "date".to_owned(),
         "symbol".to_owned(),
-        label_column.to_owned(),
+        options.label_column.to_owned(),
     ];
-    columns.extend(feature_names.iter().cloned());
+    columns.extend(options.feature_names.iter().cloned());
     columns.sort();
     columns.dedup();
     let mut rows = Vec::new();
-    for path in bucket_paths {
-        let reader = open_projected_parquet_reader(path, &columns, batch_size)?;
+    for path in options.bucket_paths {
+        let reader = open_projected_parquet_reader(path, &columns, options.batch_size)?;
         for batch in reader {
             let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
             append_batch_rows(
                 &mut rows,
                 &batch,
                 path,
-                feature_names,
-                label_column,
-                start_ns,
-                end_ns,
-                universe_filter,
-                industry_map,
+                options.feature_names,
+                options.label_column,
+                options.start_ns,
+                options.end_ns,
+                options.universe_filter,
+                options.industry_map,
             )?;
         }
     }
@@ -827,24 +828,10 @@ fn build_benchmark_returns(
 fn build_cross_section_benchmark_returns(
     rows: &[DiagnosticRow],
 ) -> Result<Vec<(i64, f64)>, String> {
-    let mut sums: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
-    for row in rows {
-        if row.label.is_finite() {
-            let entry = sums.entry(row.date_ns).or_insert((0.0, 0));
-            entry.0 += row.label;
-            entry.1 += 1;
-        }
-    }
-    let values = sums
-        .into_iter()
-        .filter_map(|(date_ns, (sum, count))| (count > 0).then_some((date_ns, sum / count as f64)))
-        .collect::<Vec<_>>();
-    if values.is_empty() {
-        return Err(
-            "benchmark_excess cross_section_mean benchmark had no finite labels".to_owned(),
-        );
-    }
-    Ok(values)
+    cross_section_mean_returns(
+        rows.iter().map(|row| (row.date_ns, row.label)),
+        "benchmark_excess cross_section_mean benchmark had no finite labels",
+    )
 }
 
 fn load_file_benchmark_returns(benchmark: &BenchmarkOptions) -> Result<Vec<(i64, f64)>, String> {
@@ -852,131 +839,12 @@ fn load_file_benchmark_returns(benchmark: &BenchmarkOptions) -> Result<Vec<(i64,
         .path
         .as_ref()
         .ok_or_else(|| "benchmark path is required when benchmark mode is file".to_owned())?;
-    let values = match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "csv" | "txt" => read_benchmark_csv(path, &benchmark.date_column, &benchmark.value_column)?,
-        "parquet" | "pq" => {
-            read_benchmark_parquet(path, &benchmark.date_column, &benchmark.value_column)?
-        }
-        _ => {
-            return Err(format!(
-                "unsupported benchmark file format: {}. Use .csv, .txt, .parquet, or .pq.",
-                path.display()
-            ))
-        }
-    };
-    if values.is_empty() {
-        return Err(format!(
-            "benchmark returned no usable rows from {}",
-            path.display()
-        ));
-    }
-    coerce_benchmark_returns(values, &benchmark.value_type)
-}
-
-fn read_benchmark_csv(
-    path: &Path,
-    date_column: &str,
-    value_column: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    let mut reader = csv::Reader::from_path(path)
-        .map_err(|err| format!("failed to read benchmark CSV {}: {err}", path.display()))?;
-    let headers = reader
-        .headers()
-        .map_err(|err| {
-            format!(
-                "failed to parse benchmark CSV {} headers: {err}",
-                path.display()
-            )
-        })?
-        .clone();
-    let date_index = headers
-        .iter()
-        .position(|name| name == date_column)
-        .ok_or_else(|| format!("benchmark file is missing date column: {date_column}"))?;
-    let value_index = headers
-        .iter()
-        .position(|name| name == value_column)
-        .ok_or_else(|| format!("benchmark file is missing value column: {value_column}"))?;
-    let mut by_date = BTreeMap::new();
-    for record in reader.records() {
-        let record = record
-            .map_err(|err| format!("failed to parse benchmark CSV {}: {err}", path.display()))?;
-        let Some(raw_date) = record.get(date_index) else {
-            continue;
-        };
-        let Some(raw_value) = record.get(value_index) else {
-            continue;
-        };
-        let Ok(date_ns) = parse_date_ns(raw_date.trim()) else {
-            continue;
-        };
-        let Ok(value) = raw_value.trim().parse::<f64>() else {
-            continue;
-        };
-        if value.is_finite() {
-            by_date.insert(date_ns, value);
-        }
-    }
-    Ok(by_date.into_iter().collect())
-}
-
-fn read_benchmark_parquet(
-    path: &Path,
-    date_column: &str,
-    value_column: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    let columns = vec![date_column.to_owned(), value_column.to_owned()];
-    let reader = open_projected_parquet_reader(path, &columns, 65_536)?;
-    let mut by_date = BTreeMap::new();
-    for batch in reader {
-        let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-        let date_array = required_column(&batch, date_column, path)?;
-        let value_array = required_column(&batch, value_column, path)?;
-        for row_index in 0..batch.num_rows() {
-            if date_array.is_null(row_index) || value_array.is_null(row_index) {
-                continue;
-            }
-            let date_ns = date_value_ns(date_array, row_index, path)?;
-            let value = numeric_value(value_array, row_index, path)?;
-            if value.is_finite() {
-                by_date.insert(date_ns, value);
-            }
-        }
-    }
-    Ok(by_date.into_iter().collect())
-}
-
-fn coerce_benchmark_returns(
-    values: Vec<(i64, f64)>,
-    value_type: &BenchmarkValueType,
-) -> Result<Vec<(i64, f64)>, String> {
-    match value_type {
-        BenchmarkValueType::Return => Ok(values),
-        BenchmarkValueType::Close => {
-            let mut out = Vec::with_capacity(values.len());
-            let mut previous: Option<f64> = None;
-            for (date_ns, close) in values {
-                let daily_return = if let Some(prev) = previous {
-                    if prev != 0.0 {
-                        close / prev - 1.0
-                    } else {
-                        f64::NAN
-                    }
-                } else {
-                    f64::NAN
-                };
-                out.push((date_ns, daily_return));
-                previous = Some(close);
-            }
-            Ok(out)
-        }
-    }
+    crate::common::benchmark::load_file_benchmark_returns(
+        path,
+        &benchmark.date_column,
+        &benchmark.value_column,
+        benchmark.value_type.as_str(),
+    )
 }
 
 fn build_forward_compound_return_map(
@@ -2248,8 +2116,7 @@ fn load_universe_filter(
         .flexible(true)
         .from_path(&path)
         .map_err(|err| format!("failed to open universe file {}: {err}", path.display()))?;
-    let mut intervals_by_symbol: BTreeMap<String, Vec<(Option<i64>, Option<i64>)>> =
-        BTreeMap::new();
+    let mut intervals_by_symbol: IntervalsBySymbol = BTreeMap::new();
     for record in reader.records() {
         let record = record
             .map_err(|err| format!("failed to read universe file {}: {err}", path.display()))?;
@@ -2364,87 +2231,6 @@ fn read_parquet_columns(path: &Path) -> Result<HashSet<String>, String> {
         .collect())
 }
 
-fn open_projected_parquet_reader(
-    path: &Path,
-    column_names: &[String],
-    batch_size: usize,
-) -> Result<ParquetRecordBatchReader, String> {
-    let file =
-        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|err| format!("failed to open parquet {}: {err}", path.display()))?;
-    let schema = builder.schema();
-    let mut indices = BTreeSet::new();
-    let mut missing = Vec::new();
-    for column_name in column_names {
-        match schema.index_of(column_name) {
-            Ok(index) => {
-                indices.insert(index);
-            }
-            Err(_) => missing.push(column_name.clone()),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(format!(
-            "{} is missing required column(s): {}",
-            path.display(),
-            missing.join(",")
-        ));
-    }
-    let projection = ProjectionMask::roots(builder.parquet_schema(), indices);
-    builder
-        .with_projection(projection)
-        .with_batch_size(batch_size.max(1))
-        .build()
-        .map_err(|err| {
-            format!(
-                "failed to build parquet reader for {}: {err}",
-                path.display()
-            )
-        })
-}
-
-fn required_column<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a dyn Array, String> {
-    let index = batch
-        .schema()
-        .index_of(name)
-        .map_err(|_| format!("{} is missing required column {name}", path.display()))?;
-    Ok(batch.column(index).as_ref())
-}
-
-fn numeric_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<f64, String> {
-    if array.is_null(row_index) {
-        return Ok(f64::NAN);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    Err(format!(
-        "{} has unsupported numeric type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
 fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<String, String> {
     if array.is_null(row_index) {
         return Ok(String::new());
@@ -2457,44 +2243,6 @@ fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<Stri
     }
     Err(format!(
         "{} has unsupported string type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
-fn date_value_ns(array: &dyn Array, row_index: usize, path: &Path) -> Result<i64, String> {
-    if array.is_null(row_index) {
-        return Err(format!(
-            "{} has null date value at row {row_index}",
-            path.display()
-        ));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(values.value(row_index) * 1_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Ok(values.value(row_index) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-        return Ok(values.value(row_index) * 1_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date64Array>() {
-        return Ok(values.value(row_index) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(values.value(row_index) as i64 * 86_400_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return parse_date_ns(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return parse_date_ns(values.value(row_index));
-    }
-    Err(format!(
-        "{} has unsupported date type {:?}",
         path.display(),
         array.data_type()
     ))
@@ -2678,25 +2426,6 @@ fn parse_optional_date_ns(raw: &str) -> Result<Option<i64>, String> {
         return Ok(None);
     }
     parse_date_ns(value).map(Some)
-}
-
-fn parse_date_ns(raw: &str) -> Result<i64, String> {
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        return date
-            .and_hms_opt(0, 0, 0)
-            .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
-            .ok_or_else(|| format!("invalid date timestamp: {raw}"));
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y%m%d") {
-        return date
-            .and_hms_opt(0, 0, 0)
-            .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
-            .ok_or_else(|| format!("invalid date timestamp: {raw}"));
-    }
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .and_then(|datetime| datetime.with_timezone(&Utc).timestamp_nanos_opt())
-        .ok_or_else(|| format!("invalid date: {raw}"))
 }
 
 fn format_date_ns(value: i64) -> String {

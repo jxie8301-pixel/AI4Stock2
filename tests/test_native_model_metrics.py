@@ -5,11 +5,7 @@ from pathlib import Path
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import torch
-from torch.utils.data import DataLoader, TensorDataset
 
-from src.label_utils import sanitize_label_array, sanitize_label_series, transform_training_label_series
-from src.model_config import get_lgbm_config
 from src.models.pure_lightgbm import (
     NativeLGBM,
     _build_direct_ranking_relevance_labels,
@@ -22,23 +18,10 @@ from src.models.pure_lightgbm import (
     _valid_topk_label_mean_metric_from_labels,
     _should_use_direct_ranking_relevance_labels,
 )
-from src.models.pure_pytorch_lstm import NativeLSTMTrainer, NativeStockDataset, compute_daily_ic
 
 
 class NativeModelMetricsTest(unittest.TestCase):
-    def test_compute_daily_ic_uses_mean_of_daily_cross_sections(self):
-        predictions = np.array([1.0, 2.0, 1.0, 2.0], dtype=np.float32)
-        labels = np.array([1.0, 2.0, 2.0, 1.0], dtype=np.float32)
-        dates = np.array(
-            ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"],
-            dtype="datetime64[ns]",
-        )
-
-        daily_ic = compute_daily_ic(predictions, labels, dates)
-
-        self.assertAlmostEqual(daily_ic, 0.0, places=8)
-
-    def test_lightgbm_daily_ic_metric_matches_lstm_metric(self):
+    def test_lightgbm_daily_ic_metric_uses_mean_of_daily_cross_sections(self):
         predictions = np.array([1.0, 2.0, 1.0, 2.0], dtype=np.float32)
         labels = np.array([1.0, 2.0, 2.0, 1.0], dtype=np.float32)
         dates = np.array(
@@ -301,79 +284,6 @@ class NativeModelMetricsTest(unittest.TestCase):
 
         self.assertEqual(rel.tolist(), [0, 1, 2, 3, 4])
 
-    def test_transform_training_label_series_profit_tanh_suppresses_tails(self):
-        labels = pd.Series([0.01, 0.02, 0.30, -0.03], dtype=float)
-        dates = pd.to_datetime(["2024-01-02"] * 4)
-
-        transformed = transform_training_label_series(
-            labels,
-            dates,
-            {"label": {"train_transform": {"mode": "profit_tanh"}}},
-        )
-
-        self.assertGreater(float(transformed.iloc[2]), float(transformed.iloc[1]))
-        self.assertGreater(float(transformed.iloc[1]), float(transformed.iloc[0]))
-        self.assertLess(float(transformed.iloc[3]), 0.0)
-        self.assertLess(float(transformed.iloc[2]), 1.0)
-
-    def test_transform_training_label_series_profit_tanh_applies_neutral_band(self):
-        labels = pd.Series([0.004, -0.004, 0.03], dtype=float)
-        dates = pd.to_datetime(["2024-01-02"] * 3)
-
-        transformed = transform_training_label_series(
-            labels,
-            dates,
-            {"label": {"train_transform": {"mode": "profit_tanh", "neutral_band": 0.01}}},
-        )
-
-        self.assertAlmostEqual(float(transformed.iloc[0]), 0.0, places=8)
-        self.assertAlmostEqual(float(transformed.iloc[1]), 0.0, places=8)
-        self.assertGreater(float(transformed.iloc[2]), 0.0)
-
-    def test_transform_training_label_series_cross_section_rank_centers_ranks(self):
-        labels = pd.Series([0.10, 0.00, -0.10], dtype=float)
-        dates = pd.to_datetime(["2024-01-02"] * 3)
-
-        transformed = transform_training_label_series(
-            labels,
-            dates,
-            {"label": {"train_transform": {"mode": "cross_section_rank"}}},
-        )
-
-        self.assertEqual(transformed.round(6).tolist(), [0.5, 0.0, -0.5])
-
-    def test_transform_training_label_series_profit_bucket_maps_profit_loss_states(self):
-        labels = pd.Series([-0.06, -0.02, 0.0, 0.02, 0.08], dtype=float)
-        dates = pd.to_datetime(["2024-01-02"] * 5)
-
-        transformed = transform_training_label_series(
-            labels,
-            dates,
-            {
-                "label": {
-                    "train_transform": {
-                        "mode": "profit_bucket",
-                        "neutral_band": 0.01,
-                        "tail_band": 0.05,
-                    }
-                }
-            },
-        )
-
-        self.assertEqual(transformed.tolist(), [-2.0, -1.0, 0.0, 1.0, 2.0])
-
-    def test_transform_training_label_series_profit_bucket_uses_default_tail_band(self):
-        labels = pd.Series([-0.04, -0.015, 0.0, 0.015, 0.04], dtype=float)
-        dates = pd.to_datetime(["2024-01-02"] * 5)
-
-        transformed = transform_training_label_series(
-            labels,
-            dates,
-            {"label": {"train_transform": {"mode": "profit_bucket", "neutral_band": 0.01}}},
-        )
-
-        self.assertEqual(transformed.tolist(), [-2.0, -1.0, 0.0, 1.0, 2.0])
-
     def test_native_lgbm_accepts_ranking_objective(self):
         model = NativeLGBM(loss="rank_xendcg", early_stop=0, num_threads=1, ranking_num_bins=3)
         X_train = pd.DataFrame({"f1": [0.0, 1.0, 2.0, 3.0], "f2": [1.0, 1.0, 0.0, 0.0]})
@@ -441,85 +351,6 @@ class NativeModelMetricsTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "valid_dates is required"):
             model.fit(X_train, y_train, X_valid=X_valid, y_valid=y_valid, train_dates=train_dates)
-
-    def test_get_lgbm_config_uses_dedicated_block(self):
-        cfg = {
-            "model": {"early_stop": 12, "n_jobs": 4, "loss": "pearson"},
-            "strategy": {"topk": 7},
-            "lgbm": {"loss": "huber", "num_threads": 6},
-        }
-
-        lgbm_cfg = get_lgbm_config(cfg)
-
-        self.assertEqual(lgbm_cfg["loss"], "huber")
-        self.assertEqual(lgbm_cfg["num_threads"], 6)
-        self.assertEqual(lgbm_cfg["validation_topk"], 7)
-        self.assertEqual(lgbm_cfg["early_stop"], 12)
-
-    def test_get_lgbm_config_does_not_inherit_model_n_jobs(self):
-        cfg = {
-            "model": {"early_stop": 12, "n_jobs": 24},
-            "lgbm": {"loss": "huber"},
-        }
-
-        lgbm_cfg = get_lgbm_config(cfg)
-
-        self.assertNotIn("num_threads", lgbm_cfg)
-
-    def test_train_epoch_returns_zero_for_empty_loader(self):
-        trainer = NativeLSTMTrainer(d_feat=3, hidden_size=4, num_layers=1, device="cpu")
-        dataset = TensorDataset(
-            torch.empty((0, 5, 3), dtype=torch.float32),
-            torch.empty((0,), dtype=torch.float32),
-        )
-        loader = DataLoader(dataset, batch_size=4, drop_last=True)
-
-        loss = trainer.train_epoch(loader)
-
-        self.assertEqual(loss, 0.0)
-
-    def test_native_stock_dataset_preserves_raw_label_values(self):
-        features = np.zeros((3, 2), dtype=np.float32)
-        labels = np.array([0.0, 0.25, 0.0], dtype=np.float32)
-        symbols = np.array([1, 1, 1], dtype=np.int32)
-        mask = np.array([False, True, False], dtype=bool)
-        dates = np.array(
-            ["2024-01-02", "2024-01-03", "2024-01-04"],
-            dtype="datetime64[ns]",
-        )
-
-        dataset = NativeStockDataset(
-            features,
-            labels,
-            symbols,
-            mask,
-            lookback=2,
-            full_dates=dates,
-        )
-
-        _, label = dataset[0]
-
-        self.assertAlmostEqual(float(label), 0.25, places=8)
-
-    def test_sanitize_label_array_masks_unrealistic_returns(self):
-        labels = np.array([0.02, 0.31, -0.4, np.inf], dtype=np.float32)
-
-        cleaned = sanitize_label_array(labels, abs_cap=0.35)
-
-        self.assertTrue(np.isfinite(cleaned[0]))
-        self.assertTrue(np.isfinite(cleaned[1]))
-        self.assertTrue(np.isnan(cleaned[2]))
-        self.assertTrue(np.isnan(cleaned[3]))
-
-    def test_sanitize_label_series_masks_unrealistic_returns(self):
-        labels = pd.Series([0.01, 1.2, -0.5], index=["a", "b", "c"])
-
-        cleaned = sanitize_label_series(labels, abs_cap=0.35)
-
-        self.assertAlmostEqual(cleaned.loc["a"], 0.01, places=8)
-        self.assertTrue(np.isnan(cleaned.loc["b"]))
-        self.assertTrue(np.isnan(cleaned.loc["c"]))
-
 
 if __name__ == "__main__":
     unittest.main()

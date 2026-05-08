@@ -1,23 +1,19 @@
+use crate::common::parquet::{
+    date_value_ns, numeric_value, open_projected_parquet_reader,
+    parse_datetime_ns as parse_date_ns, required_column,
+};
 use crate::gen_feature::discover_bucket_parquet_paths;
-use arrow_array::{
-    Array, Date32Array, Date64Array, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
-    UInt64Array,
-};
-use chrono::{DateTime, NaiveDate, Utc};
+use arrow_array::{Array, LargeStringArray, RecordBatch, StringArray};
 use csv::{ReaderBuilder, WriterBuilder};
-use parquet::arrow::{
-    arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
-    ProjectionMask,
-};
 use serde::Serialize;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 type Row = BTreeMap<String, String>;
+type DateInterval = (Option<i64>, Option<i64>);
+type IntervalsBySymbol = BTreeMap<String, Vec<DateInterval>>;
 
 const DEFAULT_MIN_COVERAGE_PCT: f64 = 0.95;
 const DEFAULT_MIN_ABS_RANK_IC: f64 = 0.02;
@@ -968,7 +964,7 @@ struct FactorCorrRow {
 
 #[derive(Debug, Clone)]
 struct UniverseFilter {
-    intervals_by_symbol: BTreeMap<String, Vec<(Option<i64>, Option<i64>)>>,
+    intervals_by_symbol: IntervalsBySymbol,
 }
 
 impl UniverseFilter {
@@ -1208,7 +1204,7 @@ fn abs_pearson_corr(rows: &[FactorCorrRow], left_index: usize, right_index: usiz
 }
 
 fn sort_scored_rows(rows: &mut [Row]) {
-    rows.sort_by(|left, right| compare_scored_rows(left, right));
+    rows.sort_by(compare_scored_rows);
 }
 
 fn compare_scored_rows(left: &Row, right: &Row) -> Ordering {
@@ -1494,8 +1490,7 @@ fn load_universe_filter(
         .flexible(true)
         .from_path(&path)
         .map_err(|err| format!("failed to open universe file {}: {err}", path.display()))?;
-    let mut intervals_by_symbol: BTreeMap<String, Vec<(Option<i64>, Option<i64>)>> =
-        BTreeMap::new();
+    let mut intervals_by_symbol: IntervalsBySymbol = BTreeMap::new();
     for record in reader.records() {
         let record = record
             .map_err(|err| format!("failed to read universe file {}: {err}", path.display()))?;
@@ -1546,87 +1541,6 @@ fn resolve_universe_path(universe_name: &str, universe_dir: &Path) -> Result<Pat
     ))
 }
 
-fn open_projected_parquet_reader(
-    path: &Path,
-    column_names: &[String],
-    batch_size: usize,
-) -> Result<ParquetRecordBatchReader, String> {
-    let file =
-        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|err| format!("failed to open parquet {}: {err}", path.display()))?;
-    let schema = builder.schema();
-    let mut indices = BTreeSet::new();
-    let mut missing = Vec::new();
-    for column_name in column_names {
-        match schema.index_of(column_name) {
-            Ok(index) => {
-                indices.insert(index);
-            }
-            Err(_) => missing.push(column_name.clone()),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(format!(
-            "{} is missing required column(s): {}",
-            path.display(),
-            missing.join(",")
-        ));
-    }
-    let projection = ProjectionMask::roots(builder.parquet_schema(), indices);
-    builder
-        .with_projection(projection)
-        .with_batch_size(batch_size.max(1))
-        .build()
-        .map_err(|err| {
-            format!(
-                "failed to build parquet reader for {}: {err}",
-                path.display()
-            )
-        })
-}
-
-fn required_column<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a dyn Array, String> {
-    let index = batch
-        .schema()
-        .index_of(name)
-        .map_err(|_| format!("{} is missing required column {name}", path.display()))?;
-    Ok(batch.column(index).as_ref())
-}
-
-fn numeric_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<f64, String> {
-    if array.is_null(row_index) {
-        return Ok(f64::NAN);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    Err(format!(
-        "{} has unsupported numeric type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
 fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<String, String> {
     if array.is_null(row_index) {
         return Ok(String::new());
@@ -1644,44 +1558,6 @@ fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<Stri
     ))
 }
 
-fn date_value_ns(array: &dyn Array, row_index: usize, path: &Path) -> Result<i64, String> {
-    if array.is_null(row_index) {
-        return Err(format!(
-            "{} has null date value at row {row_index}",
-            path.display()
-        ));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(values.value(row_index) * 1_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Ok(values.value(row_index) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-        return Ok(values.value(row_index) * 1_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date64Array>() {
-        return Ok(values.value(row_index) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(values.value(row_index) as i64 * 86_400_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return parse_date_ns(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return parse_date_ns(values.value(row_index));
-    }
-    Err(format!(
-        "{} has unsupported date type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
 fn parse_optional_date_ns(raw: &str) -> Result<Option<i64>, String> {
     let value = raw.trim();
     if value.is_empty() {
@@ -1692,25 +1568,6 @@ fn parse_optional_date_ns(raw: &str) -> Result<Option<i64>, String> {
         return Ok(None);
     }
     parse_date_ns(value).map(Some)
-}
-
-fn parse_date_ns(raw: &str) -> Result<i64, String> {
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        return date
-            .and_hms_opt(0, 0, 0)
-            .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
-            .ok_or_else(|| format!("invalid date timestamp: {raw}"));
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y%m%d") {
-        return date
-            .and_hms_opt(0, 0, 0)
-            .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
-            .ok_or_else(|| format!("invalid date timestamp: {raw}"));
-    }
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .and_then(|datetime| datetime.with_timezone(&Utc).timestamp_nanos_opt())
-        .ok_or_else(|| format!("invalid date: {raw}"))
 }
 
 fn normalize_symbol(symbol: &str) -> String {

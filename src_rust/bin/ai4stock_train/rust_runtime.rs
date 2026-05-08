@@ -1,17 +1,19 @@
 use super::LgbmBundleOptions;
+use ai4stock2_native::common::benchmark::{
+    cross_section_mean_returns, load_file_benchmark_returns,
+};
+use ai4stock2_native::common::parquet::{
+    date_value_ns, numeric_value, open_projected_parquet_reader,
+    parse_datetime_ns as parse_date_ns, required_column,
+};
+use ai4stock2_native::common::yaml::{deep_merge_yaml, read_yaml_file};
 use ai4stock2_native::gen_feature::discover_bucket_parquet_paths;
 use arrow_array::{
-    Array, Date32Array, Date64Array, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
-    UInt64Array,
+    Array, Float64Array, LargeStringArray, RecordBatch, StringArray, TimestampNanosecondArray,
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use chrono::{DateTime, NaiveDate, Utc};
-use parquet::arrow::{
-    arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
-    ArrowWriter, ProjectionMask,
-};
+use chrono::{DateTime, Utc};
+use parquet::arrow::ArrowWriter;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use serde_json::Value as JsonValue;
@@ -19,6 +21,7 @@ use serde_yaml::{Mapping as YamlMapping, Value as YamlValue};
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File};
+use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -31,6 +34,8 @@ const BACKTEST_LABELS_FILENAME: &str = "backtest_labels.parquet";
 const TRAINING_SUMMARY_FILENAME: &str = "training_summary.csv";
 const DEFAULT_LGBM_BUNDLE_TIMING_FILENAME: &str = "lgbm_bundle_timing.json";
 const DEFAULT_LABEL_ABS_CAP: f64 = 0.35;
+type DateInterval = (Option<i64>, Option<i64>);
+type IntervalsBySymbol = BTreeMap<String, Vec<DateInterval>>;
 
 #[derive(Debug, Clone)]
 struct ResolvedRuntimeConfig {
@@ -78,7 +83,7 @@ struct LoadedFactorData {
 
 #[derive(Debug, Clone)]
 struct UniverseFilter {
-    intervals_by_symbol: BTreeMap<String, Vec<(Option<i64>, Option<i64>)>>,
+    intervals_by_symbol: IntervalsBySymbol,
 }
 
 #[derive(Debug, Clone)]
@@ -459,17 +464,17 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         let valid_keep_positions =
             keep_positions_for_training_window(&data.rows, &valid_indices, &valid_prepared);
         let test_keep_positions = keep_positions_for_prediction_window(&data.rows, &test_indices);
-        let python_window = build_python_lgbm_window(
-            &data.rows,
-            &train_indices,
-            &train_keep_positions,
-            &train_prepared,
-            &valid_indices,
-            &valid_keep_positions,
-            &valid_prepared,
-            &test_indices,
-            &test_keep_positions,
-        );
+        let python_window = build_python_lgbm_window(&PythonLgbmWindowBuildInput {
+            rows: &data.rows,
+            train_indices: &train_indices,
+            train_keep_positions: &train_keep_positions,
+            train_prepared: &train_prepared,
+            valid_indices: &valid_indices,
+            valid_keep_positions: &valid_keep_positions,
+            valid_prepared: &valid_prepared,
+            test_indices: &test_indices,
+            test_keep_positions: &test_keep_positions,
+        });
         let prepare_window_labels_seconds = phase_started.elapsed().as_secs_f64();
         phase_timer.add(
             "prepare_window_labels",
@@ -557,20 +562,20 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
             json_f64_or_null(compute_validation_topk_seconds),
         );
         phase_started = Instant::now();
-        let summary = build_window_training_summary(
-            &python_result.summary,
-            &paths,
+        let summary = build_window_training_summary(&WindowTrainingSummaryInput {
+            python_summary: &python_result.summary,
+            paths: &paths,
             window,
-            &resolved,
-            train_indices.len(),
-            valid_indices.len(),
-            test_indices.len(),
-            train_keep_positions.len(),
-            valid_keep_positions.len(),
-            test_keep_positions.len(),
-            data.selected_feature_names.len(),
+            resolved: &resolved,
+            raw_train_rows: train_indices.len(),
+            raw_valid_rows: valid_indices.len(),
+            raw_test_rows: test_indices.len(),
+            train_rows: train_keep_positions.len(),
+            valid_rows: valid_keep_positions.len(),
+            test_rows: test_keep_positions.len(),
+            feature_count: data.selected_feature_names.len(),
             valid_topk_summary,
-        );
+        });
         training_records.push(json_object_to_string_map(&summary));
         prediction_rows.append(&mut window_predictions);
         let assemble_window_summary_seconds = phase_started.elapsed().as_secs_f64();
@@ -826,6 +831,10 @@ pub(crate) fn write_resolved_config_snapshot(
     write_config_snapshot(path, &resolved.cfg)
 }
 
+pub(crate) fn validate_lgbm_bundle_options(options: &LgbmBundleOptions) -> Result<(), String> {
+    resolve_runtime_config(options).map(|_| ())
+}
+
 fn resolve_runtime_config(options: &LgbmBundleOptions) -> Result<ResolvedRuntimeConfig, String> {
     let mut cfg = load_resolved_config(options)?;
     if let Some(data_source) = &options.data_source {
@@ -890,6 +899,15 @@ fn resolve_runtime_config(options: &LgbmBundleOptions) -> Result<ResolvedRuntime
     for override_arg in &options.set_overrides {
         let (key, value) = parse_set_override(override_arg)?;
         set_yaml_dotted(&mut cfg, &key, value)?;
+    }
+    let resolved_model_name = yaml_path_string(&cfg, &["model", "name"])
+        .unwrap_or_else(|| "lgbm".to_owned())
+        .trim()
+        .to_ascii_lowercase();
+    if resolved_model_name != "lgbm" {
+        return Err(format!(
+            "ai4stock-train make-bundle-lgbm only supports model.name == 'lgbm'; resolved model.name={resolved_model_name:?}"
+        ));
     }
     set_yaml_dotted(&mut cfg, "model.name", YamlValue::String("lgbm".to_owned()))?;
 
@@ -1067,13 +1085,15 @@ fn load_factor_data(
     for path in paths {
         append_factor_rows_from_bucket(
             &mut rows,
-            &path,
-            &columns,
-            resolved,
-            &selected_sources,
-            universe_filter.as_ref(),
-            load_start_ns,
-            options.batch_size,
+            &FactorBucketLoadOptions {
+                path: &path,
+                columns: &columns,
+                resolved,
+                selected_sources: &selected_sources,
+                universe_filter: universe_filter.as_ref(),
+                load_start_ns,
+                batch_size: options.batch_size,
+            },
         )?;
     }
     rows.sort_by(|left, right| {
@@ -1147,8 +1167,7 @@ fn load_universe_filter(
         .flexible(true)
         .from_path(&path)
         .map_err(|err| format!("failed to open universe file {}: {err}", path.display()))?;
-    let mut intervals_by_symbol: BTreeMap<String, Vec<(Option<i64>, Option<i64>)>> =
-        BTreeMap::new();
+    let mut intervals_by_symbol: IntervalsBySymbol = BTreeMap::new();
     for record in reader.records() {
         let record = record
             .map_err(|err| format!("failed to read universe file {}: {err}", path.display()))?;
@@ -1292,151 +1311,14 @@ fn build_benchmark_returns(
         .unwrap_or_else(|| "close".to_owned())
         .trim()
         .to_ascii_lowercase();
-    let values = match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "csv" | "txt" => read_benchmark_csv(&path, &date_column, &value_column)?,
-        "parquet" | "pq" => read_benchmark_parquet(&path, &date_column, &value_column)?,
-        _ => {
-            return Err(format!(
-                "unsupported benchmark file format: {}. Use .csv, .txt, .parquet, or .pq.",
-                path.display()
-            ))
-        }
-    };
-    if values.is_empty() {
-        return Err(format!(
-            "benchmark returned no usable rows from {}",
-            path.display()
-        ));
-    }
-    coerce_benchmark_returns(values, &value_type)
+    load_file_benchmark_returns(&path, &date_column, &value_column, &value_type)
 }
 
 fn build_cross_section_benchmark_returns(rows: &[FactorRow]) -> Result<Vec<(i64, f64)>, String> {
-    let mut sums: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
-    for row in rows {
-        if row.label.is_finite() {
-            let entry = sums.entry(row.date_ns).or_insert((0.0, 0));
-            entry.0 += row.label;
-            entry.1 += 1;
-        }
-    }
-    let out = sums
-        .into_iter()
-        .filter_map(|(date_ns, (sum, count))| (count > 0).then_some((date_ns, sum / count as f64)))
-        .collect::<Vec<_>>();
-    if out.is_empty() {
-        return Err("cross_section_mean benchmark had no finite labels".to_owned());
-    }
-    Ok(out)
-}
-
-fn read_benchmark_csv(
-    path: &Path,
-    date_column: &str,
-    value_column: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    let mut reader = csv::Reader::from_path(path)
-        .map_err(|err| format!("failed to read benchmark CSV {}: {err}", path.display()))?;
-    let headers = reader
-        .headers()
-        .map_err(|err| {
-            format!(
-                "failed to parse benchmark CSV {} headers: {err}",
-                path.display()
-            )
-        })?
-        .clone();
-    let date_index = headers
-        .iter()
-        .position(|name| name == date_column)
-        .ok_or_else(|| format!("benchmark file is missing date column: {date_column}"))?;
-    let value_index = headers
-        .iter()
-        .position(|name| name == value_column)
-        .ok_or_else(|| format!("benchmark file is missing value column: {value_column}"))?;
-    let mut by_date = BTreeMap::new();
-    for record in reader.records() {
-        let record = record
-            .map_err(|err| format!("failed to parse benchmark CSV {}: {err}", path.display()))?;
-        let Some(raw_date) = record.get(date_index) else {
-            continue;
-        };
-        let Some(raw_value) = record.get(value_index) else {
-            continue;
-        };
-        let Ok(date_ns) = parse_date_ns(raw_date.trim()) else {
-            continue;
-        };
-        let Ok(value) = raw_value.trim().parse::<f64>() else {
-            continue;
-        };
-        if value.is_finite() {
-            by_date.insert(date_ns, value);
-        }
-    }
-    Ok(by_date.into_iter().collect())
-}
-
-fn read_benchmark_parquet(
-    path: &Path,
-    date_column: &str,
-    value_column: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    let columns = vec![date_column.to_owned(), value_column.to_owned()];
-    let reader = open_projected_parquet_reader(path, &columns, 65_536)?;
-    let mut by_date = BTreeMap::new();
-    for batch in reader {
-        let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-        let date_array = required_column(&batch, date_column, path)?;
-        let value_array = required_column(&batch, value_column, path)?;
-        for row_index in 0..batch.num_rows() {
-            if date_array.is_null(row_index) || value_array.is_null(row_index) {
-                continue;
-            }
-            let date_ns = date_value_ns(date_array, row_index, path)?;
-            let value = numeric_value(value_array, row_index, path)?;
-            if value.is_finite() {
-                by_date.insert(date_ns, value);
-            }
-        }
-    }
-    Ok(by_date.into_iter().collect())
-}
-
-fn coerce_benchmark_returns(
-    values: Vec<(i64, f64)>,
-    value_type: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    match value_type {
-        "return" => Ok(values),
-        "close" | "" => {
-            let mut out = Vec::with_capacity(values.len());
-            let mut previous: Option<f64> = None;
-            for (date_ns, close) in values {
-                let daily_return = if let Some(prev) = previous {
-                    if prev != 0.0 {
-                        close / prev - 1.0
-                    } else {
-                        f64::NAN
-                    }
-                } else {
-                    f64::NAN
-                };
-                out.push((date_ns, daily_return));
-                previous = Some(close);
-            }
-            Ok(out)
-        }
-        other => Err(format!(
-            "unsupported benchmark value_type: {other}; supported: close, return"
-        )),
-    }
+    cross_section_mean_returns(
+        rows.iter().map(|row| (row.date_ns, row.label)),
+        "cross_section_mean benchmark had no finite labels",
+    )
 }
 
 fn build_forward_compound_return_map(
@@ -1520,27 +1402,32 @@ fn parse_optional_date_ns(raw: &str) -> Result<Option<i64>, String> {
     parse_date_ns(value).map(Some)
 }
 
-fn append_factor_rows_from_bucket(
-    rows: &mut Vec<FactorRow>,
-    path: &Path,
-    columns: &[String],
-    resolved: &ResolvedRuntimeConfig,
-    selected_sources: &[String],
-    universe_filter: Option<&UniverseFilter>,
+struct FactorBucketLoadOptions<'a> {
+    path: &'a Path,
+    columns: &'a [String],
+    resolved: &'a ResolvedRuntimeConfig,
+    selected_sources: &'a [String],
+    universe_filter: Option<&'a UniverseFilter>,
     load_start_ns: Option<i64>,
     batch_size: usize,
+}
+
+fn append_factor_rows_from_bucket(
+    rows: &mut Vec<FactorRow>,
+    options: &FactorBucketLoadOptions<'_>,
 ) -> Result<(), String> {
-    let reader = open_projected_parquet_reader(path, columns, batch_size)?;
+    let reader = open_projected_parquet_reader(options.path, options.columns, options.batch_size)?;
     for batch in reader {
-        let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let batch =
+            batch.map_err(|err| format!("failed to read {}: {err}", options.path.display()))?;
         append_factor_batch(
             rows,
             &batch,
-            path,
-            resolved,
-            selected_sources,
-            universe_filter,
-            load_start_ns,
+            options.path,
+            options.resolved,
+            options.selected_sources,
+            options.universe_filter,
+            options.load_start_ns,
         )?;
     }
     Ok(())
@@ -2270,56 +2157,70 @@ fn build_window_prediction_rows(
         .collect())
 }
 
-fn build_python_lgbm_window(
-    rows: &[FactorRow],
-    train_indices: &[usize],
-    train_keep_positions: &[usize],
-    train_prepared: &PreparedWindowLabelColumns,
-    valid_indices: &[usize],
-    valid_keep_positions: &[usize],
-    valid_prepared: &PreparedWindowLabelColumns,
-    test_indices: &[usize],
-    test_keep_positions: &[usize],
-) -> PreparedPythonLgbmWindow {
+struct PythonLgbmWindowBuildInput<'a> {
+    rows: &'a [FactorRow],
+    train_indices: &'a [usize],
+    train_keep_positions: &'a [usize],
+    train_prepared: &'a PreparedWindowLabelColumns,
+    valid_indices: &'a [usize],
+    valid_keep_positions: &'a [usize],
+    valid_prepared: &'a PreparedWindowLabelColumns,
+    test_indices: &'a [usize],
+    test_keep_positions: &'a [usize],
+}
+
+fn build_python_lgbm_window(input: &PythonLgbmWindowBuildInput<'_>) -> PreparedPythonLgbmWindow {
     PreparedPythonLgbmWindow {
-        train_rows: train_keep_positions.len(),
-        valid_rows: valid_keep_positions.len(),
-        test_rows: test_keep_positions.len(),
-        train_feature_bytes: encode_feature_rows_le(rows, train_indices, train_keep_positions),
-        valid_feature_bytes: encode_feature_rows_le(rows, valid_indices, valid_keep_positions),
-        test_feature_bytes: encode_feature_rows_le(rows, test_indices, test_keep_positions),
+        train_rows: input.train_keep_positions.len(),
+        valid_rows: input.valid_keep_positions.len(),
+        test_rows: input.test_keep_positions.len(),
+        train_feature_bytes: encode_feature_rows_le(
+            input.rows,
+            input.train_indices,
+            input.train_keep_positions,
+        ),
+        valid_feature_bytes: encode_feature_rows_le(
+            input.rows,
+            input.valid_indices,
+            input.valid_keep_positions,
+        ),
+        test_feature_bytes: encode_feature_rows_le(
+            input.rows,
+            input.test_indices,
+            input.test_keep_positions,
+        ),
         train_label_bytes: encode_f64_values_le(&collect_prepared_values_by_position(
-            &train_prepared.label,
-            train_keep_positions,
+            &input.train_prepared.label,
+            input.train_keep_positions,
         )),
         valid_label_bytes: encode_f64_values_le(&collect_prepared_values_by_position(
-            &valid_prepared.label,
-            valid_keep_positions,
+            &input.valid_prepared.label,
+            input.valid_keep_positions,
         )),
         raw_valid_label_bytes: encode_f64_values_le(&collect_prepared_values_by_position(
-            &valid_prepared.raw_label,
-            valid_keep_positions,
+            &input.valid_prepared.raw_label,
+            input.valid_keep_positions,
         )),
         train_date_ns_bytes: encode_i64_values_le(&collect_date_ns_by_position(
-            rows,
-            train_indices,
-            train_keep_positions,
+            input.rows,
+            input.train_indices,
+            input.train_keep_positions,
         )),
         valid_date_ns_bytes: encode_i64_values_le(&collect_date_ns_by_position(
-            rows,
-            valid_indices,
-            valid_keep_positions,
+            input.rows,
+            input.valid_indices,
+            input.valid_keep_positions,
         )),
         train_sample_weight_bytes: encode_optional_f64_values_le(
             &collect_prepared_values_by_position(
-                &train_prepared.sample_weight,
-                train_keep_positions,
+                &input.train_prepared.sample_weight,
+                input.train_keep_positions,
             ),
         ),
         valid_sample_weight_bytes: encode_optional_f64_values_le(
             &collect_prepared_values_by_position(
-                &valid_prepared.sample_weight,
-                valid_keep_positions,
+                &input.valid_prepared.sample_weight,
+                input.valid_keep_positions,
             ),
         ),
     }
@@ -2364,7 +2265,7 @@ fn encode_optional_f64_values_le(values: &[f64]) -> Option<Vec<u8>> {
 }
 
 fn encode_f64_values_le(values: &[f64]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(values.len() * std::mem::size_of::<f64>());
+    let mut out = Vec::with_capacity(mem::size_of_val(values));
     for value in values {
         out.extend_from_slice(&value.to_le_bytes());
     }
@@ -2372,7 +2273,7 @@ fn encode_f64_values_le(values: &[f64]) -> Vec<u8> {
 }
 
 fn encode_i64_values_le(values: &[i64]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(values.len() * std::mem::size_of::<i64>());
+    let mut out = Vec::with_capacity(mem::size_of_val(values));
     for value in values {
         out.extend_from_slice(&value.to_le_bytes());
     }
@@ -2438,9 +2339,8 @@ fn compute_validation_topk_summary(
             let mut selected_labels = Vec::with_capacity(selected.len());
             let mut selected_opportunity = Vec::with_capacity(selected.len());
             let mut group_labels = Vec::with_capacity(group_len);
-            for absolute_index in group_start..group_end {
-                let position = keep_positions[absolute_index];
-                group_labels.push(rows[indices[position]].label);
+            for position in keep_positions.iter().take(group_end).skip(group_start) {
+                group_labels.push(rows[indices[*position]].label);
             }
             for absolute_index in selected.iter().copied() {
                 let position = keep_positions[absolute_index];
@@ -2508,11 +2408,11 @@ fn empty_validation_topk_summary() -> JsonValue {
     })
 }
 
-fn build_window_training_summary(
-    python_summary: &JsonValue,
-    paths: &WindowDataPaths,
-    window: &RollingWindow,
-    resolved: &ResolvedRuntimeConfig,
+struct WindowTrainingSummaryInput<'a> {
+    python_summary: &'a JsonValue,
+    paths: &'a WindowDataPaths,
+    window: &'a RollingWindow,
+    resolved: &'a ResolvedRuntimeConfig,
     raw_train_rows: usize,
     raw_valid_rows: usize,
     raw_test_rows: usize,
@@ -2521,7 +2421,11 @@ fn build_window_training_summary(
     test_rows: usize,
     feature_count: usize,
     valid_topk_summary: JsonValue,
-) -> JsonValue {
+}
+
+fn build_window_training_summary(input: &WindowTrainingSummaryInput<'_>) -> JsonValue {
+    let resolved = input.resolved;
+    let window = input.window;
     let train_label_transform_mode = resolved.train_label_transform.mode.clone();
     let train_label_space = if resolved
         .train_label_transform
@@ -2541,19 +2445,19 @@ fn build_window_training_summary(
         "valid_end": format_date_ns(window.valid_end_ns),
         "signal_horizon": resolved.signal_horizon,
         "label_embargo_days": resolved.label_embargo_days,
-        "train_rows": train_rows,
-        "valid_rows": valid_rows,
-        "test_rows": test_rows,
-        "raw_train_rows": raw_train_rows,
-        "raw_valid_rows": raw_valid_rows,
-        "raw_test_rows": raw_test_rows,
-        "train_rows_dropped_after_filter": raw_train_rows.saturating_sub(train_rows),
-        "valid_rows_dropped_after_filter": raw_valid_rows.saturating_sub(valid_rows),
-        "test_rows_dropped_after_filter": raw_test_rows.saturating_sub(test_rows),
+        "train_rows": input.train_rows,
+        "valid_rows": input.valid_rows,
+        "test_rows": input.test_rows,
+        "raw_train_rows": input.raw_train_rows,
+        "raw_valid_rows": input.raw_valid_rows,
+        "raw_test_rows": input.raw_test_rows,
+        "train_rows_dropped_after_filter": input.raw_train_rows.saturating_sub(input.train_rows),
+        "valid_rows_dropped_after_filter": input.raw_valid_rows.saturating_sub(input.valid_rows),
+        "test_rows_dropped_after_filter": input.raw_test_rows.saturating_sub(input.test_rows),
         "train_rows_dropped_after_label_transform": 0,
         "valid_rows_dropped_after_label_transform": 0,
-        "feature_count": feature_count,
-        "prediction_path": paths.prediction_path.display().to_string(),
+        "feature_count": input.feature_count,
+        "prediction_path": input.paths.prediction_path.display().to_string(),
         "train_label_transform_mode": train_label_transform_mode,
         "train_label_space": train_label_space,
         "valid_custom_metric_label_space": "raw_return",
@@ -2567,8 +2471,8 @@ fn build_window_training_summary(
             .and_then(JsonValue::as_u64)
             .unwrap_or(10),
     });
-    merge_json_object(&mut summary, python_summary);
-    merge_json_object(&mut summary, &valid_topk_summary);
+    merge_json_object(&mut summary, input.python_summary);
+    merge_json_object(&mut summary, &input.valid_topk_summary);
     summary
 }
 
@@ -2681,15 +2585,15 @@ fn json_f64_or_null(value: f64) -> JsonValue {
 }
 
 fn decode_f64_le_bytes(bytes: &[u8]) -> Result<Vec<f64>, String> {
-    if bytes.len() % std::mem::size_of::<f64>() != 0 {
+    if !bytes.len().is_multiple_of(mem::size_of::<f64>()) {
         return Err(format!(
             "prediction byte payload length {} is not divisible by {}",
             bytes.len(),
-            std::mem::size_of::<f64>()
+            mem::size_of::<f64>()
         ));
     }
     Ok(bytes
-        .chunks_exact(std::mem::size_of::<f64>())
+        .chunks_exact(mem::size_of::<f64>())
         .map(|chunk| {
             let mut raw = [0u8; std::mem::size_of::<f64>()];
             raw.copy_from_slice(chunk);
@@ -2919,87 +2823,6 @@ fn collect_indices_for_date_range(
         .collect()
 }
 
-fn open_projected_parquet_reader(
-    path: &Path,
-    column_names: &[String],
-    batch_size: usize,
-) -> Result<ParquetRecordBatchReader, String> {
-    let file =
-        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|err| format!("failed to open parquet {}: {err}", path.display()))?;
-    let schema = builder.schema();
-    let mut indices = BTreeSet::new();
-    let mut missing = Vec::new();
-    for column_name in column_names {
-        match schema.index_of(column_name) {
-            Ok(index) => {
-                indices.insert(index);
-            }
-            Err(_) => missing.push(column_name.clone()),
-        }
-    }
-    if !missing.is_empty() {
-        return Err(format!(
-            "{} is missing required column(s): {}",
-            path.display(),
-            missing.join(",")
-        ));
-    }
-    let projection = ProjectionMask::roots(builder.parquet_schema(), indices);
-    builder
-        .with_projection(projection)
-        .with_batch_size(batch_size.max(1))
-        .build()
-        .map_err(|err| {
-            format!(
-                "failed to build parquet reader for {}: {err}",
-                path.display()
-            )
-        })
-}
-
-fn required_column<'a>(
-    batch: &'a RecordBatch,
-    name: &str,
-    path: &Path,
-) -> Result<&'a dyn Array, String> {
-    let index = batch
-        .schema()
-        .index_of(name)
-        .map_err(|_| format!("{} is missing required column {name}", path.display()))?;
-    Ok(batch.column(index).as_ref())
-}
-
-fn numeric_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<f64, String> {
-    if array.is_null(row_index) {
-        return Ok(f64::NAN);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(values.value(row_index) as f64);
-    }
-    Err(format!(
-        "{} has unsupported numeric type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
 fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<String, String> {
     if array.is_null(row_index) {
         return Err(format!(
@@ -3018,63 +2841,6 @@ fn string_value(array: &dyn Array, row_index: usize, path: &Path) -> Result<Stri
         path.display(),
         array.data_type()
     ))
-}
-
-fn date_value_ns(array: &dyn Array, row_index: usize, path: &Path) -> Result<i64, String> {
-    if array.is_null(row_index) {
-        return Err(format!(
-            "{} has null date value at row {row_index}",
-            path.display()
-        ));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        return Ok(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(values.value(row_index) * 1_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Ok(values.value(row_index) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-        return Ok(values.value(row_index) * 1_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date64Array>() {
-        return Ok(values.value(row_index) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(values.value(row_index) as i64 * 86_400_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return parse_date_ns(values.value(row_index));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return parse_date_ns(values.value(row_index));
-    }
-    Err(format!(
-        "{} has unsupported date type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
-fn parse_date_ns(raw: &str) -> Result<i64, String> {
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
-        return date
-            .and_hms_opt(0, 0, 0)
-            .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
-            .ok_or_else(|| format!("invalid date timestamp: {raw}"));
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y%m%d") {
-        return date
-            .and_hms_opt(0, 0, 0)
-            .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
-            .ok_or_else(|| format!("invalid date timestamp: {raw}"));
-    }
-    DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .and_then(|datetime| datetime.with_timezone(&Utc).timestamp_nanos_opt())
-        .ok_or_else(|| format!("invalid date: {raw}"))
 }
 
 fn format_date_ns(value: i64) -> String {
@@ -3230,7 +2996,7 @@ fn median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|left, right| left.total_cmp(right));
     let mid = sorted.len() / 2;
-    if sorted.len() % 2 == 0 {
+    if sorted.len().is_multiple_of(2) {
         0.5 * (sorted[mid - 1] + sorted[mid])
     } else {
         sorted[mid]
@@ -3323,17 +3089,10 @@ fn resolve_named_profile(
     let profiles = yaml_mapping_get(yaml_as_mapping(&profile_data)?, "profiles")
         .and_then(YamlValue::as_mapping)
         .ok_or_else(|| format!("{profile_config_path} has no profiles mapping"))?;
-    resolve_profile_from_mapping(
-        profile_config_path,
-        profiles,
-        profile_name,
-        profile_kind,
-        &mut Vec::new(),
-    )
+    resolve_profile_from_mapping(profiles, profile_name, profile_kind, &mut Vec::new())
 }
 
 fn resolve_profile_from_mapping(
-    profile_config_path: &str,
     profiles: &YamlMapping,
     profile_name: &str,
     profile_kind: &str,
@@ -3361,13 +3120,7 @@ fn resolve_profile_from_mapping(
         .map(str::to_owned);
     if let Some(parent_name) = extends_name {
         stack.push(profile_name.to_owned());
-        let mut parent = resolve_profile_from_mapping(
-            profile_config_path,
-            profiles,
-            &parent_name,
-            profile_kind,
-            stack,
-        )?;
+        let mut parent = resolve_profile_from_mapping(profiles, &parent_name, profile_kind, stack)?;
         stack.pop();
         deep_merge_yaml(&mut parent, merged);
         merged = parent;
@@ -3588,31 +3341,6 @@ fn resolve_sample_weight_config(lgbm_config: &JsonValue) -> SampleWeightConfig {
         scale: json_key_f64(lgbm_config, "sample_weight_scale"),
         min: json_key_f64(lgbm_config, "sample_weight_min").unwrap_or(0.0),
         date_normalize: json_key_bool(lgbm_config, "sample_weight_date_normalize").unwrap_or(false),
-    }
-}
-
-fn read_yaml_file(path: impl AsRef<Path>) -> Result<YamlValue, String> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    serde_yaml::from_str(&raw).map_err(|err| format!("failed to parse {}: {err}", path.display()))
-}
-
-fn deep_merge_yaml(base: &mut YamlValue, overlay: YamlValue) {
-    match (base, overlay) {
-        (YamlValue::Mapping(base_map), YamlValue::Mapping(overlay_map)) => {
-            for (key, overlay_value) in overlay_map {
-                match base_map.get_mut(&key) {
-                    Some(base_value) => deep_merge_yaml(base_value, overlay_value),
-                    None => {
-                        base_map.insert(key, overlay_value);
-                    }
-                }
-            }
-        }
-        (base_slot, overlay_value) => {
-            *base_slot = overlay_value;
-        }
     }
 }
 

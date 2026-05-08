@@ -1,10 +1,16 @@
+use ai4stock2_native::common::artifact::{
+    json_to_csv_string as json_to_string, read_required_csv_rows as read_csv,
+    read_required_json as read_json, write_json_rows_csv as write_rows, CsvRow, JsonRow,
+};
+use ai4stock2_native::common::cli::{next_arg, path_to_string, split_value};
 use chrono::Local;
-use csv::{ReaderBuilder, WriterBuilder};
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+type BucketComparisonRows = (Vec<JsonRow>, Vec<JsonRow>, Vec<JsonRow>);
 
 const METRIC_KEYS: &[&str] = &[
     "annualized_return",
@@ -62,9 +68,6 @@ const TRACE_KEEP_COLUMNS: &[&str] = &[
     "buy_count",
     "sell_count",
 ];
-
-type CsvRow = BTreeMap<String, String>;
-type JsonRow = BTreeMap<String, JsonValue>;
 
 #[derive(Debug, Clone)]
 struct Options {
@@ -165,16 +168,16 @@ pub(crate) fn run_strategy_pair_command(args: &[String]) -> Result<(), String> {
         &output_dir.join("best_trace_holding_diff.csv"),
         &take_sorted(&trace_overlap, "net_return_diff", 20, true),
     )?;
-    write_readme(
-        &output_dir,
-        &options,
-        &metrics,
-        &bucket_shape,
-        &monthly_diff,
-        &yearly_monthly_diff,
-        &family_importance,
-        &trace_overlap,
-    )?;
+    write_readme(&StrategyPairReadmeInput {
+        output_dir: &output_dir,
+        options: &options,
+        metrics: &metrics,
+        bucket_shape: &bucket_shape,
+        monthly_diff: &monthly_diff,
+        yearly_monthly_diff: &yearly_monthly_diff,
+        family_importance: &family_importance,
+        trace_overlap: &trace_overlap,
+    })?;
 
     println!(
         "[+] Strategy-pair diagnostics saved to: {}",
@@ -366,7 +369,7 @@ fn compare_buckets(
     run_dirs: &BTreeMap<String, PathBuf>,
     top_bucket: i64,
     middle_buckets: &BTreeSet<i64>,
-) -> Result<(Vec<JsonRow>, Vec<JsonRow>, Vec<JsonRow>), String> {
+) -> Result<BucketComparisonRows, String> {
     let mut bucket_rows = Vec::new();
     let mut shape_rows = Vec::new();
     let mut yearly_shape_rows = Vec::new();
@@ -794,16 +797,26 @@ fn compare_trace_holdings(
     Ok(rows)
 }
 
-fn write_readme(
-    output_dir: &Path,
-    options: &Options,
-    metrics: &[JsonRow],
-    bucket_shape: &[JsonRow],
-    monthly_diff: &[JsonRow],
-    yearly_monthly_diff: &[JsonRow],
-    family_importance: &[JsonRow],
-    trace_overlap: &[JsonRow],
-) -> Result<(), String> {
+struct StrategyPairReadmeInput<'a> {
+    output_dir: &'a Path,
+    options: &'a Options,
+    metrics: &'a [JsonRow],
+    bucket_shape: &'a [JsonRow],
+    monthly_diff: &'a [JsonRow],
+    yearly_monthly_diff: &'a [JsonRow],
+    family_importance: &'a [JsonRow],
+    trace_overlap: &'a [JsonRow],
+}
+
+fn write_readme(input: &StrategyPairReadmeInput<'_>) -> Result<(), String> {
+    let output_dir = input.output_dir;
+    let options = input.options;
+    let metrics = input.metrics;
+    let bucket_shape = input.bucket_shape;
+    let monthly_diff = input.monthly_diff;
+    let yearly_monthly_diff = input.yearly_monthly_diff;
+    let family_importance = input.family_importance;
+    let trace_overlap = input.trace_overlap;
     let candidate_row = row_for_run(metrics, &options.candidate_name)
         .ok_or_else(|| format!("missing candidate metrics row: {}", options.candidate_name))?;
     let baseline_row = row_for_run(metrics, &options.baseline_name)
@@ -1056,81 +1069,6 @@ fn bucket_shape(
     Ok(row)
 }
 
-fn read_csv(path: &Path) -> Result<Vec<CsvRow>, String> {
-    if !path.exists() {
-        return Err(format!("Missing required artifact: {}", path.display()));
-    }
-    let mut reader = ReaderBuilder::new()
-        .from_path(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    let headers = reader
-        .headers()
-        .map_err(|err| format!("failed to read headers {}: {err}", path.display()))?
-        .iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut rows = Vec::new();
-    for record in reader.records() {
-        let record = record.map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
-        rows.push(
-            headers
-                .iter()
-                .zip(record.iter())
-                .map(|(key, value)| (key.clone(), value.to_owned()))
-                .collect(),
-        );
-    }
-    Ok(rows)
-}
-
-fn read_json(path: &Path) -> Result<JsonValue, String> {
-    if !path.exists() {
-        return Err(format!("Missing required artifact: {}", path.display()));
-    }
-    let text = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    serde_json::from_str(&text).map_err(|err| format!("failed to parse {}: {err}", path.display()))
-}
-
-fn write_rows(path: &Path, rows: &[JsonRow]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-    let headers = collect_headers(rows);
-    let mut writer = WriterBuilder::new()
-        .from_path(path)
-        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
-    writer
-        .write_record(&headers)
-        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
-    for row in rows {
-        writer
-            .write_record(
-                headers
-                    .iter()
-                    .map(|key| json_to_string(row.get(key).unwrap_or(&JsonValue::Null))),
-            )
-            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
-    }
-    writer
-        .flush()
-        .map_err(|err| format!("failed to flush {}: {err}", path.display()))
-}
-
-fn collect_headers(rows: &[JsonRow]) -> Vec<String> {
-    let mut headers = Vec::new();
-    let mut seen = BTreeSet::new();
-    for row in rows {
-        for key in row.keys() {
-            if seen.insert(key.clone()) {
-                headers.push(key.clone());
-            }
-        }
-    }
-    headers
-}
-
 fn require_columns(rows: &[CsvRow], columns: &[&str], artifact: &str) -> Result<(), String> {
     let Some(first) = rows.first() else {
         return Ok(());
@@ -1333,7 +1271,7 @@ fn median(mut values: Vec<f64>) -> Option<f64> {
     }
     values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
     let mid = values.len() / 2;
-    if values.len() % 2 == 0 {
+    if values.len().is_multiple_of(2) {
         Some((values[mid - 1] + values[mid]) / 2.0)
     } else {
         Some(values[mid])
@@ -1425,24 +1363,6 @@ fn parse_bucket_ids(raw: &str) -> Result<BTreeSet<i64>, String> {
     Ok(values)
 }
 
-fn next_arg(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {option}"))
-}
-
-fn split_value(value: &str, option: &str) -> Result<String, String> {
-    let raw = value
-        .split_once('=')
-        .map(|(_, right)| right)
-        .unwrap_or_default();
-    if raw.is_empty() {
-        return Err(format!("missing value for {option}"));
-    }
-    Ok(raw.to_owned())
-}
-
 fn parse_i64(value: &str, option: &str) -> Result<i64, String> {
     value
         .parse::<i64>()
@@ -1472,16 +1392,6 @@ fn json_f64(value: f64) -> JsonValue {
     serde_json::Number::from_f64(value)
         .map(JsonValue::Number)
         .unwrap_or(JsonValue::Null)
-}
-
-fn json_to_string(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Null => String::new(),
-        JsonValue::String(text) => text.clone(),
-        JsonValue::Number(number) => number.to_string(),
-        JsonValue::Bool(value) => value.to_string(),
-        other => other.to_string(),
-    }
 }
 
 fn fmt_metric(value: Option<&JsonValue>) -> String {
@@ -1558,10 +1468,6 @@ fn fmt_table_value(value: &JsonValue) -> String {
         JsonValue::Bool(value) => value.to_string(),
         other => other.to_string().replace('|', "\\|"),
     }
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

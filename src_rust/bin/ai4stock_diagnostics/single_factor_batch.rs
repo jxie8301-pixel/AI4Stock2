@@ -1,3 +1,6 @@
+use ai4stock2_native::common::artifact::write_json_pretty;
+use ai4stock2_native::common::cli::{display_command, next_arg, path_to_string, split_value};
+use ai4stock2_native::common::yaml::{deep_merge_yaml, read_yaml_file, write_yaml_file};
 use ai4stock2_native::feature_prefilter::{
     run_build_prefilter_profile, run_build_robust_profile, PrefilterProfileBuildOptions,
     PrefilterThresholds, ProfileBuildSummary, RobustProfileBuildOptions,
@@ -197,15 +200,20 @@ pub(crate) fn run_single_factor_batch_command(args: &[String]) -> Result<(), Str
             "features.profile",
             YamlValue::String(case.feature_profile.clone()),
         )?;
-        let metadata = build_case_metadata(
-            &resolved,
-            &options,
+        let case_context = BatchCaseContext {
+            resolved: &resolved,
+            options: &options,
             case,
+            date_range: DateRangeRef {
+                start: &date_start,
+                end: &date_end,
+            },
+        };
+        let metadata = build_case_metadata(
+            &case_context,
             feature_names,
             incremental_feature_names,
             segments.len(),
-            &date_start,
-            &date_end,
         );
         let prepared = prepare_single_factor_inputs(
             &case_cfg,
@@ -217,16 +225,12 @@ pub(crate) fn run_single_factor_batch_command(args: &[String]) -> Result<(), Str
             &metadata,
         )?;
         let command = build_display_single_factor_command(
-            &resolved,
-            &options,
-            case,
+            &case_context,
             &output_dir,
             &prepared.features_path,
             &prepared.metadata_path,
             &prepared.config_path,
             &segments,
-            &date_start,
-            &date_end,
         );
         if options.dry_run {
             println!("[dry-run] {}", display_command(&command));
@@ -441,17 +445,22 @@ pub(crate) fn run_single_factor_profile_command(args: &[String]) -> Result<(), S
         &feature_names,
         &metadata,
     )?;
-    let command = build_display_single_factor_command(
-        &resolved,
-        &batch_options,
+    let case_context = BatchCaseContext {
+        resolved: &resolved,
+        options: &batch_options,
         case,
+        date_range: DateRangeRef {
+            start: &date_start,
+            end: &date_end,
+        },
+    };
+    let command = build_display_single_factor_command(
+        &case_context,
         &output_dir,
         &prepared.features_path,
         &prepared.metadata_path,
         &prepared.config_path,
         &segments,
-        &date_start,
-        &date_end,
     );
     if batch_options.dry_run {
         println!("[dry-run] {}", display_command(&command));
@@ -2250,16 +2259,27 @@ fn prepare_single_factor_inputs(
     })
 }
 
+struct DateRangeRef<'a> {
+    start: &'a str,
+    end: &'a str,
+}
+
+struct BatchCaseContext<'a> {
+    resolved: &'a ResolvedRuntimeConfig,
+    options: &'a BatchOptions,
+    case: &'a DiagnosticsBatchCase,
+    date_range: DateRangeRef<'a>,
+}
+
 fn build_case_metadata(
-    resolved: &ResolvedRuntimeConfig,
-    options: &BatchOptions,
-    case: &DiagnosticsBatchCase,
+    context: &BatchCaseContext<'_>,
     feature_names: &[String],
     incremental_feature_names: &[String],
     segment_count: usize,
-    date_start: &str,
-    date_end: &str,
 ) -> JsonValue {
+    let resolved = context.resolved;
+    let options = context.options;
+    let case = context.case;
     serde_json::json!({
         "data_source": resolved.data_source,
         "universe": resolved.universe_name,
@@ -2268,8 +2288,8 @@ fn build_case_metadata(
         "factor_store_dir": resolved.factor_store,
         "signal_horizon": resolved.signal_horizon,
         "period": options.period,
-        "date_start": date_start,
-        "date_end": date_end,
+        "date_start": context.date_range.start,
+        "date_end": context.date_range.end,
         "diagnostic_label_space": case.diagnostic_label_space,
         "diagnostic_threshold": case.diagnostic_threshold,
         "industry_neutral": options.industry_neutral,
@@ -2287,17 +2307,16 @@ fn build_case_metadata(
 }
 
 fn build_display_single_factor_command(
-    resolved: &ResolvedRuntimeConfig,
-    options: &BatchOptions,
-    case: &DiagnosticsBatchCase,
+    context: &BatchCaseContext<'_>,
     output_dir: &Path,
     features_path: &Path,
     metadata_path: &Path,
     config_path: &Path,
     segments: &[SegmentSpec],
-    date_start: &str,
-    date_end: &str,
 ) -> Vec<String> {
+    let resolved = context.resolved;
+    let options = context.options;
+    let case = context.case;
     let mut command = vec![
         "ai4stock-diagnostics".to_owned(),
         "single-factor".to_owned(),
@@ -2312,9 +2331,9 @@ fn build_display_single_factor_command(
         "--features-json".to_owned(),
         path_to_string(features_path),
         "--date-start".to_owned(),
-        date_start.to_owned(),
+        context.date_range.start.to_owned(),
         "--date-end".to_owned(),
-        date_end.to_owned(),
+        context.date_range.end.to_owned(),
         "--universe-name".to_owned(),
         resolved.universe_name.clone(),
         "--universe-dir".to_owned(),
@@ -2856,47 +2875,8 @@ fn slugify(value: &str) -> String {
     }
 }
 
-fn read_yaml_file(path: impl AsRef<Path>) -> Result<YamlValue, String> {
-    let path = path.as_ref();
-    let text = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    serde_yaml::from_str(&text).map_err(|err| format!("failed to parse {}: {err}", path.display()))
-}
-
-fn write_yaml_file(path: &Path, value: &YamlValue) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-    let text = serde_yaml::to_string(value)
-        .map_err(|err| format!("failed to encode YAML {}: {err}", path.display()))?;
-    fs::write(path, text).map_err(|err| format!("failed to write {}: {err}", path.display()))
-}
-
 fn write_json_file(path: &Path, value: &JsonValue) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|err| format!("failed to encode JSON {}: {err}", path.display()))?;
-    fs::write(path, text).map_err(|err| format!("failed to write {}: {err}", path.display()))
-}
-
-fn deep_merge_yaml(base: &mut YamlValue, overlay: YamlValue) {
-    match (base, overlay) {
-        (YamlValue::Mapping(base_map), YamlValue::Mapping(overlay_map)) => {
-            for (key, overlay_value) in overlay_map {
-                match base_map.get_mut(&key) {
-                    Some(base_value) => deep_merge_yaml(base_value, overlay_value),
-                    None => {
-                        base_map.insert(key, overlay_value);
-                    }
-                }
-            }
-        }
-        (base_slot, overlay_value) => *base_slot = overlay_value,
-    }
+    write_json_pretty(path, value, false)
 }
 
 fn ensure_mapping(value: &mut YamlValue) {
@@ -3034,24 +3014,6 @@ fn parse_key_value_arg(raw: &str, label: &str) -> Result<(String, YamlValue), St
     Ok((key, parsed))
 }
 
-fn next_arg(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {option}"))
-}
-
-fn split_value(value: &str, option: &str) -> Result<String, String> {
-    let raw = value
-        .split_once('=')
-        .map(|(_, right)| right)
-        .unwrap_or_default();
-    if raw.is_empty() {
-        return Err(format!("missing value for {option}"));
-    }
-    Ok(raw.to_owned())
-}
-
 fn parse_usize(value: String, option: &str) -> Result<usize, String> {
     value
         .parse::<usize>()
@@ -3162,29 +3124,6 @@ fn dedup_preserve_order(items: Vec<String>) -> Vec<String> {
         }
     }
     out
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
-}
-
-fn display_command(command: &[String]) -> String {
-    command
-        .iter()
-        .map(|part| shell_quote(part))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn display_segment(segment: &SegmentSpec) -> String {

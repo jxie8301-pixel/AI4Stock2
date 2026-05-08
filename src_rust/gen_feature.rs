@@ -1385,8 +1385,9 @@ fn median_usize(values: &[usize]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_symbol_factor_frame, deduplicate_exact_feature_columns, summarize_parquet_shards,
-        validate_required_columns, GenerateOptions, ParquetShardStats, SymbolRows,
+        build_labels, build_open_to_open_label, build_symbol_factor_frame,
+        deduplicate_exact_feature_columns, summarize_parquet_shards, validate_required_columns,
+        GenerateOptions, ParquetShardStats, SymbolRows,
     };
     use parquet::basic::Compression;
     use parquet::file::properties::WriterProperties;
@@ -1508,7 +1509,67 @@ mod tests {
     }
 
     #[test]
-    fn standalone_tushare_full_factor_count_matches_python_registry() {
+    fn build_open_to_open_labels_match_expected_horizons() {
+        let mut columns = HashMap::new();
+        columns.insert("open".to_owned(), vec![10.0, 10.5, 11.0, 10.8, 11.5, 12.0]);
+        columns.insert(
+            "volume".to_owned(),
+            vec![100.0, 110.0, 120.0, 130.0, 140.0, 150.0],
+        );
+        columns.insert(
+            "amount".to_owned(),
+            vec![1000.0, 1100.0, 1200.0, 1300.0, 1400.0, 1500.0],
+        );
+        let rows = SymbolRows {
+            dates_ns: (0..6)
+                .map(|row_idx| row_idx as i64 * 86_400_000_000_000)
+                .collect(),
+            columns,
+            all_numeric_float32: true,
+        };
+
+        let labels = build_labels(&rows, &[1, 3])
+            .into_iter()
+            .collect::<HashMap<_, _>>();
+
+        assert!(labels.contains_key("label"));
+        assert!(labels.contains_key("label_1d"));
+        assert!(labels.contains_key("label_3d"));
+        for (left, right) in labels["label"].iter().zip(labels["label_1d"].iter()) {
+            assert!((*left == *right) || (left.is_nan() && right.is_nan()));
+        }
+        assert!((labels["label_1d"][0] - (11.0 / 10.5 - 1.0) as f32).abs() < 1e-7);
+        assert!((labels["label_3d"][0] - (11.5 / 10.5 - 1.0) as f32).abs() < 1e-7);
+        assert!(labels["label_3d"][2].is_nan());
+    }
+
+    #[test]
+    fn open_to_open_label_rejects_non_tradable_or_capped_rows() {
+        let mut columns = HashMap::new();
+        columns.insert("open".to_owned(), vec![10.0, 10.0, 20.0, 22.0, 23.0]);
+        columns.insert("volume".to_owned(), vec![100.0, 100.0, 100.0, 0.0, 100.0]);
+        columns.insert(
+            "amount".to_owned(),
+            vec![1000.0, 1000.0, 1000.0, 1000.0, 1000.0],
+        );
+        let rows = SymbolRows {
+            dates_ns: (0..5)
+                .map(|row_idx| row_idx as i64 * 86_400_000_000_000)
+                .collect(),
+            columns,
+            all_numeric_float32: true,
+        };
+
+        let label = build_open_to_open_label(&rows, 1);
+
+        assert!(label[0].is_nan());
+        assert!(label[1].is_nan());
+        assert!(label[2].is_nan());
+        assert!(label[3].is_nan());
+    }
+
+    #[test]
+    fn standalone_tushare_full_factor_count_matches_native_registry() {
         let row_count = 130usize;
         let mut columns = HashMap::new();
         let open = (0..row_count)

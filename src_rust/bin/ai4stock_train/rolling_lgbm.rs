@@ -1,4 +1,5 @@
 use super::{rust_runtime, LgbmBundleOptions};
+use ai4stock2_native::common::cli::{display_command, next_arg, split_value};
 use chrono::Local;
 use serde_json::Value as JsonValue;
 use std::env;
@@ -14,6 +15,7 @@ struct RollingLgbmOptions {
     output_dir: PathBuf,
     skip_reference_baselines: bool,
     skip_backtest_plots: bool,
+    disable_local_store: bool,
     baseline_jobs: Option<usize>,
     dry_run: bool,
     json: bool,
@@ -28,6 +30,7 @@ pub(crate) fn run_rolling_lgbm(args: &[String]) -> Result<(), String> {
         .unwrap_or_else(|| options.output_dir.join(PREDICTION_ARTIFACT_DIRNAME));
 
     if options.dry_run {
+        rust_runtime::validate_lgbm_bundle_options(&options.bundle_options)?;
         print_dry_run(&options, &bundle_dir, &config_snapshot);
         return Ok(());
     }
@@ -89,6 +92,7 @@ fn parse_rolling_lgbm_options(args: &[String]) -> Result<RollingLgbmOptions, Str
     let mut model_name = "lgbm".to_owned();
     let mut skip_reference_baselines = false;
     let mut skip_backtest_plots = false;
+    let mut disable_local_store = false;
     let mut backtest_artifact_level = "full".to_owned();
     let mut baseline_jobs = None;
     let mut dry_run = false;
@@ -102,7 +106,7 @@ fn parse_rolling_lgbm_options(args: &[String]) -> Result<RollingLgbmOptions, Str
             "--save-models" => save_models = true,
             "--load-models" => load_models = true,
             "--save-predictions" => {}
-            "--disable-local-store" => {}
+            "--disable-local-store" => disable_local_store = true,
             "--skip-opportunity-diagnostics" => {}
             "--skip-backtest-trace" => {}
             "--skip-reference-baselines" => skip_reference_baselines = true,
@@ -299,9 +303,17 @@ fn parse_rolling_lgbm_options(args: &[String]) -> Result<RollingLgbmOptions, Str
                 batch_size = parse_usize(split_value(value, "--batch-size")?, "--batch-size")?
             }
             "--torch-gpu" => {
-                let _ = next_arg(args, &mut index, "--torch-gpu")?;
+                return Err(
+                    "--torch-gpu is obsolete; active rolling-lgbm runtime only supports LightGBM"
+                        .to_owned(),
+                )
             }
-            value if value.starts_with("--torch-gpu=") => {}
+            value if value.starts_with("--torch-gpu=") => {
+                return Err(
+                    "--torch-gpu is obsolete; active rolling-lgbm runtime only supports LightGBM"
+                        .to_owned(),
+                )
+            }
             "--load-predictions-dir" => {
                 load_predictions_dir = Some(PathBuf::from(next_arg(
                     args,
@@ -336,7 +348,7 @@ fn parse_rolling_lgbm_options(args: &[String]) -> Result<RollingLgbmOptions, Str
         index += 1;
     }
 
-    if model_name.trim().to_ascii_lowercase() != "lgbm" {
+    if !model_name.trim().eq_ignore_ascii_case("lgbm") {
         return Err("ai4stock-train rolling-lgbm only supports --model lgbm".to_owned());
     }
     if test_start.is_some() != test_end.is_some() {
@@ -352,8 +364,8 @@ fn parse_rolling_lgbm_options(args: &[String]) -> Result<RollingLgbmOptions, Str
         skip_backtest_plots = true;
     }
 
-    let output_dir =
-        output_dir.unwrap_or_else(|| default_output_dir(store_dir, run_tag.as_deref()));
+    let output_dir = output_dir
+        .unwrap_or_else(|| default_output_dir(store_dir, run_tag.as_deref(), disable_local_store));
     let bundle_options = LgbmBundleOptions {
         config,
         config_is_snapshot,
@@ -390,6 +402,7 @@ fn parse_rolling_lgbm_options(args: &[String]) -> Result<RollingLgbmOptions, Str
         output_dir,
         skip_reference_baselines,
         skip_backtest_plots,
+        disable_local_store,
         baseline_jobs,
         dry_run,
         json,
@@ -436,6 +449,9 @@ fn build_backtest_command(
     }
     if options.skip_backtest_plots {
         command.push("--skip-backtest-plots".to_owned());
+    }
+    if options.disable_local_store {
+        command.push("--disable-local-store".to_owned());
     }
     if let Some(baseline_jobs) = options.baseline_jobs {
         command.extend(["--baseline-jobs".to_owned(), baseline_jobs.to_string()]);
@@ -539,7 +555,14 @@ fn build_train_command(options: &LgbmBundleOptions) -> Vec<String> {
     command
 }
 
-fn default_output_dir(store_dir: Option<PathBuf>, run_tag: Option<&str>) -> PathBuf {
+fn default_output_dir(
+    store_dir: Option<PathBuf>,
+    run_tag: Option<&str>,
+    disable_local_store: bool,
+) -> PathBuf {
+    if disable_local_store {
+        return PathBuf::from("results/native_rolling_lgbm");
+    }
     let root = store_dir.unwrap_or_else(|| PathBuf::from("results/experiments"));
     let tag = slugify(run_tag.unwrap_or("rust-wrapper"));
     root.join("native")
@@ -569,25 +592,6 @@ fn split_command(raw: &str) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_owned)
         .collect()
-}
-
-fn display_command(command: &[String]) -> String {
-    command
-        .iter()
-        .map(|part| shell_quote(part))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':' | '='))
-    {
-        value.to_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn slugify(raw: &str) -> String {
@@ -632,24 +636,6 @@ fn push_flag(command: &mut Vec<String>, flag: &str, enabled: bool) {
     if enabled {
         command.push(flag.to_owned());
     }
-}
-
-fn next_arg(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {option}"))
-}
-
-fn split_value(value: &str, option: &str) -> Result<String, String> {
-    let raw = value
-        .split_once('=')
-        .map(|(_, right)| right)
-        .unwrap_or_default();
-    if raw.is_empty() {
-        return Err(format!("missing value for {option}"));
-    }
-    Ok(raw.to_owned())
 }
 
 fn parse_usize(value: String, option: &str) -> Result<usize, String> {
@@ -718,10 +704,35 @@ mod tests {
     #[test]
     fn rejects_non_lgbm_model() {
         let error =
-            parse_rolling_lgbm_options(&args(&["--output-dir", "/tmp/run", "--model", "lstm"]))
+            parse_rolling_lgbm_options(&args(&["--output-dir", "/tmp/run", "--model", "linear"]))
                 .unwrap_err();
 
         assert!(error.contains("only supports --model lgbm"));
+    }
+
+    #[test]
+    fn disable_local_store_uses_legacy_output_and_forwards_to_backtest() {
+        let parsed =
+            parse_rolling_lgbm_options(&args(&["--disable-local-store", "--save-models"])).unwrap();
+        assert_eq!(
+            parsed.output_dir,
+            PathBuf::from("results/native_rolling_lgbm")
+        );
+        assert!(parsed.disable_local_store);
+
+        let command = build_backtest_command(
+            &parsed,
+            Path::new("results/native_rolling_lgbm/prediction_artifacts"),
+            Path::new("results/native_rolling_lgbm/config_snapshot.yaml"),
+        );
+        assert!(command.contains(&"--disable-local-store".to_owned()));
+    }
+
+    #[test]
+    fn rejects_obsolete_torch_gpu_flag() {
+        let error = parse_rolling_lgbm_options(&args(&["--torch-gpu", "0"])).unwrap_err();
+
+        assert!(error.contains("--torch-gpu is obsolete"));
     }
 
     #[test]

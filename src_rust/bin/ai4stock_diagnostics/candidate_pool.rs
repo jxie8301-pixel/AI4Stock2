@@ -1,9 +1,14 @@
+use ai4stock2_native::common::artifact::{
+    json_to_csv_string as json_to_string, read_required_csv_rows as read_csv,
+    read_required_json as read_json, write_json_pretty, write_json_rows_csv as write_rows, CsvRow,
+    JsonRow,
+};
+use ai4stock2_native::common::cli::{next_arg, path_to_string, split_value};
 use chrono::Local;
-use csv::{ReaderBuilder, WriterBuilder};
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::fs::{self, File};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 const CORE_REFERENCE_BASELINE_PREFIXES: &[&str] = &[
@@ -73,31 +78,8 @@ const TRAINING_SIGNAL_COLUMNS: &[&str] = &[
     "valid_topk_min_label_mean",
     "best_valid_daily_rank_ic",
 ];
-const LATEST_SLIM_B_TOPK15_RUNS: &[(&str, &str)] = &[
-    (
-        "old_stable_t10",
-        "results/experiments/native/rolling/lgbm/20260411_204402__native__rolling__lgbm__top10_drop2_wscore_softmax_strank_pct_keepna_minsna_reb10__excess-flow-value-backtest-stable-posrate-industry-excess-flow-value-slim-b-v1",
-    ),
-    (
-        "old_offensive_t8",
-        "results/experiments/native/rolling/lgbm/20260411_204756__native__rolling__lgbm__top8_drop2_wscore_softmax_strank_pct_keepna_minsna_reb10__excess-flow-value-backtest-offensive-posrate-industry-excess-flow-value-slim-b-v1",
-    ),
-    (
-        "new_stable_t10",
-        "results/experiments/native/rolling/lgbm/20260424_000657__native__rolling__lgbm__top10_drop2_wscore_softmax_strank_pct_keepna_minsna_reb10__slim-b-topk15-candidate-recheck-strategy-n-drop-2-strategy-score-transform-rank-pct-strategy-topk-10-strategy-weighting-score-softmax",
-    ),
-    (
-        "new_offensive_t8",
-        "results/experiments/native/rolling/lgbm/20260424_001123__native__rolling__lgbm__top8_drop2_wscore_softmax_strank_pct_keepna_minsna_reb10__slim-b-topk15-candidate-recheck-strategy-n-drop-2-strategy-score-transform-rank-pct-strategy-topk-8-strategy-weighting-score-softmax",
-    ),
-];
-
-type CsvRow = BTreeMap<String, String>;
-type JsonRow = BTreeMap<String, JsonValue>;
-
 #[derive(Debug, Clone)]
 struct Options {
-    preset: Option<String>,
     runs: Vec<String>,
     candidate_root: Option<PathBuf>,
     no_sync_candidate_root: bool,
@@ -210,17 +192,17 @@ pub(crate) fn run_candidate_pool_command(args: &[String]) -> Result<(), String> 
         &output_dir.join("candidate_profiles.json"),
         &JsonValue::Array(candidate_profiles.clone()),
     )?;
-    write_readme(
-        &output_dir,
-        &runs,
-        &portfolio,
-        &yearly,
-        &concentration,
-        &bucket_shape,
-        &yearly_bucket_shape,
-        &validation_bins,
-        &candidate_profile_rows,
-    )?;
+    write_readme(&CandidateReadmeInput {
+        output_dir: &output_dir,
+        runs: &runs,
+        portfolio: &portfolio,
+        yearly: &yearly,
+        concentration: &concentration,
+        bucket_shape: &bucket_shape,
+        yearly_bucket_shape: &yearly_bucket_shape,
+        validation_bins: &validation_bins,
+        candidate_profiles: &candidate_profile_rows,
+    })?;
 
     if !options.no_sync_candidate_root {
         if let Some(shortlist_root) = roots.shortlist_root.as_ref() {
@@ -269,7 +251,6 @@ pub(crate) fn run_candidate_pool_command(args: &[String]) -> Result<(), String> 
 
 fn parse_options(args: &[String]) -> Result<Options, String> {
     let mut options = Options {
-        preset: None,
         runs: Vec::new(),
         candidate_root: None,
         no_sync_candidate_root: false,
@@ -282,10 +263,6 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
     while index < args.len() {
         match args[index].as_str() {
             "-h" | "--help" => return Err(usage().to_owned()),
-            "--preset" => options.preset = Some(next_arg(args, &mut index, "--preset")?),
-            value if value.starts_with("--preset=") => {
-                options.preset = Some(split_value(value, "--preset")?)
-            }
             "--run" => options.runs.push(next_arg(args, &mut index, "--run")?),
             value if value.starts_with("--run=") => options.runs.push(split_value(value, "--run")?),
             "--candidate-root" => {
@@ -339,7 +316,7 @@ fn parse_options(args: &[String]) -> Result<Options, String> {
 fn usage() -> &'static str {
     "\
 Usage:
-  ai4stock-diagnostics candidate-pool (--run NAME=DIR | --candidate-root DIR | --preset latest_slim_b_topk15) [options]
+  ai4stock-diagnostics candidate-pool (--run NAME=DIR | --candidate-root DIR) [options]
 
 Options:
   --run NAME=DIR
@@ -354,13 +331,6 @@ Options:
 
 fn parse_runs(options: &Options) -> Result<BTreeMap<String, PathBuf>, String> {
     let mut runs = BTreeMap::new();
-    if options.preset.as_deref() == Some("latest_slim_b_topk15") {
-        for (name, path) in LATEST_SLIM_B_TOPK15_RUNS {
-            runs.insert((*name).to_owned(), PathBuf::from(path));
-        }
-    } else if let Some(preset) = options.preset.as_deref() {
-        return Err(format!("unknown candidate-pool preset: {preset}"));
-    }
     if let Some(root) = options.candidate_root.as_ref() {
         let scan_root = if root.join("candidates").is_dir() {
             root.join("candidates")
@@ -393,7 +363,7 @@ fn parse_runs(options: &Options) -> Result<BTreeMap<String, PathBuf>, String> {
         runs.insert(name.to_owned(), PathBuf::from(path.trim()));
     }
     if runs.is_empty() {
-        return Err("Provide at least one --run or --preset.".to_owned());
+        return Err("Provide at least one --run or --candidate-root.".to_owned());
     }
     let missing = runs
         .iter()
@@ -1571,17 +1541,28 @@ fn sync_outputs_to_candidate_root(
     Ok(())
 }
 
-fn write_readme(
-    output_dir: &Path,
-    runs: &BTreeMap<String, PathBuf>,
-    portfolio: &[JsonRow],
-    yearly: &[JsonRow],
-    concentration: &[JsonRow],
-    bucket_shape: &[JsonRow],
-    yearly_bucket_shape: &[JsonRow],
-    validation_bins: &[JsonRow],
-    candidate_profiles: &[JsonRow],
-) -> Result<(), String> {
+struct CandidateReadmeInput<'a> {
+    output_dir: &'a Path,
+    runs: &'a BTreeMap<String, PathBuf>,
+    portfolio: &'a [JsonRow],
+    yearly: &'a [JsonRow],
+    concentration: &'a [JsonRow],
+    bucket_shape: &'a [JsonRow],
+    yearly_bucket_shape: &'a [JsonRow],
+    validation_bins: &'a [JsonRow],
+    candidate_profiles: &'a [JsonRow],
+}
+
+fn write_readme(input: &CandidateReadmeInput<'_>) -> Result<(), String> {
+    let output_dir = input.output_dir;
+    let runs = input.runs;
+    let portfolio = input.portfolio;
+    let yearly = input.yearly;
+    let concentration = input.concentration;
+    let bucket_shape = input.bucket_shape;
+    let yearly_bucket_shape = input.yearly_bucket_shape;
+    let validation_bins = input.validation_bins;
+    let candidate_profiles = input.candidate_profiles;
     let mut validation_display = validation_bins
         .iter()
         .filter(|row| {
@@ -1786,90 +1767,8 @@ fn write_readme(
     .map_err(|err| format!("failed to write README.md: {err}"))
 }
 
-fn read_csv(path: &Path) -> Result<Vec<CsvRow>, String> {
-    if !path.exists() {
-        return Err(format!("Missing required artifact: {}", path.display()));
-    }
-    let mut reader = ReaderBuilder::new()
-        .from_path(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    let headers = reader
-        .headers()
-        .map_err(|err| format!("failed to read headers {}: {err}", path.display()))?
-        .iter()
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut rows = Vec::new();
-    for record in reader.records() {
-        let record = record.map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
-        rows.push(
-            headers
-                .iter()
-                .zip(record.iter())
-                .map(|(key, value)| (key.clone(), value.to_owned()))
-                .collect(),
-        );
-    }
-    Ok(rows)
-}
-
-fn read_json(path: &Path) -> Result<JsonValue, String> {
-    if !path.exists() {
-        return Err(format!("Missing required artifact: {}", path.display()));
-    }
-    let file =
-        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    serde_json::from_reader(file)
-        .map_err(|err| format!("failed to parse {}: {err}", path.display()))
-}
-
-fn write_rows(path: &Path, rows: &[JsonRow]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-    let headers = collect_headers(rows);
-    let mut writer = WriterBuilder::new()
-        .from_path(path)
-        .map_err(|err| format!("failed to create {}: {err}", path.display()))?;
-    writer
-        .write_record(&headers)
-        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
-    for row in rows {
-        writer
-            .write_record(
-                headers
-                    .iter()
-                    .map(|key| json_to_string(row.get(key).unwrap_or(&JsonValue::Null))),
-            )
-            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
-    }
-    writer
-        .flush()
-        .map_err(|err| format!("failed to flush {}: {err}", path.display()))
-}
-
 fn write_json(path: &Path, value: &JsonValue) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
-    }
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|err| format!("failed to encode {}: {err}", path.display()))?;
-    fs::write(path, text + "\n").map_err(|err| format!("failed to write {}: {err}", path.display()))
-}
-
-fn collect_headers(rows: &[JsonRow]) -> Vec<String> {
-    let mut headers = Vec::new();
-    let mut seen = BTreeSet::new();
-    for row in rows {
-        for key in row.keys() {
-            if seen.insert(key.clone()) {
-                headers.push(key.clone());
-            }
-        }
-    }
-    headers
+    write_json_pretty(path, value, true)
 }
 
 fn group_by_year(rows: &[CsvRow]) -> BTreeMap<String, Vec<CsvRow>> {
@@ -2105,16 +2004,6 @@ fn json_f64(value: f64) -> JsonValue {
         .unwrap_or(JsonValue::Null)
 }
 
-fn json_to_string(value: &JsonValue) -> String {
-    match value {
-        JsonValue::Null => String::new(),
-        JsonValue::String(text) => text.clone(),
-        JsonValue::Number(number) => number.to_string(),
-        JsonValue::Bool(value) => value.to_string(),
-        other => other.to_string(),
-    }
-}
-
 fn parse_bucket_ids(raw: &str) -> Result<BTreeSet<i64>, String> {
     let values = raw
         .split(',')
@@ -2129,24 +2018,6 @@ fn parse_bucket_ids(raw: &str) -> Result<BTreeSet<i64>, String> {
         return Err("--middle-buckets must contain at least one bucket id.".to_owned());
     }
     Ok(values)
-}
-
-fn next_arg(args: &[String], index: &mut usize, option: &str) -> Result<String, String> {
-    *index += 1;
-    args.get(*index)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {option}"))
-}
-
-fn split_value(value: &str, option: &str) -> Result<String, String> {
-    let raw = value
-        .split_once('=')
-        .map(|(_, right)| right)
-        .unwrap_or_default();
-    if raw.is_empty() {
-        return Err(format!("missing value for {option}"));
-    }
-    Ok(raw.to_owned())
 }
 
 fn parse_i64(value: &str, option: &str) -> Result<i64, String> {
@@ -2314,10 +2185,6 @@ fn bin_order(row: &JsonRow) -> i32 {
         Some("high") => 2,
         _ => 3,
     }
-}
-
-fn path_to_string(path: &Path) -> String {
-    path.to_string_lossy().into_owned()
 }
 
 #[cfg(test)]

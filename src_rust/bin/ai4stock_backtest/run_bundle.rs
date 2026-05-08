@@ -1,17 +1,19 @@
 use crate::engine::{run_backtest_core_impl, BacktestParams, CoreInputs, OUT_COLS};
 use crate::prediction_bundle::{read_prediction_bundle, MatrixFrame, PredictionBundle};
+use ai4stock2_native::common::benchmark::{
+    coerce_benchmark_returns, read_benchmark_csv, read_benchmark_parquet,
+};
+use ai4stock2_native::common::cli::next_arg;
+use ai4stock2_native::common::parquet::{
+    date_value_ns as datetime_ns_at_array, numeric_value as f64_at_array,
+    open_existing_projected_parquet_reader as open_projected_parquet_reader, optional_column,
+    parse_datetime_ns, required_column_any as required_column,
+};
 use arrow_array::{
-    Array, Date32Array, Date64Array, Float32Array, Float64Array, Int32Array, Int64Array,
-    LargeStringArray, RecordBatch, StringArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
-    UInt64Array,
+    Array, Int32Array, Int64Array, LargeStringArray, StringArray, UInt32Array, UInt64Array,
 };
-use chrono::{DateTime, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use csv::WriterBuilder;
-use parquet::arrow::{
-    arrow_reader::{ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder},
-    ProjectionMask,
-};
 use rayon::prelude::*;
 use serde::Serialize;
 use serde_yaml::Value;
@@ -2150,102 +2152,6 @@ fn load_benchmark_returns(config: &Value) -> Result<Vec<(i64, f64)>, String> {
     coerce_benchmark_returns(values, &value_type)
 }
 
-fn read_benchmark_csv(
-    path: &Path,
-    date_column: &str,
-    value_column: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    let mut reader = csv::Reader::from_path(path)
-        .map_err(|err| format!("failed to read benchmark CSV {}: {err}", path.display()))?;
-    let headers = reader
-        .headers()
-        .map_err(|err| format!("failed to parse {} headers: {err}", path.display()))?
-        .clone();
-    let date_idx = headers
-        .iter()
-        .position(|name| name == date_column)
-        .ok_or_else(|| format!("Benchmark file is missing date column: {date_column}"))?;
-    let value_idx = headers
-        .iter()
-        .position(|name| name == value_column)
-        .ok_or_else(|| format!("Benchmark file is missing value column: {value_column}"))?;
-    let mut by_date = BTreeMap::new();
-    for record in reader.records() {
-        let record = record.map_err(|err| format!("failed to parse {}: {err}", path.display()))?;
-        let Some(raw_date) = record.get(date_idx) else {
-            continue;
-        };
-        let Some(raw_value) = record.get(value_idx) else {
-            continue;
-        };
-        let Ok(date_ns) = parse_datetime_ns(raw_date) else {
-            continue;
-        };
-        let Ok(value) = raw_value.trim().parse::<f64>() else {
-            continue;
-        };
-        if value.is_finite() {
-            by_date.insert(date_ns, value);
-        }
-    }
-    Ok(by_date.into_iter().collect())
-}
-
-fn read_benchmark_parquet(
-    path: &Path,
-    date_column: &str,
-    value_column: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    let reader = open_projected_parquet_reader(path, &[date_column, value_column])?;
-    let mut by_date = BTreeMap::new();
-    for batch in reader {
-        let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-        let dates = required_column(&batch, &[date_column], path)?;
-        let values = required_column(&batch, &[value_column], path)?;
-        for row in 0..batch.num_rows() {
-            if dates.is_null(row) || values.is_null(row) {
-                continue;
-            }
-            let date_ns = datetime_ns_at_array(dates, row, path)?;
-            let value = f64_at_array(values, row, path)?;
-            if value.is_finite() {
-                by_date.insert(date_ns, value);
-            }
-        }
-    }
-    Ok(by_date.into_iter().collect())
-}
-
-fn coerce_benchmark_returns(
-    values: Vec<(i64, f64)>,
-    value_type: &str,
-) -> Result<Vec<(i64, f64)>, String> {
-    match value_type {
-        "return" => Ok(values),
-        "close" => {
-            let mut out = Vec::with_capacity(values.len());
-            let mut previous: Option<f64> = None;
-            for (date_ns, close) in values {
-                let daily_return = if let Some(prev) = previous {
-                    if prev != 0.0 {
-                        close / prev - 1.0
-                    } else {
-                        f64::NAN
-                    }
-                } else {
-                    f64::NAN
-                };
-                out.push((date_ns, daily_return));
-                previous = Some(close);
-            }
-            Ok(out)
-        }
-        other => Err(format!(
-            "Unsupported benchmark value_type: {other}. Supported: return, close"
-        )),
-    }
-}
-
 fn load_instrument_group_ids(config: &Value, instruments: &[String]) -> Result<Vec<i32>, String> {
     let source = resolve_data_source_name(config)?;
     let path = PathBuf::from("data")
@@ -2295,7 +2201,8 @@ fn load_instrument_group_ids(config: &Value, instruments: &[String]) -> Result<V
 }
 
 fn read_symbol_industry_rows(path: &Path) -> Result<Vec<(String, String)>, String> {
-    let reader = open_projected_parquet_reader(path, &["local_symbol", "symbol", "industry"])?;
+    let reader =
+        open_projected_parquet_reader(path, &["local_symbol", "symbol", "industry"], 65_536)?;
     let mut rows = Vec::new();
     for batch in reader {
         let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -2418,6 +2325,7 @@ fn load_source_bucket_ids(
     let reader = open_projected_parquet_reader(
         &path,
         &["symbol", "local_symbol", "instrument", "bucket_id"],
+        65_536,
     )?;
     let mut bucket_ids = BTreeSet::new();
     for batch in reader {
@@ -2462,6 +2370,7 @@ fn append_close_rows_from_parquet(
             "local_symbol",
             "close",
         ],
+        65_536,
     )?;
     for batch in reader {
         let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
@@ -2540,129 +2449,6 @@ fn build_price_confirm_values(
     out
 }
 
-fn required_column<'a>(
-    batch: &'a RecordBatch,
-    candidates: &[&str],
-    path: &Path,
-) -> Result<&'a dyn Array, String> {
-    optional_column(batch, candidates).ok_or_else(|| {
-        format!(
-            "{} is missing required column: {}",
-            path.display(),
-            candidates.join(" or ")
-        )
-    })
-}
-
-fn open_projected_parquet_reader(
-    path: &Path,
-    column_candidates: &[&str],
-) -> Result<ParquetRecordBatchReader, String> {
-    let file =
-        File::open(path).map_err(|err| format!("failed to open {}: {err}", path.display()))?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
-        .map_err(|err| format!("failed to open parquet {}: {err}", path.display()))?;
-    let indices = column_candidates
-        .iter()
-        .filter_map(|name| builder.schema().index_of(name).ok())
-        .collect::<BTreeSet<_>>();
-    let mask = ProjectionMask::roots(builder.parquet_schema(), indices);
-    builder
-        .with_projection(mask)
-        .with_batch_size(65_536)
-        .build()
-        .map_err(|err| {
-            format!(
-                "failed to build parquet reader for {}: {err}",
-                path.display()
-            )
-        })
-}
-
-fn optional_column<'a>(batch: &'a RecordBatch, candidates: &[&str]) -> Option<&'a dyn Array> {
-    candidates.iter().find_map(|name| {
-        batch
-            .schema()
-            .index_of(name)
-            .ok()
-            .map(|idx| batch.column(idx).as_ref())
-    })
-}
-
-fn parse_datetime_ns(raw: &str) -> Result<i64, String> {
-    let text = raw.trim();
-    if text.is_empty() {
-        return Err("empty datetime".to_owned());
-    }
-    if text.len() == 8 && text.chars().all(|ch| ch.is_ascii_digit()) {
-        let date = NaiveDate::parse_from_str(text, "%Y%m%d")
-            .map_err(|err| format!("failed to parse date {text}: {err}"))?;
-        return naive_datetime_to_ns(
-            date.and_hms_opt(0, 0, 0)
-                .ok_or_else(|| format!("invalid date {text}"))?,
-        );
-    }
-    if let Ok(date) = NaiveDate::parse_from_str(text, "%Y-%m-%d") {
-        return naive_datetime_to_ns(
-            date.and_hms_opt(0, 0, 0)
-                .ok_or_else(|| format!("invalid date {text}"))?,
-        );
-    }
-    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%dT%H:%M:%S%.f"] {
-        if let Ok(datetime) = NaiveDateTime::parse_from_str(text, fmt) {
-            return naive_datetime_to_ns(datetime);
-        }
-    }
-    if let Ok(datetime) = DateTime::parse_from_rfc3339(text) {
-        return datetime
-            .timestamp_nanos_opt()
-            .ok_or_else(|| format!("datetime out of range: {text}"));
-    }
-    Err(format!("failed to parse datetime: {text}"))
-}
-
-fn naive_datetime_to_ns(datetime: NaiveDateTime) -> Result<i64, String> {
-    datetime
-        .and_utc()
-        .timestamp_nanos_opt()
-        .ok_or_else(|| format!("datetime out of range: {datetime}"))
-}
-
-fn datetime_ns_at_array(array: &dyn Array, row: usize, path: &Path) -> Result<i64, String> {
-    if array.is_null(row) {
-        return Err(format!("{} has null datetime at row {row}", path.display()));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampNanosecondArray>() {
-        return Ok(values.value(row));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMicrosecondArray>() {
-        return Ok(values.value(row) * 1_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampMillisecondArray>() {
-        return Ok(values.value(row) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<TimestampSecondArray>() {
-        return Ok(values.value(row) * 1_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date32Array>() {
-        return Ok(values.value(row) as i64 * 86_400_000_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Date64Array>() {
-        return Ok(values.value(row) * 1_000_000);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return parse_datetime_ns(values.value(row));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return parse_datetime_ns(values.value(row));
-    }
-    Err(format!(
-        "{} has unsupported datetime type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
 fn string_at_array(array: &dyn Array, row: usize, path: &Path) -> Result<String, String> {
     if array.is_null(row) {
         return Ok(String::new());
@@ -2687,51 +2473,6 @@ fn string_at_array(array: &dyn Array, row: usize, path: &Path) -> Result<String,
     }
     Err(format!(
         "{} has unsupported string-like type {:?}",
-        path.display(),
-        array.data_type()
-    ))
-}
-
-fn f64_at_array(array: &dyn Array, row: usize, path: &Path) -> Result<f64, String> {
-    if array.is_null(row) {
-        return Ok(f64::NAN);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float64Array>() {
-        return Ok(values.value(row));
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Float32Array>() {
-        return Ok(values.value(row) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int64Array>() {
-        return Ok(values.value(row) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<Int32Array>() {
-        return Ok(values.value(row) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt64Array>() {
-        return Ok(values.value(row) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<UInt32Array>() {
-        return Ok(values.value(row) as f64);
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        return values.value(row).trim().parse::<f64>().map_err(|err| {
-            format!(
-                "{} has non-numeric value at row {row}: {err}",
-                path.display()
-            )
-        });
-    }
-    if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        return values.value(row).trim().parse::<f64>().map_err(|err| {
-            format!(
-                "{} has non-numeric value at row {row}: {err}",
-                path.display()
-            )
-        });
-    }
-    Err(format!(
-        "{} has unsupported numeric type {:?}",
         path.display(),
         array.data_type()
     ))
@@ -2831,13 +2572,6 @@ Usage:
 
 Run the native Rust post-bundle backtest path from an existing prediction bundle.
 "
-}
-
-fn next_arg(args: &[String], idx: &mut usize, option: &str) -> Result<String, String> {
-    *idx += 1;
-    args.get(*idx)
-        .cloned()
-        .ok_or_else(|| format!("missing value for {option}"))
 }
 
 fn parse_positive_usize(raw: &str) -> usize {

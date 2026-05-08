@@ -319,8 +319,8 @@ fn parse_native_rolling_bundle_args(args: &[String]) -> Result<NativeRollingBund
                     ));
                 }
             }
-            ("--torch-gpu", value) => {
-                let _ = value_or_next(value, args, &mut idx, "--torch-gpu")?;
+            ("--torch-gpu", _) => {
+                return Err("--torch-gpu is obsolete; active bundle backtest runtime only supports LightGBM artifacts".to_owned())
             }
             ("--disable-local-store", None) => parsed.disable_local_store = true,
             ("--save-models" | "--load-models", None) => {}

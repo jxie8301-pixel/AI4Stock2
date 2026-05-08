@@ -35,6 +35,13 @@ struct PlotArea {
     height: f64,
 }
 
+#[derive(Clone, Copy)]
+struct SeriesProjection {
+    len: usize,
+    y_min: f64,
+    y_max: f64,
+}
+
 impl PlotArea {
     fn right(self) -> f64 {
         self.left + self.width
@@ -217,10 +224,12 @@ fn plot_cumulative_return(
         draw_polyline(
             &mut svg,
             area,
-            dates.len(),
+            SeriesProjection {
+                len: dates.len(),
+                y_min,
+                y_max,
+            },
             values,
-            y_min,
-            y_max,
             color,
             2.3,
         );
@@ -262,10 +271,12 @@ fn plot_drawdown(path: &Path, dates: &[NaiveDate], returns: &[f64]) -> Result<()
     draw_area_series(
         &mut svg,
         area,
-        dates.len(),
+        SeriesProjection {
+            len: dates.len(),
+            y_min,
+            y_max: 0.0,
+        },
         &drawdown,
-        y_min,
-        0.0,
         Color {
             r: 215,
             g: 48,
@@ -435,24 +446,21 @@ fn draw_grid(
 fn draw_polyline(
     svg: &mut String,
     area: PlotArea,
-    len: usize,
+    projection: SeriesProjection,
     values: &[f64],
-    y_min: f64,
-    y_max: f64,
     color: Color,
     stroke_width: f64,
 ) {
     let points = values
         .iter()
         .enumerate()
-        .filter_map(|(idx, value)| {
-            value.is_finite().then(|| {
-                format!(
-                    "{:.2},{:.2}",
-                    area.x(idx, len),
-                    area.y(*value, y_min, y_max)
-                )
-            })
+        .filter(|(_, value)| value.is_finite())
+        .map(|(idx, value)| {
+            format!(
+                "{:.2},{:.2}",
+                area.x(idx, projection.len),
+                area.y(*value, projection.y_min, projection.y_max)
+            )
         })
         .collect::<Vec<_>>()
         .join(" ");
@@ -470,20 +478,22 @@ fn draw_polyline(
 fn draw_area_series(
     svg: &mut String,
     area: PlotArea,
-    len: usize,
+    projection: SeriesProjection,
     values: &[f64],
-    y_min: f64,
-    y_max: f64,
     color: Color,
     opacity: f64,
 ) {
     let points = values
         .iter()
         .enumerate()
-        .filter_map(|(idx, value)| {
-            value
-                .is_finite()
-                .then(|| (area.x(idx, len), area.y(*value, y_min, y_max), idx, *value))
+        .filter(|(_, value)| value.is_finite())
+        .map(|(idx, value)| {
+            (
+                area.x(idx, projection.len),
+                area.y(*value, projection.y_min, projection.y_max),
+                idx,
+                *value,
+            )
         })
         .collect::<Vec<_>>();
     let Some((first_x, _, _, _)) = points.first().copied() else {
@@ -492,7 +502,7 @@ fn draw_area_series(
     let Some((last_x, _, _, _)) = points.last().copied() else {
         return;
     };
-    let zero_y = area.y(0.0, y_min, y_max);
+    let zero_y = area.y(0.0, projection.y_min, projection.y_max);
     let mut path = format!("M {:.2} {:.2}", first_x, zero_y);
     for (x, y, _, _) in &points {
         path.push_str(&format!(" L {:.2} {:.2}", x, y));
@@ -504,7 +514,7 @@ fn draw_area_series(
         color_hex(color),
         opacity
     ));
-    draw_polyline(svg, area, len, values, y_min, y_max, color, 1.8);
+    draw_polyline(svg, area, projection, values, color, 1.8);
 }
 
 fn draw_legend_box<'a>(svg: &mut String, area: PlotArea, names: impl Iterator<Item = &'a str>) {

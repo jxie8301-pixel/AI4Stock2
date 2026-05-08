@@ -155,7 +155,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/markdown-it-py-4.0.0-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/markupsafe-3.0.3-py312h8a5da7c_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/matplotlib-base-3.10.9-py312he3d6523_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/maturin-1.13.1-py310h2b5ca13_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/mdurl-0.1.2-pyhd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mkl-2025.3.1-h0e700b2_11.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/mpc-1.4.0-he0a73b1_0.conda
@@ -2380,24 +2379,6 @@ packages:
   - pkg:pypi/matplotlib?source=compressed-mapping
   size: 8336056
   timestamp: 1777000573501
-- conda: https://conda.anaconda.org/conda-forge/linux-64/maturin-1.13.1-py310h2b5ca13_0.conda
-  noarch: python
-  sha256: ff51099c31fcb1c4a42b2544243f9289e759b4e3f578a1f64652f26626c2f938
-  md5: e1d2e0dd76c196b48e34b61ef5b65e9b
-  depends:
-  - python
-  - tomli >=1.1.0
-  - __glibc >=2.17,<3.0.a0
-  - libgcc >=14
-  - openssl >=3.5.6,<4.0a0
-  constrains:
-  - __glibc >=2.17
-  license: MIT
-  license_family: MIT
-  purls:
-  - pkg:pypi/maturin?source=hash-mapping
-  size: 8938226
-  timestamp: 1775757052305
 - conda: https://conda.anaconda.org/conda-forge/noarch/mdurl-0.1.2-pyhd8ed1ab_1.conda
   sha256: 78c1bbe1723449c52b7a9df1af2ee5f005209f67e40b6e1d3c7619127c43b1c7
   md5: 592132998493b3ff25fd7479396e8351

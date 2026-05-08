@@ -27,6 +27,7 @@ name = "ai4stock2_native"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-schema",
  "chrono",
  "csv",
  "parquet",

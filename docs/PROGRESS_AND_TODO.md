@@ -356,6 +356,110 @@ Completed optimization slices:
   - speedup: `3.29x`
   - `best_valid_daily_rank_ic` stayed identical at `0.4838547584724201`
   - temporary runner and raw benchmark artifacts were removed before commit; retained numbers above are the durable summary
+- [x] Add factor-generation phase timing before attempting a Rust rewrite:
+  - `src.gen_feature` now writes `factor_generation_timing.json` by default, with read / compute / label / write / metadata phases separated
+  - worker phase seconds are summed across workers, so the timing file records both wall time and aggregate worker phase time
+- [x] Add a factor-engine parity harness before migrating Rust feature generation:
+  - `src.feature_engine_parity` treats the pandas engine as the reference and can compare a candidate parquet/CSV snapshot on date / symbol / selected columns
+- [x] Keep Python and Rust feature generation as separate executable paths:
+  - Python `src.gen_feature` remains the pandas/reference implementation and does not import or call Rust kernels
+  - Rust feature generation is exposed through the standalone `ai4stock-gen-feature` binary
+  - removed the PyO3/maturin feature-kernel bridge, wrapper modules, and native-wrapper tests so missing Rust code cannot silently fall back inside the Python path
+  - retained the earlier kernel benchmark notes as migration evidence: rank `0.002269s -> 0.000434s`, idxmax `0.009380s -> 0.000726s`, Aroon extreme age `0.009189s -> 0.000758s`, CCI MAD `0.055208s -> 0.000206s`
+- [x] Harden Tushare bucket-source full rebuild memory behavior:
+  - previous path built and retained a full 517-factor bucket frame per worker before writing, so `--workers 16` could OOM on the full Tushare factor space
+  - bucket-source workers now compute one symbol, write it immediately as a Parquet row group, delete intermediates, and only keep manifest rows in memory
+  - factor timing summaries now include process RSS telemetry where the platform exposes it
+- [x] Start the Python-to-Rust source migration for feature generation:
+  - Rust source now lives under `src_rust/` instead of `rust/`
+  - `Cargo.toml` points the native library and binaries at `src_rust`
+  - added `ai4stock-gen-feature inspect-source` / `inspect-store` as the first Rust `gen_feature` migration slice
+  - the first native slice reads Parquet bucket metadata and reports row / column / row-group / size summaries without touching Python or result files
+  - validated on current Tushare source store: `128` files, `17,320,492` rows, `135` source columns
+  - validated on current Tushare factor store: `128` files, `17,320,492` rows, `5,512` row groups, `524` output columns
+- [x] Add Rust source-bucket schema validation and payload scan:
+  - `ai4stock-gen-feature validate-required-columns` validates required Parquet bucket columns from the standalone Rust CLI
+  - `ai4stock-gen-feature scan-source-bucket` reads projected source bucket payloads through Arrow record batches and reports rows / batches / symbol count
+  - Tushare source-schema validation benchmark over `128` buckets and `124` required columns:
+    - Python PyArrow median: `0.134963s`
+    - release Rust CLI median: `0.026401s`
+  - projected payload scan benchmark on `data/tushare/source/buckets/part-0000.parquet`, `146950` rows, `8` columns:
+    - Python `read_parquet` median: `0.010411s`
+    - release Rust subprocess scan median: `0.020750s`
+    - note: subprocess startup dominates this micro-benchmark; the command exists to validate Arrow payload reading before moving writes
+- [x] Migrate the current full-factor generator into the Rust standalone binary:
+  - Rust implements direct source-bucket read, strict Tushare event-policy metadata validation, factor computation, label generation, Parquet bucket writes, manifest writes, and `meta.json`
+  - generated feature names apply the same exact-duplicate canonicalization as Python, so the default Tushare full factor space is `517` features instead of the raw `537`
+  - release smoke on `data/tushare/source/buckets/part-0000.parquet`: `146950` rows, `517` features, `8.44s`, peak RSS about `1.49GB`
+  - benchmark checkpoints from the migration remain: `legacy158` `0.185866s -> 0.079414s`, `lgbm_purified` `0.013656s -> 0.010247s`, `temporal` `0.040649s -> 0.032321s`, `technical` `0.127573s -> 0.011126s`, `TS_` `0.112160s -> 0.035429s`
+
+Feature build v2 direction:
+
+- Keep the canonical artifact as Parquet bucket shards, but stop treating one monolithic 517-column rebuild as the only production path.
+- Split feature generation into explicit stages:
+  - point-in-time source validation and policy metadata
+  - per-symbol streaming factor-family computation
+  - family-level Parquet shards with independent manifests
+  - profile materialization that reads only selected families / columns
+  - parity and coverage validation before a profile is allowed into training
+- Rust should first become a streaming factor-family engine, not a new storage format:
+  - read source bucket Parquet with Arrow / `parquet`
+  - compute rolling kernels with bounded per-symbol state
+  - write Parquet row groups directly
+  - compare output through `src.feature_engine_parity` before promotion
+
+Expression-driven factor mining direction:
+
+- Target architecture: `gen_feature` should materialize factor profiles from declarative expressions instead of relying on an ever-growing hard-coded factor list.
+- Feature profiles should eventually contain:
+  - selected source columns / required sidecar context
+  - expression definitions and stable expression hashes
+  - operator semantics / lag policy / point-in-time assumptions
+  - factor-family tags and expected output names
+  - coverage and parity requirements before training can consume the profile
+- Hard-coded factors remain only as bootstrap seeds and reference implementations during migration:
+  - existing `legacy158`, `lgbm_purified`, `temporal`, `technical`, and `tushare` families should first be expressible through the new DSL where practical
+  - unsupported special cases can stay as native kernels, but their semantics must still be represented in profile metadata
+- Build the factor-mining mechanism after the expression runtime exists:
+  - do not expand the manual 517-factor library further as the main research path
+  - mine formulas over a constrained, leakage-safe operator set
+  - promote candidates by train/valid stability, coverage, turnover/capacity proxies, and low correlation to existing factors
+  - keep test/all diagnostics as read-only evidence, never as profile-writing evidence
+
+Rust migration sequence before broad factor mining:
+
+- Phase 1: stabilize Rust as a standalone performance substrate while preserving Python outputs:
+  - keep Python and Rust generation as separate executable paths
+  - keep Parquet as the canonical exchange/storage format
+  - require parity against the Python reference before replacing any production factor-store artifact
+- Phase 2: add a Rust expression evaluator behind the Rust CLI:
+  - parse a small DSL from profile/config
+  - execute per-symbol streaming expressions with bounded state
+  - write row groups directly to Parquet
+  - keep Python as a separate reference and research path during the transition
+- Phase 3: move profile materialization and common operators to Rust:
+  - column projection
+  - rolling windows
+  - cross-sectional/date-local transforms where safe
+  - coverage/finite diagnostics
+- Phase 4: only then add the factor-mining "shovel":
+  - random/evolutionary expression generation
+  - expression canonicalization and duplicate removal
+  - multi-objective candidate ranking
+  - candidate profile export for downstream diagnostics/backtests
+
+Format decision for native factor work:
+
+- Keep Parquet as the durable source/factor-store format for now:
+  - the project already uses Parquet bucket shards and PyArrow metadata everywhere
+  - Rust support is mature through the Apache `parquet` / Arrow crates already present in `Cargo.toml`
+  - Parquet keeps column projection, compression, schema metadata, and Python/Rust interoperability
+- Do not switch durable stores to CSV:
+  - CSV is useful for diagnostics/manifests, but it is slower, larger, and loses dtype/schema fidelity
+- Reconsider Arrow IPC / Feather only for short-lived local intermediate snapshots:
+  - it can be faster for same-machine handoff, but should not replace the reproducible factor-store contract unless timing shows Parquet I/O dominates
+- Keep dense binary arrays / NPZ out of the main factor store:
+  - they may help a training-matrix cache later, but they lose date/symbol/schema semantics and are not suitable as the canonical feature artifact
 
 Priority fixes:
 
@@ -678,6 +782,7 @@ Priority fixes:
 - [ ] Add a feature coverage report during cache generation
 - [ ] Add per-feature NaN / inf diagnostics to `meta.json`
 - [ ] Add a cache validation command for shape, names, coverage, and label sanity
+- [ ] Only move feature kernels to Rust after timing evidence shows `factor_compute` dominates wall time and the candidate output passes `src.feature_engine_parity`
 - [ ] Review whether valuation fields are complete enough across the full sample
 - [ ] Reduce full-factor cache footprint without changing the current training read path
 - [ ] Fix collector dtype downcast so Eastmoney share-count fields do not overflow when written to parquet

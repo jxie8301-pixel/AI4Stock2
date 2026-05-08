@@ -10,17 +10,21 @@ This module remains the public entrypoint for:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import gc
 import json
+import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 import zlib
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 from tqdm import tqdm
@@ -108,6 +112,129 @@ TUSHARE_INDUSTRY_MAPPING_POLICY = "static_symbol_cache_current_classification"
 BUCKET_DIRNAME = "buckets"
 BUCKET_MANIFEST_FILENAME = "manifest.parquet"
 DEFAULT_BUCKET_COUNT = 512
+DEFAULT_FACTOR_GENERATION_TIMING_FILENAME = "factor_generation_timing.json"
+
+
+def _get_process_max_rss_mb() -> float | None:
+    try:
+        import resource
+    except Exception:
+        return None
+    try:
+        rss = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except Exception:
+        return None
+    if rss <= 0:
+        return None
+    if sys.platform == "darwin":
+        return rss / (1024.0 * 1024.0)
+    return rss / 1024.0
+
+
+@dataclass
+class FactorGenerationTimer:
+    """Small JSON-serializable phase timer for factor-store generation."""
+
+    phases: dict[str, dict[str, float | int]] = field(default_factory=dict)
+    started_perf_counter: float = field(default_factory=time.perf_counter)
+    max_worker_rss_mb: float = 0.0
+
+    @contextmanager
+    def phase(
+        self,
+        name: str,
+        *,
+        rows: int = 0,
+        symbols: int = 0,
+        buckets: int = 0,
+        files: int = 0,
+    ) -> Iterator[None]:
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.add(
+                name,
+                time.perf_counter() - started,
+                rows=rows,
+                symbols=symbols,
+                buckets=buckets,
+                files=files,
+            )
+
+    def add(
+        self,
+        name: str,
+        seconds: float,
+        *,
+        count: int = 1,
+        rows: int = 0,
+        symbols: int = 0,
+        buckets: int = 0,
+        files: int = 0,
+    ) -> None:
+        phase = self.phases.setdefault(
+            str(name),
+            {
+                "seconds": 0.0,
+                "count": 0,
+                "rows": 0,
+                "symbols": 0,
+                "buckets": 0,
+                "files": 0,
+            },
+        )
+        phase["seconds"] = float(phase["seconds"]) + float(seconds)
+        phase["count"] = int(phase["count"]) + int(count)
+        phase["rows"] = int(phase["rows"]) + int(rows)
+        phase["symbols"] = int(phase["symbols"]) + int(symbols)
+        phase["buckets"] = int(phase["buckets"]) + int(buckets)
+        phase["files"] = int(phase["files"]) + int(files)
+
+    def merge(self, summary: dict[str, Any] | None) -> None:
+        if not summary:
+            return
+        worker_rss = summary.get("max_process_rss_mb")
+        if worker_rss is not None:
+            self.max_worker_rss_mb = max(self.max_worker_rss_mb, float(worker_rss))
+        for name, phase in dict(summary.get("phases") or {}).items():
+            if not isinstance(phase, dict):
+                continue
+            self.add(
+                str(name),
+                float(phase.get("seconds") or 0.0),
+                count=int(phase.get("count") or 0),
+                rows=int(phase.get("rows") or 0),
+                symbols=int(phase.get("symbols") or 0),
+                buckets=int(phase.get("buckets") or 0),
+                files=int(phase.get("files") or 0),
+            )
+
+    def as_dict(self) -> dict[str, Any]:
+        phases = {
+            name: {
+                **phase,
+                "seconds": round(float(phase["seconds"]), 6),
+            }
+            for name, phase in sorted(self.phases.items())
+        }
+        result = {
+            "wall_seconds": round(time.perf_counter() - self.started_perf_counter, 6),
+            "semantics": "Worker phase seconds are summed across workers and can exceed wall_seconds.",
+            "phases": phases,
+        }
+        current_rss = _get_process_max_rss_mb()
+        if current_rss is not None:
+            result["max_process_rss_mb"] = round(float(current_rss), 3)
+        if self.max_worker_rss_mb > 0:
+            result["max_worker_rss_mb"] = round(float(self.max_worker_rss_mb), 3)
+        return result
+
+
+@dataclass(frozen=True)
+class FactorBucketWriteResult:
+    manifest_rows: list[dict[str, Any]]
+    timing: dict[str, Any]
 
 TUSHARE_FINA_INDICATOR_FEATURE_PAIRS = [
     ("eps", "fi_eps"),
@@ -285,12 +412,14 @@ def _validate_tushare_bucket_source_schema(
 ) -> dict[str, Any]:
     required_columns = _get_tushare_bucket_source_required_columns()
     required_set = set(required_columns)
+    validation_engine = "pyarrow"
     missing_by_path: list[tuple[str, list[str]]] = []
     for path in source_bucket_paths:
         schema_columns = set(pq.read_schema(path).names)
         missing = sorted(required_set - schema_columns)
         if missing:
             missing_by_path.append((str(path), missing))
+    validated_bucket_count = len(source_bucket_paths)
 
     if missing_by_path:
         preview = "; ".join(
@@ -315,8 +444,9 @@ def _validate_tushare_bucket_source_schema(
 
     return {
         "validated": True,
+        "validation_engine": validation_engine,
         "required_columns": required_columns,
-        "validated_bucket_count": len(source_bucket_paths),
+        "validated_bucket_count": validated_bucket_count,
         "tushare_event_availability_policy": event_policy,
     }
 
@@ -831,25 +961,32 @@ def _build_shard_frame_from_frame(
     symbol: str,
     label_horizons: list[int],
     data_source: str | None = None,
+    timing: FactorGenerationTimer | None = None,
 ) -> pd.DataFrame:
-    base = _prepare_ohlcv(df)
-    feat = compute_all_factor_features(df, data_source=data_source, _base=base)
-    labels = {
-        get_label_column_name(horizon): _build_open_to_open_label_from_base(base, horizon_days=horizon)
-        for horizon in label_horizons
-    }
-    labels[get_legacy_label_column_name()] = labels[get_label_column_name(1)]
+    row_count = int(len(df))
+    timer = timing or FactorGenerationTimer()
+    with timer.phase("prepare_ohlcv", rows=row_count, symbols=1):
+        base = _prepare_ohlcv(df)
+    with timer.phase("factor_compute", rows=row_count, symbols=1):
+        feat = compute_all_factor_features(df, data_source=data_source, _base=base)
+    with timer.phase("label_build", rows=row_count, symbols=1):
+        labels = {
+            get_label_column_name(horizon): _build_open_to_open_label_from_base(base, horizon_days=horizon)
+            for horizon in label_horizons
+        }
+        labels[get_legacy_label_column_name()] = labels[get_label_column_name(1)]
 
-    frame = feat.copy().astype(np.float32)
-    frame.insert(0, "date", pd.to_datetime(frame.index))
-    frame.insert(1, "symbol", str(symbol))
-    insert_at = 2
-    for label_column in [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]:
-        if label_column in frame.columns:
-            continue
-        frame.insert(insert_at, label_column, labels[label_column].reindex(frame.index).astype(np.float32))
-        insert_at += 1
-    return frame.reset_index(drop=True)
+    with timer.phase("assemble_symbol_frame", rows=row_count, symbols=1):
+        frame = feat.copy().astype(np.float32)
+        frame.insert(0, "date", pd.to_datetime(frame.index))
+        frame.insert(1, "symbol", str(symbol))
+        insert_at = 2
+        for label_column in [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]:
+            if label_column in frame.columns:
+                continue
+            frame.insert(insert_at, label_column, labels[label_column].reindex(frame.index).astype(np.float32))
+            insert_at += 1
+        return frame.reset_index(drop=True)
 
 
 def _build_shard_frame(
@@ -857,17 +994,23 @@ def _build_shard_frame(
     *,
     label_horizons: list[int],
     data_source: str | None = None,
+    timing: FactorGenerationTimer | None = None,
 ) -> tuple[str, pd.DataFrame]:
-    df = pd.read_parquet(file_path)
+    timer = timing or FactorGenerationTimer()
+    with timer.phase("read_symbol_parquet", files=1):
+        df = pd.read_parquet(file_path)
     symbol = str(df["symbol"].iloc[0]) if "symbol" in df.columns and len(df) > 0 else Path(file_path).stem
     if data_source == "tushare" and detect_source_storage_layout(Path(file_path).resolve().parent) != "bucket_shards":
-        _ensure_tushare_industry_context_cache(Path(file_path).resolve().parent)
-        df = _augment_tushare_symbol_frame(df, symbol=symbol)
+        with timer.phase("tushare_context_cache", files=1):
+            _ensure_tushare_industry_context_cache(Path(file_path).resolve().parent)
+        with timer.phase("tushare_sidecar_augment", rows=len(df), symbols=1):
+            df = _augment_tushare_symbol_frame(df, symbol=symbol)
     return symbol, _build_shard_frame_from_frame(
         df,
         symbol=symbol,
         label_horizons=label_horizons,
         data_source=data_source,
+        timing=timer,
     )
 
 
@@ -878,7 +1021,9 @@ def _build_bucket_payload(
     feature_names: list[str],
     bucket_id: int,
     data_source: str | None = None,
+    timing: FactorGenerationTimer | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    timer = timing or FactorGenerationTimer()
     frames: list[pd.DataFrame] = []
     manifest_rows: list[dict[str, Any]] = []
     label_columns = [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]
@@ -887,6 +1032,7 @@ def _build_bucket_payload(
             file_path,
             label_horizons=label_horizons,
             data_source=data_source,
+            timing=timer,
         )
         frames.append(shard_frame)
         source_sig = _source_file_signature(file_path)
@@ -904,10 +1050,11 @@ def _build_bucket_payload(
                 "label_columns": ",".join(label_columns),
             }
         )
-    if frames:
-        bucket_frame = pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
-    else:
-        bucket_frame = pd.DataFrame(columns=["date", "symbol", *label_columns, *feature_names])
+    with timer.phase("concat_sort_bucket", rows=sum(len(frame) for frame in frames), buckets=1):
+        if frames:
+            bucket_frame = pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
+        else:
+            bucket_frame = pd.DataFrame(columns=["date", "symbol", *label_columns, *feature_names])
     manifest_frame = pd.DataFrame(manifest_rows)
     return bucket_frame, manifest_frame
 
@@ -920,18 +1067,25 @@ def _write_factor_bucket_worker(
     label_horizons: list[int],
     feature_names: list[str],
     data_source: str | None = None,
-) -> list[dict[str, Any]]:
-    bucket_frame, manifest_frame = _build_bucket_payload(
-        file_paths,
-        label_horizons=label_horizons,
-        feature_names=feature_names,
-        bucket_id=bucket_id,
-        data_source=data_source,
-    )
+) -> FactorBucketWriteResult:
+    timer = FactorGenerationTimer()
+    with timer.phase("bucket_payload_total", buckets=1, files=len(file_paths)):
+        bucket_frame, manifest_frame = _build_bucket_payload(
+            file_paths,
+            label_horizons=label_horizons,
+            feature_names=feature_names,
+            bucket_id=bucket_id,
+            data_source=data_source,
+            timing=timer,
+        )
     out_path = Path(bucket_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    bucket_frame.to_parquet(out_path, index=False, engine="pyarrow", compression="zstd")
-    return manifest_frame.to_dict(orient="records")
+    with timer.phase("write_bucket_parquet", rows=len(bucket_frame), buckets=1, files=1):
+        bucket_frame.to_parquet(out_path, index=False, engine="pyarrow", compression="zstd")
+    return FactorBucketWriteResult(
+        manifest_rows=manifest_frame.to_dict(orient="records"),
+        timing=timer.as_dict(),
+    )
 
 
 def _build_factor_bucket_from_source_bucket(
@@ -940,20 +1094,24 @@ def _build_factor_bucket_from_source_bucket(
     label_horizons: list[int],
     feature_names: list[str],
     data_source: str | None = None,
+    timing: FactorGenerationTimer | None = None,
 ) -> tuple[int, pd.DataFrame, pd.DataFrame]:
+    timer = timing or FactorGenerationTimer()
     source_path = Path(source_bucket_path)
     bucket_id = extract_bucket_id_from_path(source_path)
-    source_frame = pd.read_parquet(source_path)
+    with timer.phase("read_source_bucket", buckets=1, files=1):
+        source_frame = pd.read_parquet(source_path)
     if source_frame.empty:
         empty_columns = ["date", "symbol", get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons), *feature_names]
         return bucket_id, pd.DataFrame(columns=empty_columns), pd.DataFrame(
             columns=["symbol", "bucket_id", "source_path", "source_size", "source_mtime_ns", "row_count", "min_date", "max_date", "feature_count", "label_columns"]
         )
 
-    source_frame = source_frame.copy()
-    source_frame["date"] = pd.to_datetime(source_frame["date"], errors="coerce")
-    source_frame["symbol"] = source_frame["symbol"].astype(str)
-    source_frame = source_frame.dropna(subset=["date", "symbol"]).sort_values(["symbol", "date"]).reset_index(drop=True)
+    with timer.phase("normalize_source_bucket", rows=len(source_frame), buckets=1):
+        source_frame = source_frame.copy()
+        source_frame["date"] = pd.to_datetime(source_frame["date"], errors="coerce")
+        source_frame["symbol"] = source_frame["symbol"].astype(str)
+        source_frame = source_frame.dropna(subset=["date", "symbol"]).sort_values(["symbol", "date"]).reset_index(drop=True)
 
     frames: list[pd.DataFrame] = []
     manifest_rows: list[dict[str, Any]] = []
@@ -965,6 +1123,7 @@ def _build_factor_bucket_from_source_bucket(
             symbol=str(symbol),
             label_horizons=label_horizons,
             data_source=data_source,
+            timing=timer,
         )
         frames.append(built)
         manifest_rows.append(
@@ -982,7 +1141,8 @@ def _build_factor_bucket_from_source_bucket(
             }
         )
 
-    bucket_frame = pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
+    with timer.phase("concat_sort_bucket", rows=sum(len(frame) for frame in frames), buckets=1):
+        bucket_frame = pd.concat(frames, ignore_index=True).sort_values(["symbol", "date"]).reset_index(drop=True)
     manifest_frame = pd.DataFrame(manifest_rows)
     return bucket_id, bucket_frame, manifest_frame
 
@@ -994,17 +1154,81 @@ def _write_factor_bucket_from_source_bucket_worker(
     label_horizons: list[int],
     feature_names: list[str],
     data_source: str | None = None,
-) -> list[dict[str, Any]]:
-    bucket_id, bucket_frame, manifest_frame = _build_factor_bucket_from_source_bucket(
-        source_bucket_path,
-        label_horizons=label_horizons,
-        feature_names=feature_names,
-        data_source=data_source,
-    )
+) -> FactorBucketWriteResult:
+    timer = FactorGenerationTimer()
+    source_path = Path(source_bucket_path)
+    bucket_id = extract_bucket_id_from_path(source_path)
     out_path = _bucket_path(Path(output_bucket_root), bucket_id)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    bucket_frame.to_parquet(out_path, index=False, engine="pyarrow", compression="zstd")
-    return manifest_frame.to_dict(orient="records")
+    manifest_rows: list[dict[str, Any]] = []
+    label_columns = [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]
+    writer: pq.ParquetWriter | None = None
+    total_rows = 0
+    try:
+        with timer.phase("bucket_payload_total", buckets=1, files=1):
+            with timer.phase("read_source_bucket", buckets=1, files=1):
+                source_frame = pd.read_parquet(source_path)
+            if source_frame.empty:
+                empty_columns = ["date", "symbol", *label_columns, *feature_names]
+                empty_frame = pd.DataFrame(columns=empty_columns)
+                with timer.phase("write_bucket_parquet", rows=0, buckets=1, files=1):
+                    empty_frame.to_parquet(out_path, index=False, engine="pyarrow", compression="zstd")
+                return FactorBucketWriteResult(manifest_rows=[], timing=timer.as_dict())
+
+            with timer.phase("normalize_source_bucket", rows=len(source_frame), buckets=1):
+                source_frame = source_frame.copy()
+                source_frame["date"] = pd.to_datetime(source_frame["date"], errors="coerce")
+                source_frame["symbol"] = source_frame["symbol"].astype(str)
+                source_frame = source_frame.dropna(subset=["date", "symbol"]).sort_values(["symbol", "date"]).reset_index(drop=True)
+
+            stat = source_path.stat()
+            for symbol, symbol_frame in source_frame.groupby("symbol", sort=True):
+                built = _build_shard_frame_from_frame(
+                    symbol_frame.reset_index(drop=True),
+                    symbol=str(symbol),
+                    label_horizons=label_horizons,
+                    data_source=data_source,
+                    timing=timer,
+                )
+                table = pa.Table.from_pandas(built, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(out_path, table.schema, compression="zstd")
+                with timer.phase("write_symbol_row_group", rows=len(built), symbols=1, buckets=1):
+                    writer.write_table(table)
+                total_rows += int(len(built))
+                manifest_rows.append(
+                    {
+                        "symbol": str(symbol),
+                        "bucket_id": int(bucket_id),
+                        "source_path": str(source_path.resolve()),
+                        "source_size": int(stat.st_size),
+                        "source_mtime_ns": int(stat.st_mtime_ns),
+                        "row_count": int(len(built)),
+                        "min_date": str(pd.to_datetime(built["date"]).min().date()) if not built.empty else "",
+                        "max_date": str(pd.to_datetime(built["date"]).max().date()) if not built.empty else "",
+                        "feature_count": int(len(feature_names)),
+                        "label_columns": ",".join(label_columns),
+                    }
+                )
+                del table
+                del built
+                gc.collect()
+            if writer is None:
+                empty_columns = ["date", "symbol", *label_columns, *feature_names]
+                empty_frame = pd.DataFrame(columns=empty_columns)
+                with timer.phase("write_bucket_parquet", rows=0, buckets=1, files=1):
+                    empty_frame.to_parquet(out_path, index=False, engine="pyarrow", compression="zstd")
+        with timer.phase("write_bucket_parquet_close", rows=total_rows, buckets=1, files=1):
+            if writer is not None:
+                writer.close()
+                writer = None
+    finally:
+        if writer is not None:
+            writer.close()
+    return FactorBucketWriteResult(
+        manifest_rows=manifest_rows,
+        timing=timer.as_dict(),
+    )
 
 
 def _compute_available_dates_from_shards(shard_root: Path) -> list[str]:
@@ -1020,6 +1244,24 @@ def _compute_available_dates_from_shards(shard_root: Path) -> list[str]:
     return sorted(unique_dates)
 
 
+def _write_factor_generation_timing(
+    *,
+    out_root: Path,
+    timer: FactorGenerationTimer,
+    timing_output_path: str | Path | None = None,
+) -> Path:
+    path = Path(timing_output_path) if timing_output_path else out_root / DEFAULT_FACTOR_GENERATION_TIMING_FILENAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    summary = timer.as_dict()
+    summary["artifact"] = {
+        "path": str(path),
+        "default_filename": DEFAULT_FACTOR_GENERATION_TIMING_FILENAME,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2)
+    return path
+
+
 def _generate_factor_store_from_bucket_source(
     *,
     parquet_dir: str,
@@ -1028,7 +1270,10 @@ def _generate_factor_store_from_bucket_source(
     label_horizons: list[int],
     data_source: str | None,
     auto_rebuild_stale_tushare_source: bool,
+    timing_output_path: str | Path | None = None,
+    timer: FactorGenerationTimer | None = None,
 ) -> dict[str, Any]:
+    timer = timer or FactorGenerationTimer()
     pdir = Path(parquet_dir)
     out_root = Path(output_dir)
     bucket_root = out_root / BUCKET_DIRNAME
@@ -1036,31 +1281,39 @@ def _generate_factor_store_from_bucket_source(
     out_root.mkdir(parents=True, exist_ok=True)
     bucket_root.mkdir(parents=True, exist_ok=True)
 
-    source_bucket_paths = list_bucket_paths(pdir)
+    with timer.phase("list_source_buckets"):
+        source_bucket_paths = list_bucket_paths(pdir)
     if not source_bucket_paths:
         raise FileNotFoundError(f"No source bucket shards found in {pdir}")
 
-    feature_names = get_full_factor_space_feature_names(data_source=data_source)
-    source_meta = load_source_store_metadata(pdir) or {}
+    with timer.phase("resolve_feature_names"):
+        feature_names = get_full_factor_space_feature_names(data_source=data_source)
+    with timer.phase("load_source_metadata", files=1):
+        source_meta = load_source_store_metadata(pdir) or {}
     source_schema_validation: dict[str, Any] = {"validated": False, "reason": "not_required"}
     if data_source == "tushare":
         try:
-            source_schema_validation = _validate_tushare_bucket_source_schema(
-                source_bucket_paths,
-                source_meta=source_meta,
-            )
+            with timer.phase("source_schema_validation", buckets=len(source_bucket_paths)):
+                source_schema_validation = _validate_tushare_bucket_source_schema(
+                    source_bucket_paths,
+                    source_meta=source_meta,
+                )
         except ValueError:
             if not auto_rebuild_stale_tushare_source:
                 raise
-            rebuild_meta = _rebuild_default_tushare_packed_source_if_stale(pdir, workers=workers)
+            with timer.phase("stale_tushare_source_rebuild"):
+                rebuild_meta = _rebuild_default_tushare_packed_source_if_stale(pdir, workers=workers)
             if rebuild_meta is None:
                 raise
-            source_bucket_paths = list_bucket_paths(pdir)
-            source_meta = load_source_store_metadata(pdir) or {}
-            source_schema_validation = _validate_tushare_bucket_source_schema(
-                source_bucket_paths,
-                source_meta=source_meta,
-            )
+            with timer.phase("list_source_buckets"):
+                source_bucket_paths = list_bucket_paths(pdir)
+            with timer.phase("load_source_metadata", files=1):
+                source_meta = load_source_store_metadata(pdir) or {}
+            with timer.phase("source_schema_validation", buckets=len(source_bucket_paths)):
+                source_schema_validation = _validate_tushare_bucket_source_schema(
+                    source_bucket_paths,
+                    source_meta=source_meta,
+                )
             source_schema_validation["auto_rebuilt_stale_source"] = True
             source_schema_validation["source_rebuild_incremental"] = rebuild_meta.get("incremental")
     workers = max(1, int(workers))
@@ -1073,15 +1326,15 @@ def _generate_factor_store_from_bucket_source(
     if workers == 1:
         pbar = tqdm(source_bucket_paths, desc="buckets", total=len(source_bucket_paths), unit="bucket")
         for source_bucket_path in pbar:
-            written_manifest_rows.extend(
-                _write_factor_bucket_from_source_bucket_worker(
-                    str(source_bucket_path),
-                    output_bucket_root=str(bucket_root),
-                    label_horizons=label_horizons,
-                    feature_names=feature_names,
-                    data_source=data_source,
-                )
+            result = _write_factor_bucket_from_source_bucket_worker(
+                str(source_bucket_path),
+                output_bucket_root=str(bucket_root),
+                label_horizons=label_horizons,
+                feature_names=feature_names,
+                data_source=data_source,
             )
+            written_manifest_rows.extend(result.manifest_rows)
+            timer.merge(result.timing)
         pbar.close()
     else:
         with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -1098,22 +1351,28 @@ def _generate_factor_store_from_bucket_source(
             ]
             pbar = tqdm(total=len(futures), desc="buckets", unit="bucket")
             for future in as_completed(futures):
-                written_manifest_rows.extend(future.result())
+                result = future.result()
+                written_manifest_rows.extend(result.manifest_rows)
+                timer.merge(result.timing)
                 pbar.update(1)
             pbar.close()
 
-    written_manifest = pd.DataFrame(written_manifest_rows)
-    if written_manifest.empty:
-        raise RuntimeError("Factor-store rebuild from bucket source produced no rows.")
-    written_manifest = written_manifest.sort_values(["bucket_id", "symbol"]).reset_index(drop=True)
-    written_manifest.to_parquet(manifest_path, index=False, engine="pyarrow", compression="zstd")
+    with timer.phase("manifest_build_write", files=1):
+        written_manifest = pd.DataFrame(written_manifest_rows)
+        if written_manifest.empty:
+            raise RuntimeError("Factor-store rebuild from bucket source produced no rows.")
+        written_manifest = written_manifest.sort_values(["bucket_id", "symbol"]).reset_index(drop=True)
+        written_manifest.to_parquet(manifest_path, index=False, engine="pyarrow", compression="zstd")
 
     active_bucket_ids = sorted(int(value) for value in written_manifest["bucket_id"].drop_duplicates().tolist())
-    for path in bucket_root.glob("part-*.parquet"):
-        if extract_bucket_id_from_path(path) not in active_bucket_ids:
-            path.unlink(missing_ok=True)
+    with timer.phase("stale_bucket_cleanup"):
+        for path in bucket_root.glob("part-*.parquet"):
+            if extract_bucket_id_from_path(path) not in active_bucket_ids:
+                path.unlink(missing_ok=True)
 
     total_rows = int(written_manifest["row_count"].sum())
+    with timer.phase("available_dates_scan"):
+        available_dates = _compute_available_dates_from_shards(bucket_root)
     metadata = {
         "storage_format": "parquet",
         "storage_layout": "bucket_shards",
@@ -1156,7 +1415,7 @@ def _generate_factor_store_from_bucket_source(
         "bucket_count": int(source_meta.get("bucket_count") or len(active_bucket_ids)),
         "bucket_ids": active_bucket_ids,
         "manifest_path": str(manifest_path),
-        "available_dates": _compute_available_dates_from_shards(bucket_root),
+        "available_dates": available_dates,
         "incremental": {
             "enabled": False,
             "reason": "source_bucket_layout_full_rebuild",
@@ -1176,6 +1435,23 @@ def _generate_factor_store_from_bucket_source(
             for row in written_manifest.to_dict(orient="records")
         ],
     }
+    timing_path = out_root / DEFAULT_FACTOR_GENERATION_TIMING_FILENAME if timing_output_path is None else Path(timing_output_path)
+    metadata["timing"] = {
+        **timer.as_dict(),
+        "timing_path": str(timing_path),
+    }
+    with timer.phase("metadata_write", files=1):
+        with open(out_root / "meta.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+    timing_path = _write_factor_generation_timing(
+        out_root=out_root,
+        timer=timer,
+        timing_output_path=timing_output_path,
+    )
+    metadata["timing"] = {
+        **timer.as_dict(),
+        "timing_path": str(timing_path),
+    }
     with open(out_root / "meta.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
@@ -1191,10 +1467,14 @@ def generate_factor_store(
     label_horizons: list[int] | None = None,
     data_source: str | None = None,
     bucket_count: int = DEFAULT_BUCKET_COUNT,
+    timing_output_path: str | Path | None = None,
 ) -> dict[str, Any]:
+    timer = FactorGenerationTimer()
     pdir = Path(parquet_dir)
-    source_storage_layout = detect_source_storage_layout(pdir)
-    label_horizons = resolve_label_horizons({"label": {"horizons": label_horizons}} if label_horizons is not None else {})
+    with timer.phase("detect_source_layout"):
+        source_storage_layout = detect_source_storage_layout(pdir)
+    with timer.phase("resolve_label_horizons"):
+        label_horizons = resolve_label_horizons({"label": {"horizons": label_horizons}} if label_horizons is not None else {})
     if source_storage_layout == "bucket_shards":
         return _generate_factor_store_from_bucket_source(
             parquet_dir=parquet_dir,
@@ -1203,6 +1483,8 @@ def generate_factor_store(
             label_horizons=label_horizons,
             data_source=data_source,
             auto_rebuild_stale_tushare_source=not incremental,
+            timing_output_path=timing_output_path,
+            timer=timer,
         )
 
     out_root = Path(output_dir)
@@ -1212,18 +1494,22 @@ def generate_factor_store(
     bucket_root.mkdir(parents=True, exist_ok=True)
     bucket_count = max(1, int(bucket_count))
 
-    files = sorted(pdir.glob("*.parquet"))
+    with timer.phase("list_symbol_parquets"):
+        files = sorted(pdir.glob("*.parquet"))
     if not files:
         raise FileNotFoundError(f"No parquet files found in {pdir}")
 
     if data_source == "tushare":
         print("[0/3] Ensuring Tushare industry context cache...")
-        _ensure_tushare_industry_context_cache(pdir)
+        with timer.phase("tushare_context_cache"):
+            _ensure_tushare_industry_context_cache(pdir)
 
-    feature_names = get_full_factor_space_feature_names(data_source=data_source)
+    with timer.phase("resolve_feature_names"):
+        feature_names = get_full_factor_space_feature_names(data_source=data_source)
     label_columns = [get_legacy_label_column_name(), *(get_label_column_name(h) for h in label_horizons)]
     workers = max(1, int(workers))
-    existing_meta = _load_json(out_root / "meta.json") or {}
+    with timer.phase("load_existing_metadata", files=1):
+        existing_meta = _load_json(out_root / "meta.json") or {}
     existing_manifest = pd.DataFrame()
     existing_manifest_lookup: dict[str, dict[str, Any]] = {}
     existing_label_columns = [
@@ -1244,7 +1530,8 @@ def generate_factor_store(
         )
     )
     if can_reuse_manifest:
-        existing_manifest = _load_bucket_manifest(manifest_path)
+        with timer.phase("load_existing_manifest", files=1):
+            existing_manifest = _load_bucket_manifest(manifest_path)
         if not existing_manifest.empty:
             existing_manifest_lookup = {
                 str(row["source_path"]): row
@@ -1253,40 +1540,41 @@ def generate_factor_store(
             }
 
     print(f"[1/3] Planning factor-store build from {len(files)} parquet files (workers={workers})...")
-    t0 = time.perf_counter()
     bucket_to_files: dict[int, list[Path]] = {}
     dirty_buckets: set[int] = set()
     current_source_paths: set[str] = set()
-    pbar = tqdm(files, desc="planning", total=len(files), unit="file")
-    for idx, fp in enumerate(pbar, start=1):
-        symbol = fp.stem
-        bucket_id = _stable_bucket_id(symbol, bucket_count)
-        bucket_to_files.setdefault(bucket_id, []).append(fp)
-        source_sig = _source_file_signature(fp)
-        source_path = str(source_sig["path"])
-        current_source_paths.add(source_path)
-        reusable = False
-        existing = existing_manifest_lookup.get(source_path)
-        if existing is not None and _bucket_path(bucket_root, bucket_id).exists():
-            reusable = (
-                int(existing.get("source_size") or -1) == int(source_sig["size"])
-                and int(existing.get("source_mtime_ns") or -1) == int(source_sig["mtime_ns"])
-                and int(existing.get("bucket_id") or -1) == bucket_id
-            )
-        if not reusable:
-            dirty_buckets.add(bucket_id)
-        reused_files = sum(len(files_in_bucket) for bucket, files_in_bucket in bucket_to_files.items() if bucket not in dirty_buckets)
-        elapsed = time.perf_counter() - t0
-        speed = idx / elapsed if elapsed > 0 else 0.0
-        eta = (len(files) - idx) / speed if speed > 0 else float("inf")
-        rebuild_files = sum(len(files_in_bucket) for bucket, files_in_bucket in bucket_to_files.items() if bucket in dirty_buckets)
-        pbar.set_postfix(reused=reused_files, rebuild=rebuild_files, eta_m=f"{eta/60:.1f}")
-    pbar.close()
+    with timer.phase("planning", files=len(files)):
+        t0 = time.perf_counter()
+        pbar = tqdm(files, desc="planning", total=len(files), unit="file")
+        for idx, fp in enumerate(pbar, start=1):
+            symbol = fp.stem
+            bucket_id = _stable_bucket_id(symbol, bucket_count)
+            bucket_to_files.setdefault(bucket_id, []).append(fp)
+            source_sig = _source_file_signature(fp)
+            source_path = str(source_sig["path"])
+            current_source_paths.add(source_path)
+            reusable = False
+            existing = existing_manifest_lookup.get(source_path)
+            if existing is not None and _bucket_path(bucket_root, bucket_id).exists():
+                reusable = (
+                    int(existing.get("source_size") or -1) == int(source_sig["size"])
+                    and int(existing.get("source_mtime_ns") or -1) == int(source_sig["mtime_ns"])
+                    and int(existing.get("bucket_id") or -1) == bucket_id
+                )
+            if not reusable:
+                dirty_buckets.add(bucket_id)
+            reused_files = sum(len(files_in_bucket) for bucket, files_in_bucket in bucket_to_files.items() if bucket not in dirty_buckets)
+            elapsed = time.perf_counter() - t0
+            speed = idx / elapsed if elapsed > 0 else 0.0
+            eta = (len(files) - idx) / speed if speed > 0 else float("inf")
+            rebuild_files = sum(len(files_in_bucket) for bucket, files_in_bucket in bucket_to_files.items() if bucket in dirty_buckets)
+            pbar.set_postfix(reused=reused_files, rebuild=rebuild_files, eta_m=f"{eta/60:.1f}")
+        pbar.close()
 
-    if not existing_manifest.empty:
-        removed_rows = existing_manifest.loc[~existing_manifest["source_path"].isin(current_source_paths)]
-        if not removed_rows.empty:
-            dirty_buckets.update(int(value) for value in removed_rows["bucket_id"].tolist())
+        if not existing_manifest.empty:
+            removed_rows = existing_manifest.loc[~existing_manifest["source_path"].isin(current_source_paths)]
+            if not removed_rows.empty:
+                dirty_buckets.update(int(value) for value in removed_rows["bucket_id"].tolist())
 
     active_bucket_ids = sorted(bucket_to_files)
     reused_buckets = [bucket_id for bucket_id in active_bucket_ids if bucket_id not in dirty_buckets and _bucket_path(bucket_root, bucket_id).exists()]
@@ -1306,16 +1594,16 @@ def generate_factor_store(
         if workers == 1:
             pbar = tqdm(buckets_to_recompute, desc="buckets", total=len(buckets_to_recompute), unit="bucket")
             for idx, bucket_id in enumerate(pbar, start=1):
-                written_manifest_rows.extend(
-                    _write_factor_bucket_worker(
-                        [str(path) for path in bucket_to_files.get(bucket_id, [])],
-                        bucket_id=bucket_id,
-                        bucket_path=str(_bucket_path(bucket_root, bucket_id)),
-                        label_horizons=label_horizons,
-                        feature_names=feature_names,
-                        data_source=data_source,
-                    )
+                result = _write_factor_bucket_worker(
+                    [str(path) for path in bucket_to_files.get(bucket_id, [])],
+                    bucket_id=bucket_id,
+                    bucket_path=str(_bucket_path(bucket_root, bucket_id)),
+                    label_horizons=label_horizons,
+                    feature_names=feature_names,
+                    data_source=data_source,
                 )
+                written_manifest_rows.extend(result.manifest_rows)
+                timer.merge(result.timing)
                 elapsed = time.perf_counter() - t1
                 speed = idx / elapsed if elapsed > 0 else 0.0
                 eta = (len(buckets_to_recompute) - idx) / speed if speed > 0 else float("inf")
@@ -1341,7 +1629,9 @@ def generate_factor_store(
                     )
                 pbar = tqdm(total=len(buckets_to_recompute), desc="buckets", unit="bucket")
                 for idx, fut in enumerate(as_completed(futures), start=1):
-                    written_manifest_rows.extend(fut.result())
+                    result = fut.result()
+                    written_manifest_rows.extend(result.manifest_rows)
+                    timer.merge(result.timing)
                     pbar.update(1)
                     elapsed = time.perf_counter() - t1
                     speed = idx / elapsed if elapsed > 0 else 0.0
@@ -1352,20 +1642,23 @@ def generate_factor_store(
         print("[2/3] Writing Parquet buckets skipped: all source files reused.")
 
     print("[3/3] Finalizing factor-store metadata...")
-    if not existing_manifest.empty:
-        reused_manifest = existing_manifest.loc[
-            existing_manifest["bucket_id"].astype(int).isin(reused_buckets)
-            & existing_manifest["source_path"].isin(current_source_paths)
-        ].copy()
-    else:
-        reused_manifest = pd.DataFrame()
-    written_manifest = pd.DataFrame(written_manifest_rows)
-    manifest_frame = pd.concat([reused_manifest, written_manifest], ignore_index=True) if not reused_manifest.empty or not written_manifest.empty else pd.DataFrame()
-    if not manifest_frame.empty:
-        manifest_frame = manifest_frame.sort_values(["bucket_id", "symbol"]).reset_index(drop=True)
-        manifest_frame.to_parquet(manifest_path, index=False, engine="pyarrow", compression="zstd")
+    with timer.phase("manifest_build_write", files=1):
+        if not existing_manifest.empty:
+            reused_manifest = existing_manifest.loc[
+                existing_manifest["bucket_id"].astype(int).isin(reused_buckets)
+                & existing_manifest["source_path"].isin(current_source_paths)
+            ].copy()
+        else:
+            reused_manifest = pd.DataFrame()
+        written_manifest = pd.DataFrame(written_manifest_rows)
+        manifest_frame = pd.concat([reused_manifest, written_manifest], ignore_index=True) if not reused_manifest.empty or not written_manifest.empty else pd.DataFrame()
+        if not manifest_frame.empty:
+            manifest_frame = manifest_frame.sort_values(["bucket_id", "symbol"]).reset_index(drop=True)
+            manifest_frame.to_parquet(manifest_path, index=False, engine="pyarrow", compression="zstd")
     total_rows = int(manifest_frame["row_count"].sum()) if not manifest_frame.empty else 0
     active_bucket_ids = sorted(int(value) for value in manifest_frame["bucket_id"].drop_duplicates().tolist()) if not manifest_frame.empty else []
+    with timer.phase("available_dates_scan"):
+        available_dates = _compute_available_dates_from_shards(bucket_root)
 
     metadata = {
         "storage_format": "parquet",
@@ -1404,7 +1697,7 @@ def generate_factor_store(
         "bucket_count": bucket_count,
         "bucket_ids": active_bucket_ids,
         "manifest_path": str(manifest_path),
-        "available_dates": _compute_available_dates_from_shards(bucket_root),
+        "available_dates": available_dates,
         "incremental": {
             "enabled": incremental,
             "bucket_dir": str(bucket_root),
@@ -1429,6 +1722,23 @@ def generate_factor_store(
             }
             for row in manifest_frame.to_dict(orient="records")
         ],
+    }
+    timing_path = out_root / DEFAULT_FACTOR_GENERATION_TIMING_FILENAME if timing_output_path is None else Path(timing_output_path)
+    metadata["timing"] = {
+        **timer.as_dict(),
+        "timing_path": str(timing_path),
+    }
+    with timer.phase("metadata_write", files=1):
+        with open(out_root / "meta.json", "w", encoding="utf-8") as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+    timing_path = _write_factor_generation_timing(
+        out_root=out_root,
+        timer=timer,
+        timing_output_path=timing_output_path,
+    )
+    metadata["timing"] = {
+        **timer.as_dict(),
+        "timing_path": str(timing_path),
     }
     with open(out_root / "meta.json", "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
@@ -1513,6 +1823,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--label-horizons",
         help="Comma-separated label horizons to materialize, for example '1,5,10,20'. If omitted, use config/defaults.",
     )
+    parser.add_argument(
+        "--timing-output",
+        default=None,
+        help="Optional JSON timing summary path. Defaults to <output-dir>/factor_generation_timing.json.",
+    )
     parser.set_defaults(incremental=True)
     parser.add_argument(
         "--incremental",
@@ -1562,6 +1877,7 @@ def main() -> None:
         incremental=args.incremental,
         label_horizons=runtime.label_horizons,
         data_source=runtime.data_source,
+        timing_output_path=args.timing_output,
     )
 
 

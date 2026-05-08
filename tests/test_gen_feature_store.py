@@ -7,12 +7,15 @@ from unittest.mock import patch
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from src.factor_store import load_factor_frame
 from src.gen_feature import (
+    DEFAULT_FACTOR_GENERATION_TIMING_FILENAME,
     TUSHARE_EVENT_AVAILABILITY_POLICY,
     _get_tushare_bucket_source_required_columns,
     _resolve_factor_generation_runtime,
+    _write_factor_bucket_from_source_bucket_worker,
     generate_factor_store,
     get_factor_family_counts,
     get_full_factor_space_feature_names,
@@ -172,6 +175,57 @@ class GenFeatureStoreTest(unittest.TestCase):
         self.assertEqual(meta["source_storage_layout"], "bucket_shards")
         self.assertEqual(len(loaded), 3)
         self.assertIn(meta["feature_names"][0], loaded.columns)
+
+    def test_bucket_source_worker_streams_one_row_group_per_symbol(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            first = _minimal_bucket_frame()
+            second = _minimal_bucket_frame().copy()
+            second["symbol"] = "000002"
+            source_dir = _write_bucket_source(root, pd.concat([first, second], ignore_index=True))
+            output_bucket_root = root / "factor_store" / "buckets"
+            source_bucket_path = source_dir / "buckets" / "part-0005.parquet"
+
+            result = _write_factor_bucket_from_source_bucket_worker(
+                str(source_bucket_path),
+                output_bucket_root=str(output_bucket_root),
+                label_horizons=[1],
+                feature_names=get_full_factor_space_feature_names(),
+            )
+            output_path = output_bucket_root / "part-0005.parquet"
+            loaded = pd.read_parquet(output_path)
+            parquet_file = pq.ParquetFile(output_path)
+
+        self.assertEqual(len(result.manifest_rows), 2)
+        self.assertEqual(parquet_file.num_row_groups, 2)
+        self.assertEqual(len(loaded), 6)
+        self.assertEqual(sorted(loaded["symbol"].unique().tolist()), ["000001", "000002"])
+
+    def test_generate_factor_store_writes_timing_summary(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            output_dir = root / "factor_store"
+            source_dir = _write_bucket_source(root, _minimal_bucket_frame())
+            timing_path = root / "timing" / "factor_timing.json"
+
+            meta = generate_factor_store(
+                parquet_dir=str(source_dir),
+                output_dir=str(output_dir),
+                workers=1,
+                incremental=False,
+                label_horizons=[1],
+                timing_output_path=timing_path,
+            )
+
+            with open(timing_path, encoding="utf-8") as f:
+                timing = json.load(f)
+
+        self.assertEqual(meta["timing"]["timing_path"], str(timing_path))
+        self.assertEqual(timing["artifact"]["default_filename"], DEFAULT_FACTOR_GENERATION_TIMING_FILENAME)
+        self.assertIn("factor_compute", timing["phases"])
+        self.assertIn("read_source_bucket", timing["phases"])
+        self.assertGreater(timing["phases"]["factor_compute"]["seconds"], 0.0)
+        self.assertEqual(timing["phases"]["factor_compute"]["symbols"], 1)
 
     def test_tushare_bucket_source_requires_prejoined_context_columns(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

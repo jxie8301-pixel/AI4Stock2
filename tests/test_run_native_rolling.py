@@ -59,6 +59,34 @@ class RunNativeRollingTest(unittest.TestCase):
         self.assertIn("--save-models", command)
         self.assertIn("lgbm.num_boost_round=2", command)
 
+    def test_rust_wrapper_prefers_resolved_config_snapshot_for_training(self):
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "--config",
+                "configs/config.yaml",
+                "--experiment-profile",
+                "core_v4_lgbm_default_10x20x10",
+                "--feature-profile",
+                "core_v4_techlite",
+                "--set",
+                "lgbm.num_boost_round=2",
+            ]
+        )
+
+        command = build_train_command(
+            args,
+            output_dir=Path("results/demo"),
+            config_snapshot=Path("results/demo/config_snapshot.yaml"),
+        )
+
+        self.assertIn("--config", command)
+        self.assertIn("results/demo/config_snapshot.yaml", command)
+        self.assertIn("--config-is-snapshot", command)
+        self.assertNotIn("--experiment-profile", command)
+        self.assertNotIn("core_v4_lgbm_default_10x20x10", command)
+        self.assertNotIn("lgbm.num_boost_round=2", command)
+
     def test_rust_wrapper_builds_backtest_command_from_bundle(self):
         parser = build_parser()
         args = parser.parse_args(

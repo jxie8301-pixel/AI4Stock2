@@ -17,6 +17,10 @@ name = "ai4stock-gen-feature"
 path = "src_rust/bin/ai4stock_gen_feature.rs"
 
 [[bin]]
+name = "ai4stock-diagnostics"
+path = "src_rust/bin/ai4stock_diagnostics.rs"
+
+[[bin]]
 name = "ai4stock-train"
 path = "src_rust/bin/ai4stock_train.rs"
 

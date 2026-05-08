@@ -5,14 +5,20 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 from datetime import datetime
+import json
+import os
 from pathlib import Path
+import shlex
+import subprocess
 from time import perf_counter
 
 import pandas as pd
+import yaml
 
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import resolve_selected_feature_columns
+from src.industry_groups import resolve_symbol_cache_path
 from src.label_utils import get_label_column_name, resolve_signal_horizon
 from src.runtime_cli import add_common_runtime_args, load_validated_config_from_args
 from src.single_factor_runtime import (
@@ -90,6 +96,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Demean each factor within date x industry before diagnostics when industry groups are available.",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["auto", "rust", "python"],
+        default="auto",
+        help="Diagnostics engine. auto uses Rust when supported.",
+    )
+    parser.add_argument(
+        "--feature-chunk-size",
+        type=int,
+        default=64,
+        help="Rust engine feature chunk size per factor-store scan. Default: 64.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=65536,
+        help="Rust Arrow record-batch size. Default: 65536.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print delegated Rust command without running it.")
     return parser
 
 
@@ -110,29 +135,199 @@ def _default_output_dir(cfg: dict, args: argparse.Namespace, *, signal_horizon: 
         / f"{stamp}__{data_source}__{universe}__{feature_profile}__h{signal_horizon}__{label_space}__{args.period}{tag_suffix}"
     )
 
-def main() -> None:
-    start_time = perf_counter()
-    parser = build_parser()
-    args = parser.parse_args()
-    cfg = load_validated_config_from_args(args, parser)
 
-    signal_horizon = int(resolve_signal_horizon(cfg))
-    label_column = get_label_column_name(signal_horizon)
-    factor_store_dir = get_native_factor_store_dir(cfg)
-    factor_store_meta = load_factor_store_metadata(factor_store_dir)
-    if args.all_features:
-        feature_names = list(factor_store_meta.get("feature_names", []))
-    else:
-        _, source_columns = resolve_selected_feature_columns(factor_store_meta, cfg)
-        feature_names = list(dict.fromkeys(source_columns))
-    if not feature_names:
-        raise ValueError("No features resolved for diagnostics.")
+def _rust_binary_command() -> list[str]:
+    env_value = os.environ.get("AI4STOCK_DIAGNOSTICS_BIN")
+    if env_value:
+        return shlex.split(env_value)
+    return ["cargo", "run", "--bin", "ai4stock-diagnostics", "--"]
 
-    date_start, date_end = resolve_period_dates(cfg, args)
-    print(
-        f"[*] Single-factor diagnostics: period={args.period}, "
-        f"date_start={date_start}, date_end={date_end}, features={len(feature_names)}"
+
+def _append_option(command: list[str], flag: str, value: object | None) -> None:
+    if value is not None and str(value) != "":
+        command.extend([flag, str(value)])
+
+
+def _append_flag(command: list[str], flag: str, enabled: bool) -> None:
+    if enabled:
+        command.append(flag)
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(payload, handle, ensure_ascii=False, indent=2, default=str)
+
+
+def _write_yaml(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(payload, handle, allow_unicode=True, sort_keys=False)
+
+
+def _rust_supported(args: argparse.Namespace) -> bool:
+    label_space = str(args.diagnostic_label_space or "raw_return").strip().lower()
+    return label_space in {"raw_return", "industry_excess", "benchmark_excess"}
+
+
+def _append_benchmark_options(command: list[str], cfg: dict) -> None:
+    benchmark_cfg = cfg.get("backtest", {}).get("benchmark", {}) or {}
+    if not isinstance(benchmark_cfg, dict):
+        benchmark_cfg = {}
+    mode = str(benchmark_cfg.get("mode") or "cross_section_mean").strip().lower() or "cross_section_mean"
+    _append_option(command, "--benchmark-mode", mode)
+    if mode == "file":
+        _append_option(command, "--benchmark-path", benchmark_cfg.get("path"))
+        _append_option(command, "--benchmark-date-column", benchmark_cfg.get("date_column") or "date")
+        _append_option(command, "--benchmark-value-column", benchmark_cfg.get("value_column") or "close")
+        _append_option(command, "--benchmark-value-type", benchmark_cfg.get("value_type") or "close")
+
+
+def _build_rust_single_factor_command(
+    *,
+    cfg: dict,
+    args: argparse.Namespace,
+    feature_names: list[str],
+    label_column: str,
+    factor_store_dir: Path,
+    date_start: str,
+    date_end: str,
+    output_dir: Path,
+    metadata: dict,
+    segments: list[tuple[str, str, str]],
+) -> list[str]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    features_path = output_dir / "_rust_selected_features.json"
+    metadata_path = output_dir / "_rust_metadata_input.json"
+    config_path = output_dir / "config_snapshot.yaml"
+    _write_json(features_path, {"selected_features": feature_names})
+    _write_json(metadata_path, metadata)
+    _write_yaml(config_path, deepcopy(cfg))
+
+    command = _rust_binary_command()
+    command.extend(
+        [
+            "single-factor",
+            "--factor-store",
+            str(factor_store_dir),
+            "--output-dir",
+            str(output_dir),
+            "--label-column",
+            label_column,
+            "--signal-horizon",
+            str(int(resolve_signal_horizon(cfg))),
+            "--features-json",
+            str(features_path),
+            "--date-start",
+            date_start,
+            "--date-end",
+            date_end,
+            "--universe-name",
+            str(cfg.get("universe", "all")),
+            "--universe-dir",
+            str(cfg.get("native", {}).get("universe_dir", "data/universes")),
+            "--quantile-bins",
+            str(max(int(args.quantile_bins), 2)),
+            "--top-n",
+            str(max(int(args.top_n), 1)),
+            "--diagnostic-label-space",
+            str(args.diagnostic_label_space or "raw_return"),
+            "--diagnostic-threshold",
+            str(float(args.diagnostic_threshold)),
+            "--feature-chunk-size",
+            str(max(int(args.feature_chunk_size), 1)),
+            "--batch-size",
+            str(max(int(args.batch_size), 1)),
+            "--metadata-json",
+            str(metadata_path),
+            "--config-snapshot",
+            str(config_path),
+        ]
     )
+    _append_flag(command, "--no-detail-artifacts", bool(getattr(args, "no_detail_artifacts", False)))
+    _append_flag(command, "--industry-neutral", bool(getattr(args, "industry_neutral", False)))
+    label_space = str(args.diagnostic_label_space or "raw_return").strip().lower()
+    if label_space == "benchmark_excess":
+        _append_benchmark_options(command, cfg)
+    if bool(getattr(args, "industry_neutral", False)) or label_space == "industry_excess":
+        _append_option(command, "--industry-map", resolve_symbol_cache_path(cfg))
+    for name, start, end in segments:
+        command.extend(["--segment", f"{name}:{start}:{end}"])
+    return command
+
+
+def _run_rust_single_factor_diagnostics(
+    *,
+    cfg: dict,
+    args: argparse.Namespace,
+    feature_names: list[str],
+    label_column: str,
+    factor_store_dir: Path,
+    date_start: str,
+    date_end: str,
+    output_dir: Path,
+    metadata: dict,
+    segments: list[tuple[str, str, str]],
+    start_time: float,
+) -> None:
+    command = _build_rust_single_factor_command(
+        cfg=cfg,
+        args=args,
+        feature_names=feature_names,
+        label_column=label_column,
+        factor_store_dir=factor_store_dir,
+        date_start=date_start,
+        date_end=date_end,
+        output_dir=output_dir,
+        metadata=metadata,
+        segments=segments,
+    )
+    rendered = shlex.join(command)
+    if bool(getattr(args, "dry_run", False)):
+        print(f"[dry-run] {rendered}")
+        return
+    print(f"[*] Delegating single-factor diagnostics to Rust: {rendered}", flush=True)
+    completed = subprocess.run(command, check=False)
+    if completed.returncode != 0:
+        raise SystemExit(int(completed.returncode))
+
+    summary_path = output_dir / "single_factor_summary.csv"
+    summary = pd.read_csv(summary_path) if summary_path.exists() else pd.DataFrame()
+    print(f"[+] Single-factor diagnostics saved to: {output_dir}")
+    print(f"    engine: rust")
+    print(f"    total={perf_counter() - start_time:.2f}s")
+    print(f"    summary: {summary_path}")
+    print(f"    top abs RankIC: {output_dir / 'single_factor_top_abs_rankic.csv'}")
+    print(f"    readme: {output_dir / 'README.md'}")
+    if not summary.empty:
+        display = summary.head(min(10, len(summary)))[
+            [
+                "feature",
+                "rank_ic_mean",
+                "rank_ic_ir",
+                "coverage_pct",
+                "monotonicity_mean",
+                "monthly_rank_ic_directional_hit_rate",
+            ]
+        ].copy()
+        print("\nTop factors by absolute RankIC:")
+        print(display.to_string(index=False))
+
+
+def _run_python_single_factor_diagnostics(
+    *,
+    cfg: dict,
+    args: argparse.Namespace,
+    feature_names: list[str],
+    label_column: str,
+    factor_store_dir: Path,
+    date_start: str,
+    date_end: str,
+    signal_horizon: int,
+    output_dir: Path,
+    start_time: float,
+) -> None:
+    signal_horizon = int(resolve_signal_horizon(cfg))
     load_started = perf_counter()
     factor_frame = load_factor_frame(
         store_dir=factor_store_dir,
@@ -191,7 +386,6 @@ def main() -> None:
     detail_frames = bundle.detail_frames
     segment_comparison = bundle.segment_comparison
     segment_summaries = bundle.segment_summaries
-    output_dir = _default_output_dir(cfg, args, signal_horizon=signal_horizon)
     metadata = {
         "data_source": cfg.get("data", {}).get("source", ""),
         "universe": cfg.get("universe", ""),
@@ -262,6 +456,85 @@ def main() -> None:
             print("\nDirection-flip factors across segments:")
             cols = [col for col in ["feature", "best_segment_by_abs_rank_ic", "worst_segment_by_abs_rank_ic", "segment_rank_ic_mean_range"] if col in drift_preview.columns]
             print(drift_preview[cols].to_string(index=False))
+
+
+def main() -> None:
+    start_time = perf_counter()
+    parser = build_parser()
+    args = parser.parse_args()
+    cfg = load_validated_config_from_args(args, parser)
+
+    signal_horizon = int(resolve_signal_horizon(cfg))
+    label_column = get_label_column_name(signal_horizon)
+    factor_store_dir = Path(get_native_factor_store_dir(cfg))
+    factor_store_meta = load_factor_store_metadata(factor_store_dir)
+    if args.all_features:
+        feature_names = list(factor_store_meta.get("feature_names", []))
+    else:
+        _, source_columns = resolve_selected_feature_columns(factor_store_meta, cfg)
+        feature_names = list(dict.fromkeys(source_columns))
+    if not feature_names:
+        raise ValueError("No features resolved for diagnostics.")
+
+    date_start, date_end = resolve_period_dates(cfg, args)
+    segments = resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
+    output_dir = _default_output_dir(cfg, args, signal_horizon=signal_horizon)
+    print(
+        f"[*] Single-factor diagnostics: period={args.period}, "
+        f"date_start={date_start}, date_end={date_end}, features={len(feature_names)}"
+    )
+
+    engine = str(getattr(args, "engine", "auto") or "auto")
+    use_rust = engine == "rust" or (engine == "auto" and _rust_supported(args))
+    if engine == "rust" and not _rust_supported(args):
+        raise ValueError("Rust diagnostics currently supports raw_return, industry_excess, and benchmark_excess.")
+    if use_rust:
+        metadata = {
+            "data_source": cfg.get("data", {}).get("source", ""),
+            "universe": cfg.get("universe", ""),
+            "feature_profile": cfg.get("features", {}).get("profile", ""),
+            "factor_store_dir": factor_store_dir,
+            "signal_horizon": signal_horizon,
+            "period": args.period,
+            "date_start": date_start,
+            "date_end": date_end,
+            "diagnostic_label_space": str(args.diagnostic_label_space or "raw_return").strip().lower(),
+            "diagnostic_threshold": float(args.diagnostic_threshold),
+            "industry_neutral": bool(getattr(args, "industry_neutral", False)),
+            "neutralized_feature_count": len(feature_names) if bool(getattr(args, "industry_neutral", False)) else 0,
+            "feature_count": len(feature_names),
+            "quantile_bins": max(int(args.quantile_bins), 2),
+            "detail_artifacts": not bool(getattr(args, "no_detail_artifacts", False)),
+            "segment_scheme": args.segment_scheme,
+            "segment_count": len(segments),
+        }
+        _run_rust_single_factor_diagnostics(
+            cfg=cfg,
+            args=args,
+            feature_names=feature_names,
+            label_column=label_column,
+            factor_store_dir=factor_store_dir,
+            date_start=date_start,
+            date_end=date_end,
+            output_dir=output_dir,
+            metadata=metadata,
+            segments=segments,
+            start_time=start_time,
+        )
+        return
+
+    _run_python_single_factor_diagnostics(
+        cfg=cfg,
+        args=args,
+        feature_names=feature_names,
+        label_column=label_column,
+        factor_store_dir=factor_store_dir,
+        date_start=date_start,
+        date_end=date_end,
+        signal_horizon=signal_horizon,
+        output_dir=output_dir,
+        start_time=start_time,
+    )
 
 
 if __name__ == "__main__":

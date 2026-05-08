@@ -52,6 +52,9 @@ struct ResolvedRuntimeConfig {
     universe_name: Option<String>,
     universe_dir: PathBuf,
     lgbm_config: JsonValue,
+    train_label_transform: TrainLabelTransformConfig,
+    opportunity: OpportunityLabelConfig,
+    sample_weight: SampleWeightConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +109,45 @@ struct WindowDataPaths {
     history_path: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+struct TrainLabelTransformConfig {
+    mode: String,
+    neutral_band: f64,
+    tail_band: f64,
+    scale_multiplier: f64,
+    min_scale: f64,
+}
+
+#[derive(Debug, Clone)]
+struct OpportunityLabelConfig {
+    mode: String,
+    threshold: f64,
+    neutral_band: f64,
+}
+
+#[derive(Debug, Clone)]
+struct SampleWeightConfig {
+    mode: String,
+    power: f64,
+    scale: Option<f64>,
+    min: f64,
+    date_normalize: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TrainingContext {
+    industry_by_symbol: BTreeMap<String, String>,
+    benchmark_forward_returns: BTreeMap<i64, f64>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedWindowLabelColumns {
+    label: Vec<f64>,
+    raw_label: Vec<f64>,
+    sample_weight: Vec<f64>,
+    opportunity_label: Vec<f64>,
+}
+
 pub(crate) fn make_bundle_lgbm_rust_runtime(
     options: &LgbmBundleOptions,
 ) -> Result<JsonValue, String> {
@@ -132,6 +174,7 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
             &resolved.cross_sectional_rank_exclude_columns,
         );
     }
+    let training_context = build_training_context(&resolved, &data)?;
     let row_indices_by_date = build_row_indices_by_date(&data.rows);
     let windows = build_rolling_windows(&resolved, &data.full_calendar, &data.test_calendar);
     if windows.is_empty() {
@@ -190,18 +233,24 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
             &data.rows,
             &train_indices,
             &data.selected_feature_names,
+            &resolved,
+            &training_context,
         )?;
         write_window_frame_parquet(
             &paths.valid_path,
             &data.rows,
             &valid_indices,
             &data.selected_feature_names,
+            &resolved,
+            &training_context,
         )?;
         write_window_frame_parquet(
             &paths.test_path,
             &data.rows,
             &test_indices,
             &data.selected_feature_names,
+            &resolved,
+            &training_context,
         )?;
         let summary = call_python_train_window(
             options,
@@ -320,6 +369,12 @@ pub(crate) fn make_bundle_lgbm_rust_runtime(
         "cross_sectional_rank_exclude_columns": sorted_string_set(&resolved.cross_sectional_rank_exclude_columns),
         "universe": resolved.universe_name.clone().unwrap_or_else(|| "all".to_owned()),
         "reference_baselines_enabled": false,
+        "train_label_transform_mode": resolved.train_label_transform.mode,
+        "train_label_space": if resolved.train_label_transform.mode.starts_with("buyability") { "binary_target" } else { "return_target" },
+        "opportunity_label_mode": resolved.opportunity.mode,
+        "opportunity_label_threshold": resolved.opportunity.threshold,
+        "opportunity_label_neutral_band": resolved.opportunity.neutral_band,
+        "train_sample_weight_mode": resolved.sample_weight.mode,
         "training_summary_path": results_dir.join(TRAINING_SUMMARY_FILENAME).display().to_string(),
         "prediction_training_summary_path": artifact_dir.join(TRAINING_SUMMARY_FILENAME).display().to_string(),
         "config_snapshot_path": results_dir.join("config_snapshot.yaml").display().to_string(),
@@ -449,6 +504,9 @@ fn resolve_runtime_config(options: &LgbmBundleOptions) -> Result<ResolvedRuntime
             lgbm_config["validation_topk"] = serde_json::json!(topk);
         }
     }
+    let train_label_transform = resolve_train_label_transform_config(&cfg)?;
+    let opportunity = resolve_opportunity_label_config(&cfg)?;
+    let sample_weight = resolve_sample_weight_config(&lgbm_config);
 
     Ok(ResolvedRuntimeConfig {
         cfg,
@@ -470,6 +528,9 @@ fn resolve_runtime_config(options: &LgbmBundleOptions) -> Result<ResolvedRuntime
         universe_name,
         universe_dir,
         lgbm_config,
+        train_label_transform,
+        opportunity,
+        sample_weight,
     })
 }
 
@@ -696,6 +757,273 @@ fn load_universe_filter(
     }))
 }
 
+fn load_industry_map(resolved: &ResolvedRuntimeConfig) -> Result<BTreeMap<String, String>, String> {
+    let path = PathBuf::from("data")
+        .join(&resolved.data_source)
+        .join("raw")
+        .join("meta")
+        .join("symbol_cache.parquet");
+    if !path.exists() {
+        return Err(format!(
+            "industry_excess opportunity mode requires symbol cache at {}",
+            path.display()
+        ));
+    }
+    let mut last_error = String::new();
+    for symbol_column in ["local_symbol", "symbol"] {
+        match read_industry_map_with_symbol_column(&path, symbol_column) {
+            Ok(map) if !map.is_empty() => return Ok(map),
+            Ok(_) => {
+                last_error = format!("{} had no usable industry mappings", path.display());
+            }
+            Err(error) => last_error = error,
+        }
+    }
+    Err(format!(
+        "industry_excess opportunity mode could not load industry mapping: {last_error}"
+    ))
+}
+
+fn read_industry_map_with_symbol_column(
+    path: &Path,
+    symbol_column: &str,
+) -> Result<BTreeMap<String, String>, String> {
+    let columns = vec![symbol_column.to_owned(), "industry".to_owned()];
+    let reader = open_projected_parquet_reader(path, &columns, 65_536)?;
+    let mut map = BTreeMap::new();
+    for batch in reader {
+        let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let symbol_array = required_column(&batch, symbol_column, path)?;
+        let industry_array = required_column(&batch, "industry", path)?;
+        for row_index in 0..batch.num_rows() {
+            if symbol_array.is_null(row_index) || industry_array.is_null(row_index) {
+                continue;
+            }
+            let symbol = normalize_local_symbol(&string_value(symbol_array, row_index, path)?);
+            let industry = string_value(industry_array, row_index, path)?;
+            if !symbol.is_empty() && !industry.trim().is_empty() {
+                map.insert(symbol, industry);
+            }
+        }
+    }
+    Ok(map)
+}
+
+fn build_benchmark_forward_returns(
+    resolved: &ResolvedRuntimeConfig,
+    rows: &[FactorRow],
+) -> Result<BTreeMap<i64, f64>, String> {
+    let benchmark_returns = build_benchmark_returns(resolved, rows)?;
+    if benchmark_returns.is_empty() {
+        return Err(
+            "benchmark_excess opportunity mode produced an empty benchmark series".to_owned(),
+        );
+    }
+    Ok(build_forward_compound_return_map(
+        &benchmark_returns,
+        resolved.signal_horizon,
+    ))
+}
+
+fn build_benchmark_returns(
+    resolved: &ResolvedRuntimeConfig,
+    rows: &[FactorRow],
+) -> Result<Vec<(i64, f64)>, String> {
+    let mode = yaml_path_string(&resolved.cfg, &["backtest", "benchmark", "mode"])
+        .unwrap_or_else(|| "cross_section_mean".to_owned())
+        .trim()
+        .to_ascii_lowercase();
+    if mode == "cross_section_mean" || mode.is_empty() {
+        return build_cross_section_benchmark_returns(rows);
+    }
+    if mode != "file" {
+        return Err(format!(
+            "unsupported benchmark mode for Rust training runtime: {mode}; supported: cross_section_mean, file"
+        ));
+    }
+    let path = yaml_path_string(&resolved.cfg, &["backtest", "benchmark", "path"])
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            "backtest.benchmark.path is required when benchmark mode is file".to_owned()
+        })?;
+    let date_column = yaml_path_string(&resolved.cfg, &["backtest", "benchmark", "date_column"])
+        .unwrap_or_else(|| "date".to_owned());
+    let value_column = yaml_path_string(&resolved.cfg, &["backtest", "benchmark", "value_column"])
+        .unwrap_or_else(|| "close".to_owned());
+    let value_type = yaml_path_string(&resolved.cfg, &["backtest", "benchmark", "value_type"])
+        .unwrap_or_else(|| "close".to_owned())
+        .trim()
+        .to_ascii_lowercase();
+    let values = match path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "csv" | "txt" => read_benchmark_csv(&path, &date_column, &value_column)?,
+        "parquet" | "pq" => read_benchmark_parquet(&path, &date_column, &value_column)?,
+        _ => {
+            return Err(format!(
+                "unsupported benchmark file format: {}. Use .csv, .txt, .parquet, or .pq.",
+                path.display()
+            ))
+        }
+    };
+    if values.is_empty() {
+        return Err(format!(
+            "benchmark returned no usable rows from {}",
+            path.display()
+        ));
+    }
+    coerce_benchmark_returns(values, &value_type)
+}
+
+fn build_cross_section_benchmark_returns(rows: &[FactorRow]) -> Result<Vec<(i64, f64)>, String> {
+    let mut sums: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
+    for row in rows {
+        if row.label.is_finite() {
+            let entry = sums.entry(row.date_ns).or_insert((0.0, 0));
+            entry.0 += row.label;
+            entry.1 += 1;
+        }
+    }
+    let out = sums
+        .into_iter()
+        .filter_map(|(date_ns, (sum, count))| (count > 0).then_some((date_ns, sum / count as f64)))
+        .collect::<Vec<_>>();
+    if out.is_empty() {
+        return Err("cross_section_mean benchmark had no finite labels".to_owned());
+    }
+    Ok(out)
+}
+
+fn read_benchmark_csv(
+    path: &Path,
+    date_column: &str,
+    value_column: &str,
+) -> Result<Vec<(i64, f64)>, String> {
+    let mut reader = csv::Reader::from_path(path)
+        .map_err(|err| format!("failed to read benchmark CSV {}: {err}", path.display()))?;
+    let headers = reader
+        .headers()
+        .map_err(|err| {
+            format!(
+                "failed to parse benchmark CSV {} headers: {err}",
+                path.display()
+            )
+        })?
+        .clone();
+    let date_index = headers
+        .iter()
+        .position(|name| name == date_column)
+        .ok_or_else(|| format!("benchmark file is missing date column: {date_column}"))?;
+    let value_index = headers
+        .iter()
+        .position(|name| name == value_column)
+        .ok_or_else(|| format!("benchmark file is missing value column: {value_column}"))?;
+    let mut by_date = BTreeMap::new();
+    for record in reader.records() {
+        let record = record
+            .map_err(|err| format!("failed to parse benchmark CSV {}: {err}", path.display()))?;
+        let Some(raw_date) = record.get(date_index) else {
+            continue;
+        };
+        let Some(raw_value) = record.get(value_index) else {
+            continue;
+        };
+        let Ok(date_ns) = parse_date_ns(raw_date.trim()) else {
+            continue;
+        };
+        let Ok(value) = raw_value.trim().parse::<f64>() else {
+            continue;
+        };
+        if value.is_finite() {
+            by_date.insert(date_ns, value);
+        }
+    }
+    Ok(by_date.into_iter().collect())
+}
+
+fn read_benchmark_parquet(
+    path: &Path,
+    date_column: &str,
+    value_column: &str,
+) -> Result<Vec<(i64, f64)>, String> {
+    let columns = vec![date_column.to_owned(), value_column.to_owned()];
+    let reader = open_projected_parquet_reader(path, &columns, 65_536)?;
+    let mut by_date = BTreeMap::new();
+    for batch in reader {
+        let batch = batch.map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+        let date_array = required_column(&batch, date_column, path)?;
+        let value_array = required_column(&batch, value_column, path)?;
+        for row_index in 0..batch.num_rows() {
+            if date_array.is_null(row_index) || value_array.is_null(row_index) {
+                continue;
+            }
+            let date_ns = date_value_ns(date_array, row_index, path)?;
+            let value = numeric_value(value_array, row_index, path)?;
+            if value.is_finite() {
+                by_date.insert(date_ns, value);
+            }
+        }
+    }
+    Ok(by_date.into_iter().collect())
+}
+
+fn coerce_benchmark_returns(
+    values: Vec<(i64, f64)>,
+    value_type: &str,
+) -> Result<Vec<(i64, f64)>, String> {
+    match value_type {
+        "return" => Ok(values),
+        "close" | "" => {
+            let mut out = Vec::with_capacity(values.len());
+            let mut previous: Option<f64> = None;
+            for (date_ns, close) in values {
+                let daily_return = if let Some(prev) = previous {
+                    if prev != 0.0 {
+                        close / prev - 1.0
+                    } else {
+                        f64::NAN
+                    }
+                } else {
+                    f64::NAN
+                };
+                out.push((date_ns, daily_return));
+                previous = Some(close);
+            }
+            Ok(out)
+        }
+        other => Err(format!(
+            "unsupported benchmark value_type: {other}; supported: close, return"
+        )),
+    }
+}
+
+fn build_forward_compound_return_map(
+    daily_returns: &[(i64, f64)],
+    horizon: usize,
+) -> BTreeMap<i64, f64> {
+    let horizon = horizon.max(1);
+    let mut out = BTreeMap::new();
+    if daily_returns.len() <= horizon {
+        return out;
+    }
+    for position in 0..(daily_returns.len() - horizon) {
+        let window = &daily_returns[(position + 1)..=(position + horizon)];
+        if window.iter().all(|(_, value)| value.is_finite()) {
+            let compounded = window
+                .iter()
+                .fold(1.0, |acc, (_, value)| acc * (1.0 + *value))
+                - 1.0;
+            out.insert(daily_returns[position].0, compounded);
+        }
+    }
+    out
+}
+
 fn resolve_universe_path(universe_name: &str, universe_dir: &Path) -> Result<PathBuf, String> {
     let candidates = [
         universe_dir.join(universe_name),
@@ -731,6 +1059,16 @@ fn normalize_symbol(symbol: &str) -> String {
         .chars()
         .filter(|character| character.is_ascii_digit())
         .collect()
+}
+
+fn normalize_local_symbol(symbol: &str) -> String {
+    let trimmed = symbol.trim();
+    let digits = normalize_symbol(trimmed);
+    if !digits.is_empty() && digits.len() <= 6 {
+        format!("{digits:0>6}")
+    } else {
+        trimmed.to_owned()
+    }
 }
 
 fn parse_optional_date_ns(raw: &str) -> Result<Option<i64>, String> {
@@ -945,6 +1283,13 @@ fn call_python_train_window(
         "valid_end": format_date_ns(window.valid_end_ns),
         "signal_horizon": resolved.signal_horizon,
         "label_embargo_days": resolved.label_embargo_days,
+        "train_label_transform_mode": resolved.train_label_transform.mode,
+        "train_label_space": if resolved.train_label_transform.mode.starts_with("buyability") { "binary_target" } else { "return_target" },
+        "valid_custom_metric_label_space": "raw_return",
+        "opportunity_label_mode": resolved.opportunity.mode,
+        "opportunity_label_threshold": resolved.opportunity.threshold,
+        "opportunity_label_neutral_band": resolved.opportunity.neutral_band,
+        "train_sample_weight_mode": resolved.sample_weight.mode,
     }))
     .map_err(|err| format!("failed to encode window metadata: {err}"))?;
     let summary_json = Python::attach(|python| -> PyResult<String> {
@@ -1027,12 +1372,376 @@ fn build_window_paths(
     }
 }
 
+fn build_training_context(
+    resolved: &ResolvedRuntimeConfig,
+    data: &LoadedFactorData,
+) -> Result<TrainingContext, String> {
+    let mut context = TrainingContext::default();
+    if resolved.opportunity.mode == "industry_excess" {
+        context.industry_by_symbol = load_industry_map(resolved)?;
+    }
+    if resolved.opportunity.mode == "benchmark_excess" {
+        context.benchmark_forward_returns = build_benchmark_forward_returns(resolved, &data.rows)?;
+    }
+    Ok(context)
+}
+
+fn build_prepared_window_label_columns(
+    rows: &[FactorRow],
+    indices: &[usize],
+    resolved: &ResolvedRuntimeConfig,
+    training_context: &TrainingContext,
+) -> Result<PreparedWindowLabelColumns, String> {
+    let raw_label = indices
+        .iter()
+        .map(|idx| rows[*idx].label)
+        .collect::<Vec<_>>();
+    let effective_mask = indices
+        .iter()
+        .map(|idx| {
+            rows[*idx].label.is_finite()
+                && rows[*idx].features.iter().all(|value| !value.is_infinite())
+        })
+        .collect::<Vec<_>>();
+    let opportunity_edge =
+        build_opportunity_edges(rows, indices, &effective_mask, resolved, training_context)?;
+    let label = transform_window_labels(
+        &raw_label,
+        indices,
+        rows,
+        &effective_mask,
+        &opportunity_edge,
+        &resolved.train_label_transform,
+        &resolved.opportunity,
+    )?;
+    let sample_weight = build_sample_weights(
+        &raw_label,
+        indices,
+        rows,
+        &effective_mask,
+        &opportunity_edge,
+        &resolved.sample_weight,
+        &resolved.opportunity,
+    )?;
+    let opportunity_label = opportunity_edge
+        .iter()
+        .map(|edge| {
+            if edge.is_finite() {
+                if *edge > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            } else {
+                f64::NAN
+            }
+        })
+        .collect::<Vec<_>>();
+    Ok(PreparedWindowLabelColumns {
+        label,
+        raw_label,
+        sample_weight,
+        opportunity_label,
+    })
+}
+
+fn build_opportunity_edges(
+    rows: &[FactorRow],
+    indices: &[usize],
+    effective_mask: &[bool],
+    resolved: &ResolvedRuntimeConfig,
+    training_context: &TrainingContext,
+) -> Result<Vec<f64>, String> {
+    let mut out = vec![f64::NAN; indices.len()];
+    match resolved.opportunity.mode.as_str() {
+        "positive" => {
+            for (position, idx) in indices.iter().enumerate() {
+                if effective_mask[position] {
+                    out[position] = rows[*idx].label;
+                }
+            }
+        }
+        "threshold" => {
+            for (position, idx) in indices.iter().enumerate() {
+                if effective_mask[position] {
+                    out[position] = rows[*idx].label - resolved.opportunity.threshold;
+                }
+            }
+        }
+        "industry_excess" => {
+            let mut sums: BTreeMap<(i64, String), (f64, usize)> = BTreeMap::new();
+            let mut industries = vec![String::new(); indices.len()];
+            for (position, idx) in indices.iter().enumerate() {
+                if !effective_mask[position] {
+                    continue;
+                }
+                let symbol = normalize_local_symbol(&rows[*idx].symbol);
+                let Some(industry) = training_context.industry_by_symbol.get(&symbol) else {
+                    continue;
+                };
+                if industry.is_empty() {
+                    continue;
+                }
+                industries[position] = industry.clone();
+                let entry = sums
+                    .entry((rows[*idx].date_ns, industry.clone()))
+                    .or_insert((0.0, 0));
+                entry.0 += rows[*idx].label;
+                entry.1 += 1;
+            }
+            for (position, idx) in indices.iter().enumerate() {
+                if !effective_mask[position] || industries[position].is_empty() {
+                    continue;
+                }
+                if let Some((sum, count)) =
+                    sums.get(&(rows[*idx].date_ns, industries[position].clone()))
+                {
+                    if *count > 0 {
+                        out[position] = rows[*idx].label
+                            - (*sum / *count as f64)
+                            - resolved.opportunity.threshold;
+                    }
+                }
+            }
+        }
+        "benchmark_excess" => {
+            for (position, idx) in indices.iter().enumerate() {
+                if !effective_mask[position] {
+                    continue;
+                }
+                if let Some(benchmark_return) = training_context
+                    .benchmark_forward_returns
+                    .get(&rows[*idx].date_ns)
+                {
+                    if benchmark_return.is_finite() {
+                        out[position] =
+                            rows[*idx].label - *benchmark_return - resolved.opportunity.threshold;
+                    }
+                }
+            }
+        }
+        other => {
+            return Err(format!(
+                "unsupported opportunity mode in Rust training runtime: {other}"
+            ))
+        }
+    }
+    Ok(out)
+}
+
+fn transform_window_labels(
+    raw_label: &[f64],
+    indices: &[usize],
+    rows: &[FactorRow],
+    effective_mask: &[bool],
+    opportunity_edge: &[f64],
+    transform: &TrainLabelTransformConfig,
+    opportunity: &OpportunityLabelConfig,
+) -> Result<Vec<f64>, String> {
+    let mut out = vec![f64::NAN; raw_label.len()];
+    match transform.mode.as_str() {
+        "raw" => {
+            for (position, value) in raw_label.iter().enumerate() {
+                if effective_mask[position] {
+                    out[position] = *value;
+                }
+            }
+        }
+        "buyability_binary" => {
+            for (position, edge) in opportunity_edge.iter().enumerate() {
+                if edge.is_finite() {
+                    out[position] = if *edge > 0.0 { 1.0 } else { 0.0 };
+                }
+            }
+        }
+        "buyability_margin_binary" => {
+            for (position, edge) in opportunity_edge.iter().enumerate() {
+                if !edge.is_finite() {
+                    continue;
+                }
+                if *edge > opportunity.neutral_band {
+                    out[position] = 1.0;
+                } else if *edge < -opportunity.neutral_band {
+                    out[position] = 0.0;
+                }
+            }
+        }
+        "cross_section_rank" | "profit_tanh" | "profit_bucket" => {
+            let positions_by_date = positions_by_date(indices, rows, effective_mask);
+            for positions in positions_by_date.values() {
+                let finite_positions = positions
+                    .iter()
+                    .copied()
+                    .filter(|position| raw_label[*position].is_finite())
+                    .collect::<Vec<_>>();
+                if finite_positions.is_empty() {
+                    continue;
+                }
+                let finite_values = finite_positions
+                    .iter()
+                    .map(|position| raw_label[*position])
+                    .collect::<Vec<_>>();
+                let transformed = match transform.mode.as_str() {
+                    "cross_section_rank" => cross_section_rank_labels(&finite_values),
+                    "profit_tanh" => profit_tanh_labels(&finite_values, transform),
+                    "profit_bucket" => profit_bucket_labels(&finite_values, transform),
+                    _ => unreachable!(),
+                };
+                for (offset, position) in finite_positions.iter().enumerate() {
+                    out[*position] = transformed[offset];
+                }
+            }
+        }
+        other => {
+            return Err(format!(
+                "unsupported train label transform in Rust training runtime: {other}"
+            ))
+        }
+    }
+    Ok(out)
+}
+
+fn positions_by_date(
+    indices: &[usize],
+    rows: &[FactorRow],
+    effective_mask: &[bool],
+) -> BTreeMap<i64, Vec<usize>> {
+    let mut out: BTreeMap<i64, Vec<usize>> = BTreeMap::new();
+    for (position, idx) in indices.iter().enumerate() {
+        if effective_mask[position] {
+            out.entry(rows[*idx].date_ns).or_default().push(position);
+        }
+    }
+    out
+}
+
+fn cross_section_rank_labels(values: &[f64]) -> Vec<f64> {
+    if values.len() == 1 {
+        return vec![0.0];
+    }
+    let ranks = rank_average(values);
+    let denominator = values.len() as f64 - 1.0;
+    ranks
+        .into_iter()
+        .map(|rank| ((rank - 1.0) / denominator) - 0.5)
+        .collect()
+}
+
+fn profit_tanh_labels(values: &[f64], transform: &TrainLabelTransformConfig) -> Vec<f64> {
+    let scale = robust_scale(values, transform.min_scale) * transform.scale_multiplier;
+    values
+        .iter()
+        .map(|value| {
+            let adjusted = value.signum() * (value.abs() - transform.neutral_band).max(0.0);
+            (adjusted / scale).tanh()
+        })
+        .collect()
+}
+
+fn profit_bucket_labels(values: &[f64], transform: &TrainLabelTransformConfig) -> Vec<f64> {
+    values
+        .iter()
+        .map(|value| {
+            if *value <= -transform.tail_band {
+                -2.0
+            } else if *value > -transform.tail_band && *value < -transform.neutral_band {
+                -1.0
+            } else if *value >= transform.neutral_band && *value < transform.tail_band {
+                1.0
+            } else if *value >= transform.tail_band {
+                2.0
+            } else {
+                0.0
+            }
+        })
+        .collect()
+}
+
+fn build_sample_weights(
+    raw_label: &[f64],
+    indices: &[usize],
+    rows: &[FactorRow],
+    effective_mask: &[bool],
+    opportunity_edge: &[f64],
+    sample_weight: &SampleWeightConfig,
+    opportunity: &OpportunityLabelConfig,
+) -> Result<Vec<f64>, String> {
+    let mut weights = vec![f64::NAN; raw_label.len()];
+    match sample_weight.mode.as_str() {
+        "none" => return Ok(weights),
+        "opportunity_distance" => {}
+        other => {
+            return Err(format!(
+                "unsupported sample weight mode in Rust training runtime: {other}"
+            ))
+        }
+    }
+    let default_scale = if opportunity.neutral_band > 0.0 {
+        opportunity.neutral_band
+    } else {
+        0.01
+    };
+    let scale = sample_weight.scale.unwrap_or(default_scale).max(1e-6);
+    let power = sample_weight.power.max(1e-6);
+    let min_weight = sample_weight.min.max(0.0);
+    for (position, edge) in opportunity_edge.iter().enumerate() {
+        if !effective_mask[position] || !edge.is_finite() {
+            continue;
+        }
+        let mut weight = 1.0 + (edge.abs() / scale).powf(power);
+        if min_weight > 0.0 {
+            weight = weight.max(min_weight);
+        }
+        weights[position] = weight;
+    }
+    if sample_weight.date_normalize {
+        let mut sums: BTreeMap<i64, (f64, usize)> = BTreeMap::new();
+        for (position, idx) in indices.iter().enumerate() {
+            if weights[position].is_finite() {
+                let entry = sums.entry(rows[*idx].date_ns).or_insert((0.0, 0));
+                entry.0 += weights[position];
+                entry.1 += 1;
+            }
+        }
+        for (position, idx) in indices.iter().enumerate() {
+            if weights[position].is_finite() {
+                if let Some((sum, count)) = sums.get(&rows[*idx].date_ns) {
+                    let mean = *sum / *count as f64;
+                    if mean.is_finite() && mean > 0.0 {
+                        weights[position] /= mean;
+                    }
+                }
+            }
+        }
+    }
+    let finite = weights
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if !finite.is_empty() {
+        let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+        if mean.is_finite() && mean > 0.0 {
+            for weight in &mut weights {
+                if weight.is_finite() {
+                    *weight /= mean;
+                }
+            }
+        }
+    }
+    Ok(weights)
+}
+
 fn write_window_frame_parquet(
     path: &Path,
     rows: &[FactorRow],
     indices: &[usize],
     feature_names: &[String],
+    resolved: &ResolvedRuntimeConfig,
+    training_context: &TrainingContext,
 ) -> Result<(), String> {
+    let prepared_labels =
+        build_prepared_window_label_columns(rows, indices, resolved, training_context)?;
     let mut fields = vec![
         Field::new(
             "datetime",
@@ -1041,7 +1750,10 @@ fn write_window_frame_parquet(
         ),
         Field::new("instrument", DataType::Utf8, false),
         Field::new("label", DataType::Float64, true),
+        Field::new("raw_label", DataType::Float64, true),
         Field::new("backtest_label", DataType::Float64, true),
+        Field::new("sample_weight", DataType::Float64, true),
+        Field::new("opportunity_label", DataType::Float64, true),
     ];
     for feature in feature_names {
         fields.push(Field::new(feature, DataType::Float64, true));
@@ -1060,18 +1772,16 @@ fn write_window_frame_parquet(
                 .map(|idx| rows[*idx].symbol.clone())
                 .collect::<Vec<_>>(),
         )),
-        Arc::new(Float64Array::from(
-            indices
-                .iter()
-                .map(|idx| rows[*idx].label)
-                .collect::<Vec<_>>(),
-        )),
+        Arc::new(Float64Array::from(prepared_labels.label)),
+        Arc::new(Float64Array::from(prepared_labels.raw_label)),
         Arc::new(Float64Array::from(
             indices
                 .iter()
                 .map(|idx| rows[*idx].backtest_label)
                 .collect::<Vec<_>>(),
         )),
+        Arc::new(Float64Array::from(prepared_labels.sample_weight)),
+        Arc::new(Float64Array::from(prepared_labels.opportunity_label)),
     ];
     for feature_index in 0..feature_names.len() {
         arrays.push(Arc::new(Float64Array::from(
@@ -1226,6 +1936,12 @@ fn write_metadata(
         "cross_sectional_rank_exclude_columns": sorted_string_set(&resolved.cross_sectional_rank_exclude_columns),
         "universe": resolved.universe_name.clone().unwrap_or_else(|| "all".to_owned()),
         "universe_dir": resolved.universe_dir.display().to_string(),
+        "train_label_transform_mode": resolved.train_label_transform.mode,
+        "train_label_space": if resolved.train_label_transform.mode.starts_with("buyability") { "binary_target" } else { "return_target" },
+        "opportunity_label_mode": resolved.opportunity.mode,
+        "opportunity_label_threshold": resolved.opportunity.threshold,
+        "opportunity_label_neutral_band": resolved.opportunity.neutral_band,
+        "train_sample_weight_mode": resolved.sample_weight.mode,
         "reference_baselines_enabled": false,
     });
     fs::write(
@@ -1410,6 +2126,12 @@ fn parse_date_ns(raw: &str) -> Result<i64, String> {
             .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
             .ok_or_else(|| format!("invalid date timestamp: {raw}"));
     }
+    if let Ok(date) = NaiveDate::parse_from_str(raw, "%Y%m%d") {
+        return date
+            .and_hms_opt(0, 0, 0)
+            .and_then(|datetime| datetime.and_utc().timestamp_nanos_opt())
+            .ok_or_else(|| format!("invalid date timestamp: {raw}"));
+    }
     DateTime::parse_from_rfc3339(raw)
         .ok()
         .and_then(|datetime| datetime.with_timezone(&Utc).timestamp_nanos_opt())
@@ -1520,6 +2242,59 @@ fn sanitize_label(value: f64) -> f64 {
         f64::NAN
     } else {
         value
+    }
+}
+
+fn robust_scale(values: &[f64], min_scale: f64) -> f64 {
+    let finite = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect::<Vec<_>>();
+    if finite.is_empty() {
+        return min_scale;
+    }
+    let median_value = median(&finite);
+    let deviations = finite
+        .iter()
+        .map(|value| (value - median_value).abs())
+        .collect::<Vec<_>>();
+    let mad = median(&deviations) * 1.4826;
+    if mad.is_finite() && mad >= min_scale {
+        return mad;
+    }
+    let mean = finite.iter().sum::<f64>() / finite.len() as f64;
+    let variance = finite
+        .iter()
+        .map(|value| {
+            let delta = value - mean;
+            delta * delta
+        })
+        .sum::<f64>()
+        / finite.len() as f64;
+    let std = variance.sqrt();
+    if std.is_finite() && std >= min_scale {
+        return std;
+    }
+    let abs_values = finite.iter().map(|value| value.abs()).collect::<Vec<_>>();
+    let abs_median = median(&abs_values);
+    if abs_median.is_finite() && abs_median >= min_scale {
+        return abs_median;
+    }
+    min_scale
+}
+
+fn median(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return f64::NAN;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 0 {
+        0.5 * (sorted[mid - 1] + sorted[mid])
+    } else {
+        sorted[mid]
     }
 }
 
@@ -1787,6 +2562,96 @@ fn resolve_lgbm_config(cfg: &YamlValue) -> Result<JsonValue, String> {
     Ok(json)
 }
 
+fn resolve_train_label_transform_config(
+    cfg: &YamlValue,
+) -> Result<TrainLabelTransformConfig, String> {
+    let mode = yaml_path_string(cfg, &["label", "train_transform", "mode"])
+        .unwrap_or_else(|| "raw".to_owned())
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        mode.as_str(),
+        "raw"
+            | "profit_tanh"
+            | "profit_bucket"
+            | "cross_section_rank"
+            | "buyability_binary"
+            | "buyability_margin_binary"
+    ) {
+        return Err(format!("unsupported training label transform mode: {mode}"));
+    }
+    let neutral_band =
+        yaml_path_f64(cfg, &["label", "train_transform", "neutral_band"]).unwrap_or(0.0);
+    if neutral_band < 0.0 {
+        return Err("label.train_transform.neutral_band must be >= 0".to_owned());
+    }
+    let default_tail_band = if neutral_band > 0.0 {
+        neutral_band * 3.0
+    } else {
+        0.03
+    };
+    let tail_band =
+        yaml_path_f64(cfg, &["label", "train_transform", "tail_band"]).unwrap_or(default_tail_band);
+    if tail_band < neutral_band {
+        return Err(
+            "label.train_transform.tail_band must be >= label.train_transform.neutral_band"
+                .to_owned(),
+        );
+    }
+    let scale_multiplier =
+        yaml_path_f64(cfg, &["label", "train_transform", "scale_multiplier"]).unwrap_or(1.0);
+    if scale_multiplier <= 0.0 {
+        return Err("label.train_transform.scale_multiplier must be > 0".to_owned());
+    }
+    let min_scale = yaml_path_f64(cfg, &["label", "train_transform", "min_scale"]).unwrap_or(1e-4);
+    if min_scale <= 0.0 {
+        return Err("label.train_transform.min_scale must be > 0".to_owned());
+    }
+    Ok(TrainLabelTransformConfig {
+        mode,
+        neutral_band,
+        tail_band,
+        scale_multiplier,
+        min_scale,
+    })
+}
+
+fn resolve_opportunity_label_config(cfg: &YamlValue) -> Result<OpportunityLabelConfig, String> {
+    let mode = yaml_path_string(cfg, &["label", "opportunity", "mode"])
+        .unwrap_or_else(|| "positive".to_owned())
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        mode.as_str(),
+        "positive" | "threshold" | "industry_excess" | "benchmark_excess"
+    ) {
+        return Err(format!("unsupported opportunity mode: {mode}"));
+    }
+    let threshold = yaml_path_f64(cfg, &["label", "opportunity", "threshold"]).unwrap_or(0.0);
+    let neutral_band = yaml_path_f64(cfg, &["label", "opportunity", "neutral_band"]).unwrap_or(0.0);
+    if neutral_band < 0.0 {
+        return Err("label.opportunity.neutral_band must be >= 0".to_owned());
+    }
+    Ok(OpportunityLabelConfig {
+        mode,
+        threshold,
+        neutral_band,
+    })
+}
+
+fn resolve_sample_weight_config(lgbm_config: &JsonValue) -> SampleWeightConfig {
+    SampleWeightConfig {
+        mode: json_key_string(lgbm_config, "sample_weight_mode")
+            .unwrap_or_else(|| "none".to_owned())
+            .trim()
+            .to_ascii_lowercase(),
+        power: json_key_f64(lgbm_config, "sample_weight_power").unwrap_or(1.0),
+        scale: json_key_f64(lgbm_config, "sample_weight_scale"),
+        min: json_key_f64(lgbm_config, "sample_weight_min").unwrap_or(0.0),
+        date_normalize: json_key_bool(lgbm_config, "sample_weight_date_normalize").unwrap_or(false),
+    }
+}
+
 fn read_yaml_file(path: impl AsRef<Path>) -> Result<YamlValue, String> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path)
@@ -1874,8 +2739,35 @@ fn yaml_path_usize(value: &YamlValue, path: &[&str]) -> Option<usize> {
         .and_then(|value| usize::try_from(value).ok())
 }
 
+fn yaml_path_f64(value: &YamlValue, path: &[&str]) -> Option<f64> {
+    yaml_path(value, path).and_then(|value| {
+        value
+            .as_f64()
+            .or_else(|| value.as_i64().map(|inner| inner as f64))
+    })
+}
+
 fn yaml_path_bool(value: &YamlValue, path: &[&str]) -> Option<bool> {
     yaml_path(value, path).and_then(YamlValue::as_bool)
+}
+
+fn json_key_string(value: &JsonValue, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+}
+
+fn json_key_f64(value: &JsonValue, key: &str) -> Option<f64> {
+    value.get(key).and_then(|item| {
+        item.as_f64()
+            .or_else(|| item.as_i64().map(|inner| inner as f64))
+            .or_else(|| item.as_u64().map(|inner| inner as f64))
+    })
+}
+
+fn json_key_bool(value: &JsonValue, key: &str) -> Option<bool> {
+    value.get(key).and_then(JsonValue::as_bool)
 }
 
 fn required_yaml_usize(value: &YamlValue, path: &[&str]) -> Result<usize, String> {
@@ -2081,6 +2973,113 @@ mod tests {
         );
         assert_eq!(rows[0].features, vec![0.5, 10.0]);
         assert_eq!(rows[1].features, vec![1.0, 20.0]);
+    }
+
+    #[test]
+    fn transforms_training_labels_in_rust_window_format() {
+        let rows = vec![
+            FactorRow {
+                date_ns: 0,
+                symbol: "a".into(),
+                label: 0.10,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 0,
+                symbol: "b".into(),
+                label: 0.00,
+                backtest_label: 0.0,
+                features: vec![2.0],
+            },
+            FactorRow {
+                date_ns: 0,
+                symbol: "c".into(),
+                label: -0.10,
+                backtest_label: 0.0,
+                features: vec![3.0],
+            },
+        ];
+        let indices = vec![0, 1, 2];
+        let effective = vec![true, true, true];
+        let transformed = transform_window_labels(
+            &[0.10, 0.00, -0.10],
+            &indices,
+            &rows,
+            &effective,
+            &[f64::NAN; 3],
+            &TrainLabelTransformConfig {
+                mode: "cross_section_rank".to_owned(),
+                neutral_band: 0.0,
+                tail_band: 0.03,
+                scale_multiplier: 1.0,
+                min_scale: 1e-4,
+            },
+            &OpportunityLabelConfig {
+                mode: "positive".to_owned(),
+                threshold: 0.0,
+                neutral_band: 0.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(transformed, vec![0.5, 0.0, -0.5]);
+    }
+
+    #[test]
+    fn sample_weights_match_date_normalized_opportunity_distance_semantics() {
+        let rows = vec![
+            FactorRow {
+                date_ns: 1,
+                symbol: "a".into(),
+                label: 0.03,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 1,
+                symbol: "b".into(),
+                label: -0.01,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 2,
+                symbol: "c".into(),
+                label: 0.02,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+            FactorRow {
+                date_ns: 2,
+                symbol: "d".into(),
+                label: -0.04,
+                backtest_label: 0.0,
+                features: vec![1.0],
+            },
+        ];
+        let weights = build_sample_weights(
+            &[0.03, -0.01, 0.02, -0.04],
+            &[0, 1, 2, 3],
+            &rows,
+            &[true, true, true, true],
+            &[0.03, -0.01, 0.02, -0.04],
+            &SampleWeightConfig {
+                mode: "opportunity_distance".to_owned(),
+                power: 1.0,
+                scale: Some(0.01),
+                min: 0.0,
+                date_normalize: true,
+            },
+            &OpportunityLabelConfig {
+                mode: "positive".to_owned(),
+                threshold: 0.0,
+                neutral_band: 0.005,
+            },
+        )
+        .unwrap();
+        assert!(weights.iter().all(|value| value.is_finite()));
+        assert!(((weights[0] + weights[1]) / 2.0 - 1.0).abs() < 1e-12);
+        assert!(((weights[2] + weights[3]) / 2.0 - 1.0).abs() < 1e-12);
     }
 
     #[test]

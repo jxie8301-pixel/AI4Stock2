@@ -97,9 +97,9 @@ def run_rolling_pipeline_from_args(args: argparse.Namespace, parser: argparse.Ar
         run_or_print([backtest_cmd], dry_run=bool(args.dry_run))
         return
 
-    train_cmd = build_train_command(args, output_dir=output_dir)
+    config_snapshot = write_resolved_config_snapshot(args, parser, output_dir)
+    train_cmd = build_train_command(args, output_dir=output_dir, config_snapshot=config_snapshot)
     bundle_dir = output_dir / PREDICTION_ARTIFACT_DIRNAME
-    config_snapshot = output_dir / "config_snapshot.yaml"
     backtest_cmd = build_backtest_command(
         args,
         bundle_dir=bundle_dir,
@@ -109,14 +109,22 @@ def run_rolling_pipeline_from_args(args: argparse.Namespace, parser: argparse.Ar
     run_or_print([train_cmd, backtest_cmd], dry_run=bool(args.dry_run))
 
 
-def build_train_command(args: argparse.Namespace, *, output_dir: Path) -> list[str]:
+def build_train_command(
+    args: argparse.Namespace,
+    *,
+    output_dir: Path,
+    config_snapshot: Path | None = None,
+) -> list[str]:
     command = rust_binary_command("ai4stock-train", env_var="AI4STOCK_TRAIN_BIN")
     command.extend(["make-bundle-lgbm", "--output-dir", str(output_dir)])
-    append_common_training_args(command, args)
+    if config_snapshot is not None:
+        command.extend(["--config", str(config_snapshot), "--config-is-snapshot"])
+    else:
+        append_common_training_args(command, args)
+        append_flag(command, "--config-is-snapshot", bool(getattr(args, "config_is_snapshot", False)))
     append_option(command, "--factor-store", getattr(args, "factor_store", None))
     append_option(command, "--test-start", getattr(args, "test_start", None))
     append_option(command, "--test-end", getattr(args, "test_end", None))
-    append_flag(command, "--config-is-snapshot", bool(getattr(args, "config_is_snapshot", False)))
     append_flag(command, "--save-models", bool(getattr(args, "save_models", False)))
     append_flag(command, "--load-models", bool(getattr(args, "load_models", False)))
     return command

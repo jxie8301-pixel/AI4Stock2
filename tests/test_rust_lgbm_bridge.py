@@ -5,7 +5,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
-from src.rust_lgbm_bridge import _finite_feature_mask, train_lgbm_window_from_prepared_parquet
+from src.rust_lgbm_bridge import _finite_feature_mask, _json_safe, train_lgbm_window_from_prepared_parquet
 
 
 def test_finite_feature_mask_allows_nan_and_rejects_inf():
@@ -33,8 +33,11 @@ def test_train_window_helper_only_calls_native_lgbm_on_prepared_frames(tmp_path)
         {
             "datetime": pd.to_datetime(["2024-01-02", "2024-01-02"]),
             "instrument": ["000001.SZ", "000002.SZ"],
-            "label": [0.01, 0.03],
+            "label": [-0.5, 0.5],
+            "raw_label": [0.01, 0.03],
             "backtest_label": [0.001, 0.002],
+            "sample_weight": [np.nan, np.nan],
+            "opportunity_label": [1.0, 1.0],
             "f1": [1.0, 2.0],
             "f2": [3.0, 4.0],
         }
@@ -100,7 +103,16 @@ def test_train_window_helper_only_calls_native_lgbm_on_prepared_frames(tmp_path)
             feature_importance_path=str(importance_path),
             training_history_path=str(history_path),
             lgbm_config_json=json.dumps({"loss": "huber", "validation_topk": 1}),
-            window_metadata_json=json.dumps({"window_start": "2024-01-03"}),
+            window_metadata_json=json.dumps(
+                {
+                    "window_start": "2024-01-03",
+                    "train_label_transform_mode": "cross_section_rank",
+                    "opportunity_label_mode": "positive",
+                    "opportunity_label_threshold": 0.0,
+                    "opportunity_label_neutral_band": 0.0,
+                    "train_sample_weight_mode": "none",
+                }
+            ),
             training_config_json=json.dumps(
                 {
                     "label": {"train_transform": {"mode": "cross_section_rank"}},
@@ -118,3 +130,11 @@ def test_train_window_helper_only_calls_native_lgbm_on_prepared_frames(tmp_path)
     assert summary["train_label_transform_mode"] == "cross_section_rank"
     assert summary["test_rows"] == 2
     assert pd.read_parquet(prediction_path).shape[0] == 2
+
+
+def test_json_safe_replaces_nan_with_none():
+    payload = {"a": float("nan"), "b": [1.0, np.float64("nan")], "c": {"d": float("inf")}}
+
+    out = _json_safe(payload)
+
+    assert out == {"a": None, "b": [1.0, None], "c": {"d": None}}

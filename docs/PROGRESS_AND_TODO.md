@@ -307,8 +307,10 @@ Current status:
 
 Audit status on 2026-04-30:
 
-- The active performance-critical LightGBM path is now `run_native_rolling.py` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet` -> `ai4stock-backtest run-bundle`.
+- The active performance-critical LightGBM path is now `run_native_rolling.py` -> resolved `config_snapshot.yaml` -> `ai4stock-train make-bundle-lgbm` -> `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet` -> `ai4stock-backtest run-bundle`.
   `run_native_rolling.py` is a compatibility wrapper and should not regain factor-store loading, rolling-window construction, or backtest evaluation logic.
+- The active raw / industry-excess / benchmark-excess single-factor diagnostics path is now `run_single_factor_diagnostics.py` / `run_single_factor_diagnostics_batch.py` -> `ai4stock-diagnostics single-factor`.
+  The Python diagnostics path is retained as a reference/fallback path, not as the default runtime for supported label spaces.
 - The largest remaining training-time costs are repeated pandas DataFrame materialization/slicing in LightGBM windows, unavoidable Python callback work for custom validation metrics, and LSTM loader/evaluation overhead.
 - Non-training runtime can still be dominated by factor-baseline construction, factor-store scans, and backtest/report artifact generation, so benchmark output must separate these phases.
 - LSTM sequence context is now prepared once per rolling run, but each rolling window still rebuilds `Dataset` / `DataLoader` wrappers and computes validation IC through pandas.
@@ -395,12 +397,20 @@ Completed optimization slices:
   - benchmark checkpoints from the migration remain: `legacy158` `0.185866s -> 0.079414s`, `lgbm_purified` `0.013656s -> 0.010247s`, `temporal` `0.040649s -> 0.032321s`, `technical` `0.127573s -> 0.011126s`, `TS_` `0.112160s -> 0.035429s`
 - [x] Move LightGBM bundle runtime ownership to Rust while keeping Python only for training:
   - `ai4stock-train make-bundle-lgbm` is a standalone Rust binary entrypoint that now resolves config/profile state, reads Parquet factor-store buckets, applies universe membership, materializes selected feature aliases, builds rolling windows, writes prepared window Parquet, and assembles final prediction-bundle artifacts
-  - Python bridge scope is narrowed to `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet`, which receives prepared train/valid/test frames, applies training-label/sample-weight semantics, and calls `src.models.pure_lightgbm.NativeLGBM`
+  - Python bridge scope is narrowed to `src.rust_lgbm_bridge.train_lgbm_window_from_prepared_parquet`, which receives prepared train/valid/test frames and calls `src.models.pure_lightgbm.NativeLGBM`
   - direct `cargo` uses `.cargo/config.toml` to point PyO3 at `.pixi/envs/default/bin/python`; `pixi run` is not required for Cargo itself, only for Python-only commands
   - the old hand-written rank-IC trainer and whole-pipeline Python bridge path are intentionally removed; non-ML factor baselines remain only as optional reference artifacts
   - bundle metadata records the training signal label, daily realized backtest label, universe, cross-sectional-rank policy, and rank-excluded columns; Rust `run-bundle` rejects multi-day backtest labels to prevent overlapping-horizon returns from being compounded as daily portfolio returns
   - validation smoke: explicit 3-feature CSi300 one-day bundle produced `284` aligned prediction/label rows with `core_axes_match=true`; full `core_v4_techlite` profile smoke produced `46` features and `core_axes_match=true`
-  - remaining production check: if future profiles use `industry_excess` or `benchmark_excess` training-label modes, prepared windows need the corresponding point-in-time group / benchmark context instead of relying on implicit Python runtime data
+  - Rust now prepares training-label transforms, opportunity labels, sample weights, and point-in-time industry / benchmark context for relative label modes before calling Python LightGBM
+  - smoke after the migration:
+    - `raw` 3-feature slice, `2024-01-02` to `2024-01-31`: `3` windows, `6534` predictions
+    - `buyability_binary + benchmark_excess` 3-feature slice, same dates: `3` windows, `6534` predictions
+- [x] Migrate single-factor diagnostics to the standalone Rust binary:
+  - `ai4stock-diagnostics single-factor` now covers `raw_return`, `industry_excess`, and `benchmark_excess`
+  - `benchmark_excess` supports the existing `cross_section_mean` benchmark and file benchmarks with `.csv`, `.txt`, `.parquet`, or `.pq` input
+  - Python single/batch diagnostic entrypoints now auto-delegate all supported label spaces to Rust while still writing selected-feature JSON, metadata, and resolved config snapshots
+  - benchmark-excess smoke on `KMID,KLEN`, `2024-01-02` to `2024-01-31`, CSI300 file benchmark, horizon `10`: `109689` rows in `46.48s` under the debug binary
 
 Feature build v2 direction:
 
@@ -653,6 +663,9 @@ Priority fixes:
 - [ ] Evaluate whether the newly added Tushare event-side features (`fina_indicator`, `dividend`, `forecast`, `express`) actually improve the rolling baseline before expanding to more statement tables
 - [x] Add a rolling single-factor diagnostics report: IC, RankIC, coverage, monotonicity, stability
 - [x] Extend single-factor diagnostics with yearly slices, industry-neutral mode, and detailed daily / monthly artifacts
+- [x] Add a standalone Rust single-factor diagnostics engine for raw-return / industry-excess diagnostics:
+  - `ai4stock-diagnostics single-factor` scans projected Parquet factor-store buckets directly, applies universe membership, optional point-in-time industry-excess labels, optional date x industry neutralization, segmented summaries, and detailed CSV artifacts
+  - Python single/batch diagnostics entrypoints are compatibility wrappers using Rust by default for supported label spaces and falling back to Python for benchmark-excess diagnostics
 - [~] Add automated prefiltering by minimum coverage plus minimum rolling IC / RankIC threshold
   Current state: standalone diagnostics-based prefilter tooling now exists; it still needs promotion into a repeatable experiment workflow and selection policy.
 - [~] Add redundancy pruning on the selected feature set using correlation clustering before model training

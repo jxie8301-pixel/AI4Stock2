@@ -9,12 +9,17 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+import subprocess
 from time import perf_counter
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from run_single_factor_diagnostics import (
+    _build_rust_single_factor_command,
+    _rust_supported,
+)
 from src.factor_store import load_factor_frame, load_factor_store_metadata
 from src.feature_profiles import get_native_factor_store_dir
 from src.feature_selection import resolve_selected_feature_columns
@@ -120,6 +125,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Demean each factor within date x industry before diagnostics when industry groups are available.",
     )
+    parser.add_argument(
+        "--engine",
+        choices=["auto", "rust", "python"],
+        default="auto",
+        help="Diagnostics engine. auto uses Rust when all cases are supported.",
+    )
+    parser.add_argument(
+        "--feature-chunk-size",
+        type=int,
+        default=64,
+        help="Rust engine feature chunk size per factor-store scan. Default: 64.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=65536,
+        help="Rust Arrow record-batch size. Default: 65536.",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print delegated Rust commands without running them.")
     return parser
 
 
@@ -297,6 +321,178 @@ def _merge_artifacts_into_manifest(output_dir: str | Path, artifacts: dict[str, 
         json.dump(manifest, fh, indent=2, ensure_ascii=False, default=str)
 
 
+def _case_namespace(args: argparse.Namespace, case: DiagnosticsBatchCase) -> argparse.Namespace:
+    payload = vars(args).copy()
+    payload["diagnostic_label_space"] = case.diagnostic_label_space
+    payload["diagnostic_threshold"] = case.diagnostic_threshold
+    return argparse.Namespace(**payload)
+
+
+def _read_manifest_metadata(output_dir: Path) -> dict[str, Any]:
+    manifest_path = output_dir / "manifest.json"
+    if not manifest_path.exists():
+        return {}
+    with open(manifest_path, encoding="utf-8") as fh:
+        payload = json.load(fh)
+    metadata = payload.get("metadata", {})
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def _run_rust_batch(
+    *,
+    cfg: dict[str, Any],
+    args: argparse.Namespace,
+    cases: list[DiagnosticsBatchCase],
+    case_feature_map: dict[str, list[str]],
+    case_incremental_feature_map: dict[str, list[str]],
+    factor_store_dir: Path,
+    label_column: str,
+    signal_horizon: int,
+    date_start: str,
+    date_end: str,
+    segments: list[tuple[str, str, str]],
+    base_output_dir: Path,
+    summary_path: Path,
+    manifest_path: Path,
+    overall_started: float,
+) -> None:
+    print(
+        f"[*] Single-factor diagnostics batch: engine=rust, cases={len(cases)}, "
+        f"date_start={date_start}, date_end={date_end}"
+    )
+    for idx, case in enumerate(cases, start=1):
+        case_started = perf_counter()
+        feature_names = case_feature_map[case.name]
+        incremental_feature_names = case_incremental_feature_map[case.name]
+        output_dir = _resolve_case_output_dir(base_output_dir, case)
+        case_cfg_snapshot = deepcopy(cfg)
+        case_cfg_snapshot.setdefault("features", {})
+        case_cfg_snapshot["features"]["profile"] = case.feature_profile
+        case_args = _case_namespace(args, case)
+        metadata = {
+            "data_source": cfg.get("data", {}).get("source", ""),
+            "universe": cfg.get("universe", ""),
+            "feature_profile": case.feature_profile,
+            "baseline_feature_profile": case.baseline_feature_profile or "",
+            "factor_store_dir": factor_store_dir,
+            "signal_horizon": signal_horizon,
+            "period": args.period,
+            "date_start": date_start,
+            "date_end": date_end,
+            "diagnostic_label_space": case.diagnostic_label_space,
+            "diagnostic_threshold": float(case.diagnostic_threshold),
+            "industry_neutral": bool(getattr(args, "industry_neutral", False)),
+            "neutralized_feature_count": len(feature_names) if bool(getattr(args, "industry_neutral", False)) else 0,
+            "feature_count": len(feature_names),
+            "incremental_feature_count": len(incremental_feature_names),
+            "incremental_features": incremental_feature_names,
+            "quantile_bins": max(int(args.quantile_bins), 2),
+            "detail_artifacts": not bool(getattr(args, "no_detail_artifacts", False)),
+            "segment_scheme": args.segment_scheme,
+            "segment_count": len(segments),
+            "engine": "rust",
+        }
+        command = _build_rust_single_factor_command(
+            cfg=case_cfg_snapshot,
+            args=case_args,
+            feature_names=feature_names,
+            label_column=label_column,
+            factor_store_dir=factor_store_dir,
+            date_start=date_start,
+            date_end=date_end,
+            output_dir=output_dir,
+            metadata=metadata,
+            segments=segments,
+        )
+        rendered = " ".join(command)
+        if bool(getattr(args, "dry_run", False)):
+            print(f"[dry-run] {rendered}")
+            continue
+        print(f"[*] [{idx}/{len(cases)}] Rust diagnostics: {case.name}", flush=True)
+        completed = subprocess.run(command, check=False)
+        if completed.returncode != 0:
+            raise SystemExit(int(completed.returncode))
+
+        summary = pd.read_csv(output_dir / "single_factor_summary.csv")
+        incremental_summary = _filter_summary_for_features(summary, incremental_feature_names)
+        segment_comparison_path = output_dir / "single_factor_segment_comparison.csv"
+        segment_comparison = pd.read_csv(segment_comparison_path) if segment_comparison_path.exists() else None
+        incremental_artifacts = _write_single_factor_subset_artifacts(
+            incremental_summary,
+            output_dir=output_dir,
+            prefix="incremental",
+            top_n=max(int(args.top_n), 1),
+            segment_comparison=segment_comparison,
+            feature_names=incremental_feature_names,
+        )
+        _merge_artifacts_into_manifest(output_dir, incremental_artifacts)
+
+        top = summary.iloc[0] if not summary.empty else pd.Series(dtype=object)
+        incremental_top = incremental_summary.iloc[0] if not incremental_summary.empty else pd.Series(dtype=object)
+        manifest_metadata = _read_manifest_metadata(output_dir)
+        row_count = manifest_metadata.get("row_count", "")
+        artifacts = {
+            "readme_path": str(output_dir / "README.md"),
+            "summary_csv": str(output_dir / "single_factor_summary.csv"),
+            "segment_comparison_csv": str(segment_comparison_path) if segment_comparison_path.exists() else "",
+            **incremental_artifacts,
+        }
+        _append_tsv_row(
+            summary_path,
+            [
+                case.name,
+                case.feature_profile,
+                case.baseline_feature_profile or "",
+                case.diagnostic_label_space,
+                case.diagnostic_threshold,
+                len(feature_names),
+                len(incremental_feature_names),
+                row_count,
+                top.get("feature", ""),
+                top.get("rank_ic_mean", ""),
+                top.get("rank_ic_abs_mean", ""),
+                top.get("rank_ic_ir", ""),
+                top.get("monotonicity_mean", ""),
+                top.get("monthly_rank_ic_directional_hit_rate", ""),
+                incremental_top.get("feature", ""),
+                incremental_top.get("rank_ic_mean", ""),
+                incremental_top.get("rank_ic_abs_mean", ""),
+                incremental_top.get("rank_ic_ir", ""),
+                incremental_top.get("monotonicity_mean", ""),
+                incremental_top.get("monthly_rank_ic_directional_hit_rate", ""),
+                _count_abs_metric_ge(incremental_summary, "rank_ic_mean", 0.03),
+                _count_abs_metric_ge(incremental_summary, "rank_ic_mean", 0.05),
+                str(output_dir),
+            ],
+        )
+        _append_tsv_row(
+            manifest_path,
+            [
+                case.name,
+                case.feature_profile,
+                case.baseline_feature_profile or "",
+                case.diagnostic_label_space,
+                case.diagnostic_threshold,
+                str(output_dir),
+                artifacts.get("readme_path", ""),
+                artifacts.get("summary_csv", ""),
+                artifacts.get("incremental_summary_csv", ""),
+                artifacts.get("segment_comparison_csv", ""),
+                artifacts.get("incremental_segment_comparison_csv", ""),
+            ],
+        )
+        print(
+            f"[{idx}/{len(cases)}] {case.name}: rows={row_count}, "
+            f"features={len(feature_names)}, incremental_features={len(incremental_feature_names)}, "
+            f"elapsed={perf_counter() - case_started:.2f}s"
+        )
+
+    print(f"[+] Batch outputs: {base_output_dir}")
+    print(f"    summary: {summary_path}")
+    print(f"    manifest: {manifest_path}")
+    print(f"    total elapsed: {perf_counter() - overall_started:.2f}s")
+
+
 def main() -> None:
     overall_started = perf_counter()
     parser = build_parser()
@@ -384,6 +580,31 @@ def main() -> None:
             if feature_name not in seen_union:
                 union_features.append(feature_name)
                 seen_union.add(feature_name)
+
+    unsupported_rust_cases = [case.name for case in cases if not _rust_supported(_case_namespace(args, case))]
+    engine = str(getattr(args, "engine", "auto") or "auto")
+    if engine == "rust" and unsupported_rust_cases:
+        raise ValueError(f"Rust diagnostics does not support these cases: {unsupported_rust_cases}")
+    if engine == "rust" or (engine == "auto" and not unsupported_rust_cases):
+        segments = resolve_segments(cfg, args, main_start=date_start, main_end=date_end)
+        _run_rust_batch(
+            cfg=cfg,
+            args=args,
+            cases=cases,
+            case_feature_map=case_feature_map,
+            case_incremental_feature_map=case_incremental_feature_map,
+            factor_store_dir=Path(factor_store_dir),
+            label_column=label_column,
+            signal_horizon=signal_horizon,
+            date_start=date_start,
+            date_end=date_end,
+            segments=segments,
+            base_output_dir=base_output_dir,
+            summary_path=summary_path,
+            manifest_path=manifest_path,
+            overall_started=overall_started,
+        )
+        return
 
     print(
         f"[*] Single-factor diagnostics batch: cases={len(cases)}, "

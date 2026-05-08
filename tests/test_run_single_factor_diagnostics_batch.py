@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from run_single_factor_diagnostics import _build_rust_single_factor_command
 from run_single_factor_diagnostics_batch import (
     _filter_summary_for_features,
     _resolve_incremental_feature_names,
@@ -81,3 +82,95 @@ def test_write_single_factor_subset_artifacts_exports_incremental_csvs() -> None
         assert pd.read_csv(summary_path)["feature"].tolist() == ["layer_strong", "layer_weak"]
         assert pd.read_csv(top_abs_path)["feature"].tolist() == ["layer_strong"]
         assert pd.read_csv(segment_path)["feature"].tolist() == ["layer_strong"]
+
+
+def test_single_factor_rust_command_preserves_output_contract(tmp_path: Path) -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "quantile_bins": 5,
+            "top_n": 10,
+            "diagnostic_label_space": "raw_return",
+            "diagnostic_threshold": 0.0,
+            "feature_chunk_size": 16,
+            "batch_size": 1024,
+            "no_detail_artifacts": True,
+            "industry_neutral": False,
+        },
+    )()
+
+    command = _build_rust_single_factor_command(
+        cfg={
+            "universe": "all",
+            "native": {"universe_dir": "data/universes"},
+            "label": {"signal_horizon": 10},
+        },
+        args=args,
+        feature_names=["KMID", "KLEN"],
+        label_column="label_10d",
+        factor_store_dir=Path("data/factor_store/tushare_full_factor_space"),
+        date_start="2024-01-02",
+        date_end="2024-01-31",
+        output_dir=tmp_path,
+        metadata={"feature_profile": "unit"},
+        segments=[("jan", "2024-01-02", "2024-01-31")],
+    )
+
+    rendered = " ".join(command)
+    assert "ai4stock-diagnostics" in rendered
+    assert "single-factor" in command
+    assert "--features-json" in command
+    assert "--config-snapshot" in command
+    assert "--signal-horizon" in command
+    assert "--no-detail-artifacts" in command
+    assert (tmp_path / "_rust_selected_features.json").exists()
+    assert (tmp_path / "config_snapshot.yaml").exists()
+
+
+def test_single_factor_rust_command_passes_benchmark_excess_options(tmp_path: Path) -> None:
+    args = type(
+        "Args",
+        (),
+        {
+            "quantile_bins": 5,
+            "top_n": 10,
+            "diagnostic_label_space": "benchmark_excess",
+            "diagnostic_threshold": 0.001,
+            "feature_chunk_size": 16,
+            "batch_size": 1024,
+            "no_detail_artifacts": True,
+            "industry_neutral": False,
+        },
+    )()
+
+    command = _build_rust_single_factor_command(
+        cfg={
+            "universe": "all",
+            "native": {"universe_dir": "data/universes"},
+            "label": {"signal_horizon": 20},
+            "backtest": {
+                "benchmark": {
+                    "mode": "file",
+                    "path": "data/benchmarks/tushare/csi300.parquet",
+                    "date_column": "date",
+                    "value_column": "close",
+                    "value_type": "close",
+                }
+            },
+        },
+        args=args,
+        feature_names=["KMID"],
+        label_column="label_20d",
+        factor_store_dir=Path("data/factor_store/tushare_full_factor_space"),
+        date_start="2024-01-02",
+        date_end="2024-01-31",
+        output_dir=tmp_path,
+        metadata={"feature_profile": "unit"},
+        segments=[],
+    )
+
+    assert command[command.index("--signal-horizon") + 1] == "20"
+    assert command[command.index("--benchmark-mode") + 1] == "file"
+    assert command[command.index("--benchmark-path") + 1] == "data/benchmarks/tushare/csi300.parquet"
+    assert command[command.index("--benchmark-value-type") + 1] == "close"

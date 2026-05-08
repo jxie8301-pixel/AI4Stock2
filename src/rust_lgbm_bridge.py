@@ -2,12 +2,13 @@
 
 Rust owns runtime/profile resolution, factor-store reads, feature transforms,
 rolling-window slicing, and prediction-bundle assembly.  Python remains here
-only to apply training-label semantics and call the existing NativeLGBM wrapper.
+only to call the existing NativeLGBM wrapper.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import pickle
 from pathlib import Path
 from typing import Any
@@ -35,17 +36,10 @@ def train_lgbm_window_from_prepared_parquet(
     """Train/predict one pre-materialized LightGBM window.
 
     Rust owns factor-store reads, rolling-window slicing, label/backtest-label
-    separation, feature transforms, and final artifact assembly.  Python only
-    receives prepared window frames and calls the existing NativeLGBM wrapper.
+    separation, feature transforms, training-label semantics, and final artifact
+    assembly. Python only receives prepared window frames and calls LightGBM.
     """
 
-    from src.label_utils import (
-        build_opportunity_target_series,
-        compute_opportunity_sample_weights,
-        resolve_opportunity_label_cfg,
-        resolve_train_label_transform_cfg,
-        transform_training_label_series,
-    )
     from src.models.pure_lightgbm import NativeLGBM
 
     lgbm_config = json.loads(lgbm_config_json)
@@ -74,10 +68,12 @@ def train_lgbm_window_from_prepared_parquet(
     valid_dates = pd.to_datetime(valid_use["datetime"]).reset_index(drop=True)
     train_symbols = train_use["instrument"].astype(str).reset_index(drop=True)
     valid_symbols = valid_use["instrument"].astype(str).reset_index(drop=True)
-    raw_y_train_series = _build_label_series(train_use["label"], train_dates, train_symbols)
-    raw_y_valid_series = _build_label_series(valid_use["label"], valid_dates, valid_symbols)
-    y_train_series = transform_training_label_series(raw_y_train_series, train_dates, cfg)
-    y_valid_series = transform_training_label_series(raw_y_valid_series, valid_dates, cfg)
+    raw_train_column = "raw_label" if "raw_label" in train_use.columns else "label"
+    raw_valid_column = "raw_label" if "raw_label" in valid_use.columns else "label"
+    raw_y_train_series = _build_label_series(train_use[raw_train_column], train_dates, train_symbols)
+    raw_y_valid_series = _build_label_series(valid_use[raw_valid_column], valid_dates, valid_symbols)
+    y_train_series = _build_label_series(train_use["label"], train_dates, train_symbols)
+    y_valid_series = _build_label_series(valid_use["label"], valid_dates, valid_symbols)
 
     train_label_keep = np.isfinite(y_train_series.to_numpy(dtype=np.float64, copy=False))
     valid_label_keep = np.isfinite(y_valid_series.to_numpy(dtype=np.float64, copy=False))
@@ -99,21 +95,8 @@ def train_lgbm_window_from_prepared_parquet(
     X_valid = valid_use.loc[:, feature_names].reset_index(drop=True)
     X_test = test_use.loc[:, feature_names].reset_index(drop=True)
 
-    opportunity_cfg = resolve_opportunity_label_cfg(cfg)
-    train_sample_weight = _build_sample_weight(
-        raw_y_train_series,
-        train_dates,
-        lgbm_config=lgbm_config,
-        opportunity_cfg=opportunity_cfg,
-        compute_opportunity_sample_weights=compute_opportunity_sample_weights,
-    )
-    valid_sample_weight = _build_sample_weight(
-        raw_y_valid_series,
-        valid_dates,
-        lgbm_config=lgbm_config,
-        opportunity_cfg=opportunity_cfg,
-        compute_opportunity_sample_weights=compute_opportunity_sample_weights,
-    )
+    train_sample_weight = _prepared_sample_weight(train_use)
+    valid_sample_weight = _prepared_sample_weight(valid_use)
 
     model = NativeLGBM(**lgbm_config)
     model_path_obj = Path(model_path)
@@ -159,10 +142,7 @@ def train_lgbm_window_from_prepared_parquet(
     saved_history_path = model.save_training_history(training_history_path_obj)
 
     importance_df = model.get_feature_importance_frame("gain")
-    valid_opportunity_labels = build_opportunity_target_series(
-        raw_y_valid_series,
-        opportunity_cfg=opportunity_cfg,
-    )
+    valid_opportunity_labels = _prepared_opportunity_labels(valid_use, valid_dates, valid_symbols)
     validation_topk = int(lgbm_config.get("validation_topk") or cfg.get("strategy", {}).get("topk") or 10)
     valid_topk_summary = _compute_validation_topk_summary(
         model.predict(X_valid),
@@ -171,7 +151,29 @@ def train_lgbm_window_from_prepared_parquet(
         topk=validation_topk,
         opportunity_labels=valid_opportunity_labels,
     )
-    train_label_transform = resolve_train_label_transform_cfg(cfg)
+    train_label_transform_mode = str(
+        window_metadata.get("train_label_transform_mode")
+        or cfg.get("label", {}).get("train_transform", {}).get("mode")
+        or "raw"
+    )
+    opportunity_mode = str(
+        window_metadata.get("opportunity_label_mode")
+        or cfg.get("label", {}).get("opportunity", {}).get("mode")
+        or "positive"
+    )
+    opportunity_threshold = float(
+        window_metadata.get(
+            "opportunity_label_threshold",
+            cfg.get("label", {}).get("opportunity", {}).get("threshold", 0.0),
+        )
+    )
+    opportunity_neutral_band = float(
+        window_metadata.get(
+            "opportunity_label_neutral_band",
+            cfg.get("label", {}).get("opportunity", {}).get("neutral_band", 0.0),
+        )
+    )
+    sample_weight_mode = str(window_metadata.get("train_sample_weight_mode") or lgbm_config.get("sample_weight_mode", "none") or "none")
     summary = {
         **window_metadata,
         "train_rows": int(len(train_use)),
@@ -192,19 +194,19 @@ def train_lgbm_window_from_prepared_parquet(
         "feature_importance_path": str(feature_importance_path_obj),
         "training_history_path": str(saved_history_path or ""),
         "importance_gain_sum": float(pd.to_numeric(importance_df["gain"], errors="coerce").sum()),
-        "train_label_transform_mode": str(train_label_transform["mode"]),
+        "train_label_transform_mode": train_label_transform_mode,
         "train_label_space": "binary_target"
-        if str(train_label_transform["mode"]).startswith("buyability")
+        if train_label_transform_mode.startswith("buyability")
         else "return_target",
         "valid_custom_metric_label_space": "raw_return",
-        "opportunity_label_mode": str(opportunity_cfg["mode"]),
-        "opportunity_label_threshold": float(opportunity_cfg["threshold"]),
-        "opportunity_label_neutral_band": float(opportunity_cfg["neutral_band"]),
-        "train_sample_weight_mode": str(lgbm_config.get("sample_weight_mode", "none") or "none"),
+        "opportunity_label_mode": opportunity_mode,
+        "opportunity_label_threshold": opportunity_threshold,
+        "opportunity_label_neutral_band": opportunity_neutral_band,
+        "train_sample_weight_mode": sample_weight_mode,
         **valid_topk_summary,
         **model.get_training_summary(),
     }
-    return summary
+    return _json_safe(summary)
 
 
 def _finite_feature_mask(frame: pd.DataFrame, feature_names: list[str]) -> np.ndarray:
@@ -229,27 +231,20 @@ def _build_label_series(values: pd.Series, dates: pd.Series, symbols: pd.Series)
     return pd.Series(pd.to_numeric(values, errors="coerce").to_numpy(dtype=float), index=index, name="label")
 
 
-def _build_sample_weight(
-    labels: pd.Series,
-    dates: pd.Series,
-    *,
-    lgbm_config: dict[str, Any],
-    opportunity_cfg: dict[str, Any],
-    compute_opportunity_sample_weights: Any,
-) -> pd.Series | None:
-    sample_weight_mode = str(lgbm_config.get("sample_weight_mode", "none") or "none").strip().lower()
-    if sample_weight_mode == "none":
+def _prepared_sample_weight(frame: pd.DataFrame) -> pd.Series | None:
+    if "sample_weight" not in frame.columns:
         return None
-    return compute_opportunity_sample_weights(
-        labels,
-        dates,
-        opportunity_cfg=opportunity_cfg,
-        sample_weight_mode=sample_weight_mode,
-        sample_weight_power=float(lgbm_config.get("sample_weight_power", 1.0)),
-        sample_weight_scale=lgbm_config.get("sample_weight_scale"),
-        sample_weight_min=float(lgbm_config.get("sample_weight_min", 0.0)),
-        sample_weight_date_normalize=bool(lgbm_config.get("sample_weight_date_normalize", False)),
-    )
+    values = pd.to_numeric(frame["sample_weight"], errors="coerce")
+    finite = np.isfinite(values.to_numpy(dtype=np.float64, copy=False))
+    if not bool(finite.any()):
+        return None
+    return pd.Series(values.to_numpy(dtype=np.float64, copy=False), index=frame.index, name="sample_weight")
+
+
+def _prepared_opportunity_labels(frame: pd.DataFrame, dates: pd.Series, symbols: pd.Series) -> pd.Series | None:
+    if "opportunity_label" not in frame.columns:
+        return None
+    return _build_label_series(frame["opportunity_label"], dates, symbols).rename("opportunity_label")
 
 
 def _compute_validation_topk_summary(
@@ -344,3 +339,17 @@ def _empty_validation_topk_summary() -> dict[str, float | int]:
         "valid_top1_opportunity_rate": float("nan"),
         "valid_topk_opportunity_rate": float("nan"),
     }
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _json_safe(inner) for key, inner in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(inner) for inner in value]
+    if isinstance(value, tuple):
+        return [_json_safe(inner) for inner in value]
+    if isinstance(value, np.generic):
+        return _json_safe(value.item())
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    return value

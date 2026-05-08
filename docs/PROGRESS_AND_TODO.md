@@ -448,6 +448,12 @@ Completed optimization slices:
 - [x] Finish moving experiment-sweep prediction dedupe to Rust:
   - `ai4stock-experiment batch --dedupe-predictions` now resolves the per-run prediction-producing config, fingerprints the same config surface as the old Python runner, saves predictions for the first matching run, and replays later compatible runs through `--load-predictions-dir`
   - `run_experiment_batch.py` is now a thin compatibility wrapper for `ai4stock-experiment batch`
+- [x] Move candidate-pool diagnostics to Rust:
+  - `ai4stock-diagnostics candidate-pool` now owns candidate-root scanning, preset/explicit run resolution, portfolio/yearly/concentration/bucket/validation summaries, candidate profile JSON/CSV exports, README generation, and candidate-root sync
+  - `run_candidate_pool_diagnostics.py` is now a thin compatibility wrapper; candidate-pool sync/profile behavior is covered by Rust unit tests
+- [x] Move strategy-pair diagnostics to Rust:
+  - `ai4stock-diagnostics strategy-pair` now owns two-run metric/training/bucket/monthly/daily/feature/trace-overlap comparison outputs
+  - `run_strategy_pair_diagnostics.py` is now a thin compatibility wrapper; obsolete Python candidate diagnostics/profile helper modules have been removed
 
 Feature build v2 direction:
 

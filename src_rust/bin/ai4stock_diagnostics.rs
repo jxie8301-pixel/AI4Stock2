@@ -14,8 +14,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[path = "ai4stock_diagnostics/candidate_pool.rs"]
+mod candidate_pool;
 #[path = "ai4stock_diagnostics/single_factor_batch.rs"]
 mod single_factor_batch;
+#[path = "ai4stock_diagnostics/strategy_pair.rs"]
+mod strategy_pair;
 
 fn usage() -> &'static str {
     "\
@@ -35,6 +39,8 @@ Usage:
   ai4stock-diagnostics build-robust-profile-runtime --raw-summary <CSV> --neutral-summary <CSV> --experiment-profile <NAME> --profile-name <NAME> [options]
   ai4stock-diagnostics full-space-single-factor --experiment-profile <NAME> [options]
   ai4stock-diagnostics quality-event-flow-single-factor --experiment-profile <NAME> [options]
+  ai4stock-diagnostics candidate-pool (--run NAME=DIR | --candidate-root DIR | --preset latest_slim_b_topk15) [options]
+  ai4stock-diagnostics strategy-pair --candidate-run DIR --baseline-run DIR [options]
 
 Options:
   --factor-store <PATH>       Factor-store root. Supports <root>/buckets/part-*.parquet.
@@ -278,6 +284,8 @@ fn run(args: &[String]) -> Result<(), String> {
         "quality-event-flow-single-factor" => {
             run_quality_event_flow_single_factor_command(&args[1..])
         }
+        "candidate-pool" => candidate_pool::run_candidate_pool_command(&args[1..]),
+        "strategy-pair" => strategy_pair::run_strategy_pair_command(&args[1..]),
         other => Err(format!("unknown command: {other}\n\n{}", usage())),
     }
 }

@@ -2184,9 +2184,7 @@ mod tests {
         .unwrap();
         let command = build_full_space_preset_command(&options, "raw", false);
         assert_eq!(command[0], "--config");
-        assert!(!command
-            .iter()
-            .any(|item| item.contains("run_single_factor_diagnostics_batch.py")));
+        assert!(!command.iter().any(|item| item.ends_with(".py")));
         assert!(command.contains(&"--all-features".to_owned()));
         assert!(command.contains(&"out/raw".to_owned()));
         assert!(command.contains(&"tag-raw".to_owned()));
@@ -2205,9 +2203,7 @@ mod tests {
         .unwrap();
         let command = build_quality_event_flow_preset_command(&options);
         assert_eq!(command[0], "--config");
-        assert!(!command
-            .iter()
-            .any(|item| item.contains("run_single_factor_diagnostics_batch.py")));
+        assert!(!command.iter().any(|item| item.ends_with(".py")));
         assert!(command.contains(&"--feature-profile".to_owned()));
         assert!(command.contains(&"diagnostic_label_space=benchmark_excess".to_owned()));
         assert!(command.contains(&"--dry-run".to_owned()));

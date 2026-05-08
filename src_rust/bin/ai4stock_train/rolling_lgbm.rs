@@ -302,18 +302,6 @@ fn parse_rolling_lgbm_options(args: &[String]) -> Result<RollingLgbmOptions, Str
             value if value.starts_with("--batch-size=") => {
                 batch_size = parse_usize(split_value(value, "--batch-size")?, "--batch-size")?
             }
-            "--torch-gpu" => {
-                return Err(
-                    "--torch-gpu is obsolete; active rolling-lgbm runtime only supports LightGBM"
-                        .to_owned(),
-                )
-            }
-            value if value.starts_with("--torch-gpu=") => {
-                return Err(
-                    "--torch-gpu is obsolete; active rolling-lgbm runtime only supports LightGBM"
-                        .to_owned(),
-                )
-            }
             "--load-predictions-dir" => {
                 load_predictions_dir = Some(PathBuf::from(next_arg(
                     args,
@@ -726,13 +714,6 @@ mod tests {
             Path::new("results/native_rolling_lgbm/config_snapshot.yaml"),
         );
         assert!(command.contains(&"--disable-local-store".to_owned()));
-    }
-
-    #[test]
-    fn rejects_obsolete_torch_gpu_flag() {
-        let error = parse_rolling_lgbm_options(&args(&["--torch-gpu", "0"])).unwrap_err();
-
-        assert!(error.contains("--torch-gpu is obsolete"));
     }
 
     #[test]

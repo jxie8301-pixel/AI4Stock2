@@ -94,8 +94,8 @@ fn main_result() -> Result<ExitCode, String> {
 
     let subcommand = &args[0];
     match subcommand.as_str() {
-        "run-bundle" | "rust-bundle" => run_bundle::run(&args[1..]),
-        "bundle" | "native-rolling" | "run-native-rolling" => {
+        "run-bundle" => run_bundle::run(&args[1..]),
+        "bundle" => {
             let options = parse_options(&args[1..])?;
             if options.dry_run {
                 println!(

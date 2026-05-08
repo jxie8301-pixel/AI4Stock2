@@ -396,7 +396,7 @@ cargo run --bin ai4stock-train -- rolling-lgbm \
 
 如需关闭：
 ```bash
-cargo run --bin ai4stock-train -- rolling-lgbm --experiment-profile core_v4_lgbm_default_10x20x10 --disable-local-store
+pixi run cargo run --bin ai4stock-train -- rolling-lgbm --experiment-profile core_v4_lgbm_default_10x20x10 --disable-local-store
 ```
 该模式会写入固定的非归档目录 `results/native_rolling_lgbm/`，适合临时 smoke run；正式实验建议保留默认归档目录。
 
@@ -486,20 +486,20 @@ LightGBM 的训练参数应当优先写进 model profile，而不是硬编码在
 如果只想先做配置审核，而不真正开始训练，可以单独运行 Rust 训练入口的干跑模式：
 
 ```bash
-cargo run --bin ai4stock-train -- rolling-lgbm \
+pixi run cargo run --bin ai4stock-train -- rolling-lgbm \
   --config configs/config.yaml \
   --experiment-profile core_v4_lgbm_default_10x20x10 \
   --dry-run
 ```
 
 LightGBM 训练会自动输出特征重要性：
-- 单次实验：`results/native/lgbm/feature_importance_gain.csv`
-- 滚动实验：`results/native_rolling_lgbm/feature_importance_gain_mean.csv`
+- 默认归档实验：`results/experiments/native/rolling/lgbm/<run_id>/feature_importance_gain_mean.csv`
+- `--disable-local-store` 临时实验：`results/native_rolling_lgbm/feature_importance_gain_mean.csv`
 
 ## 6. 结果分析 (Analysis)
 
-当前推荐结果目录一般为 `results/native_rolling_lgbm/`：
-- `native_monthly_heatmap.png`: 月度收益红绿矩阵图。
+当前推荐结果目录一般为 `results/experiments/native/rolling/lgbm/<run_id>/`：
+- `native_monthly_heatmap.svg`: 月度收益红绿矩阵图。
 - `native_monthly_report.csv`: **数字化月度报表**，方便 AI 进一步分析。
-- `native_cumulative_return.png`: 包含真实滑点与限制的收益曲线。
+- `native_cumulative_return.svg`: 包含真实滑点与限制的收益曲线。
 - `models/`: 存放各时间段的专家模型权重。

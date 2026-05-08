@@ -5,14 +5,15 @@ Native A-share research pipeline built around Parquet data, local feature caches
 ## Quickstart
 
 Before running training or factor generation, prepare one local normalized parquet data source first.
-The current stable path is still AkShare / Eastmoney-compatible data; Tushare usage is documented in `docs/USER_GUIDE.md`.
+The active research path is Tushare; AkShare / Eastmoney-compatible data remains available for compatibility and is documented in `docs/USER_GUIDE.md`.
 
 Generate the factor store for the active config:
 
 ```bash
 pixi run cargo run --bin ai4stock-gen-feature -- generate \
-  --parquet-dir data/processed/combined \
-  --output-dir data/factor_store/full_factor_space \
+  --parquet-dir data/tushare/source \
+  --output-dir data/factor_store/tushare_full_factor_space \
+  --data-source tushare \
   --workers 8
 ```
 

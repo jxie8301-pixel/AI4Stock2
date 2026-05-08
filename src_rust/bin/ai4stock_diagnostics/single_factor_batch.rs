@@ -530,7 +530,7 @@ pub(crate) fn run_prefilter_profile_runtime_command(args: &[String]) -> Result<(
             &date_start,
             &date_end,
             options.allow_unsafe_profile_write,
-            "run_build_prefiltered_profile.py",
+            "ai4stock-diagnostics build-prefilter-profile-runtime",
             &[
                 options.diagnostics_summary.as_ref(),
                 options.segment_comparison.as_ref(),
@@ -609,7 +609,7 @@ pub(crate) fn run_robust_profile_runtime_command(args: &[String]) -> Result<(), 
             &date_start,
             &date_end,
             options.allow_unsafe_profile_write,
-            "run_build_robust_factor_profile.py",
+            "ai4stock-diagnostics build-robust-profile-runtime",
             &[
                 options.raw_summary.as_ref(),
                 options.raw_segment_comparison.as_ref(),
@@ -3240,7 +3240,7 @@ mod tests {
             "2020-01-01",
             "2020-12-31",
             false,
-            "run_build_prefiltered_profile.py",
+            "ai4stock-diagnostics build-prefilter-profile-runtime",
             &[Some(&summary_path)],
         )
         .unwrap_err();
@@ -3263,7 +3263,7 @@ mod tests {
             "2020-01-01",
             "2020-12-31",
             false,
-            "run_build_prefiltered_profile.py",
+            "ai4stock-diagnostics build-prefilter-profile-runtime",
             &[Some(&summary_path)],
         )
         .unwrap_err();
